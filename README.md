@@ -1,6 +1,6 @@
 # Piano Transcription Server
 
-A small FastAPI service that downloads a piano performance, transcribes it to MIDI asynchronously, and returns the resulting MIDI file.
+A small FastAPI service that downloads a piano performance from online video URL, transcribes it to MIDI asynchronously, and returns the resulting MIDI file.
 
 The transcription uses [Transkun](https://github.com/Yujia-Yan/Transkun), a neural audio-to-MIDI transcription model with GPU acceleration through PyTorch/CUDA.
 
