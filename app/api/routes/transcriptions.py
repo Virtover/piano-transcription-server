@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
+from redis.exceptions import WatchError
 
 from app.config import settings
 from app.worker.tasks import (
@@ -127,6 +128,58 @@ def get_transcription(job_id: str):
         metadata=metadata,
         error=job.get("error"),
     )
+
+
+@router.delete(
+    "/{job_id}",
+    response_model=CreateTranscriptionResponse,
+)
+def cancel_transcription(job_id: str):
+    key = job_key(job_id)
+
+    while True:
+        try:
+            with redis.pipeline() as pipe:
+                pipe.watch(key)
+                job = pipe.hgetall(key)
+
+                if not job:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Transcription job not found",
+                    )
+
+                status = job.get("status", "unknown")
+
+                if status == "cancelled":
+                    return CreateTranscriptionResponse(
+                        job_id=job_id,
+                        status=status,
+                    )
+
+                if status not in {"queued", "processing"}:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Transcription is not running",
+                    )
+
+                pipe.multi()
+                pipe.hset(
+                    key,
+                    mapping={
+                        "status": "cancelled",
+                        "error": "Transcription cancelled",
+                        "progress": job.get("progress", "0.0"),
+                    },
+                )
+                pipe.expire(key, 60 * 60)
+                pipe.execute()
+                return CreateTranscriptionResponse(
+                    job_id=job_id,
+                    status="cancelled",
+                )
+        except WatchError:
+            continue
 
 
 @router.get("/{job_id}/midi")

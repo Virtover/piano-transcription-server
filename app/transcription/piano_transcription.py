@@ -11,6 +11,7 @@ import soxr
 import torch
 import torch.nn.functional as F
 
+from app.transcription.cancellation import TranscriptionCancelled
 from transkun.Data import writeMidi
 from transkun.ModelTransformer import (
     makeFrame,
@@ -19,6 +20,7 @@ from transkun.ModelTransformer import (
 
 
 ProgressCallback = Callable[[float], None]
+CancellationCallback = Callable[[], bool]
 
 
 def read_audio(
@@ -117,6 +119,7 @@ def transcribe_audio(
     model,
     audio: np.ndarray,
     progress_callback: ProgressCallback | None = None,
+    cancellation_callback: CancellationCallback | None = None,
 ):
     """
     Transcribe audio using the same segment processing logic
@@ -205,6 +208,9 @@ def transcribe_audio(
         segment_starts,
         start=1,
     ):
+        if cancellation_callback and cancellation_callback():
+            raise TranscriptionCancelled()
+
         # Report progress BEFORE starting the expensive
         # inference for this segment.
         #
@@ -358,6 +364,7 @@ def transcribe_piano(
     audio_path: Path,
     output_path: Path,
     progress_callback: ProgressCallback | None = None,
+    cancellation_callback: CancellationCallback | None = None,
 ):
     """
     Transcribe one WAV file to MIDI.
@@ -372,10 +379,16 @@ def transcribe_piano(
 
     device = select_device()
 
+    if cancellation_callback and cancellation_callback():
+        raise TranscriptionCancelled()
+
     if progress_callback:
         progress_callback(0.02)
 
     model = load_model(device)
+
+    if cancellation_callback and cancellation_callback():
+        raise TranscriptionCancelled()
 
     if progress_callback:
         progress_callback(0.10)
@@ -383,6 +396,9 @@ def transcribe_piano(
     sample_rate, audio = read_audio(
         audio_path
     )
+
+    if cancellation_callback and cancellation_callback():
+        raise TranscriptionCancelled()
 
     if sample_rate != model.fs:
         audio = soxr.resample(
@@ -414,6 +430,7 @@ def transcribe_piano(
         model=model,
         audio=audio,
         progress_callback=report_progress,
+        cancellation_callback=cancellation_callback,
     )
 
     if progress_callback:

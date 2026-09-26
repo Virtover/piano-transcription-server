@@ -186,8 +186,21 @@ Possible statuses are:
 * `processing`
 * `completed`
 * `failed`
+* `cancelled`
 
-Poll until the status is `completed` or `failed`:
+### Cancel a transcription
+
+Cancel a queued or processing job with:
+
+```powershell
+Invoke-RestMethod `
+  -Method Delete `
+  -Uri "http://localhost:8000/api/transcriptions/$($job.job_id)"
+```
+
+The endpoint returns the `cancelled` status. The worker stops active audio download, conversion, and transcription work as soon as the current subprocess or model segment can be interrupted, and removes partial job files. Cancelling a completed or failed job returns `409`.
+
+Poll until the status is `completed`, `failed`, or `cancelled`:
 
 ```powershell
 do {
@@ -196,7 +209,7 @@ do {
 
     $status
 
-    if ($status.status -in @('completed', 'failed')) {
+    if ($status.status -in @('completed', 'failed', 'cancelled')) {
         break
     }
 

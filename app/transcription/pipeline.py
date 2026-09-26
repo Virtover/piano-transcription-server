@@ -1,9 +1,12 @@
 import json
+import os
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app.transcription.cancellation import TranscriptionCancelled
 from app.transcription.piano_transcription import (
     transcribe_piano,
 )
@@ -11,6 +14,7 @@ from app.transcription.piano_transcription import (
 
 ProgressCallback = Callable[[float], None]
 MetadataCallback = Callable[[dict[str, Any]], None]
+CancellationCallback = Callable[[], bool]
 
 
 @dataclass
@@ -22,12 +26,13 @@ class DownloadedAudio:
 def download_audio(
     source_url: str,
     output_dir: Path,
+    cancellation_callback: CancellationCallback | None = None,
 ) -> DownloadedAudio:
     output_template = str(
         output_dir / "download.%(ext)s"
     )
 
-    result = subprocess.run(
+    result = run_process(
         [
             "yt-dlp",
             "--print-json",
@@ -38,9 +43,7 @@ def download_audio(
             output_template,
             source_url,
         ],
-        check=True,
-        capture_output=True,
-        text=True,
+        cancellation_callback=cancellation_callback,
     )
 
     json_lines = [
@@ -82,7 +85,7 @@ def download_audio(
 
     wav_path = output_dir / "audio.wav"
 
-    subprocess.run(
+    run_process(
         [
             "ffmpeg",
             "-y",
@@ -94,9 +97,7 @@ def download_audio(
             "1",
             str(wav_path),
         ],
-        check=True,
-        capture_output=True,
-        text=True,
+        cancellation_callback=cancellation_callback,
     )
 
     downloaded_path.unlink()
@@ -126,16 +127,70 @@ def format_upload_date(value: str | None) -> str | None:
     return f"{value[:4]}-{value[4:6]}-{value[6:]}"
 
 
+def run_process(
+    command: list[str],
+    cancellation_callback: CancellationCallback | None = None,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=os.name != "nt",
+    )
+
+    while True:
+        if cancellation_callback and cancellation_callback():
+            if os.name == "nt":
+                process.terminate()
+            else:
+                os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                if os.name == "nt":
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+            raise TranscriptionCancelled()
+
+        try:
+            stdout, stderr = process.communicate(timeout=0.5)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+
+    if process.returncode:
+        raise subprocess.CalledProcessError(
+            process.returncode,
+            command,
+            output=stdout,
+            stderr=stderr,
+        )
+
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout,
+        stderr,
+    )
+
+
 def transcribe_source(
     source_url: str,
     output_dir: Path,
     progress_callback: ProgressCallback | None = None,
     metadata_callback: MetadataCallback | None = None,
+    cancellation_callback: CancellationCallback | None = None,
 ) -> Path:
     output_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
+
+    if cancellation_callback and cancellation_callback():
+        raise TranscriptionCancelled()
 
     if progress_callback:
         progress_callback(0.05)
@@ -143,6 +198,7 @@ def transcribe_source(
     downloaded = download_audio(
         source_url,
         output_dir,
+        cancellation_callback=cancellation_callback,
     )
 
     if metadata_callback:
@@ -157,6 +213,7 @@ def transcribe_source(
         audio_path=downloaded.path,
         output_path=midi_path,
         progress_callback=progress_callback,
+        cancellation_callback=cancellation_callback,
     )
 
     if not midi_path.exists():
