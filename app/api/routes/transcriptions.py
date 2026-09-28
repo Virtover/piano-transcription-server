@@ -10,6 +10,7 @@ from redis.exceptions import WatchError
 
 from app.config import settings
 from app.worker.tasks import (
+    JOB_TTL,
     job_key,
     transcribe_job,
 )
@@ -172,7 +173,7 @@ def cancel_transcription(job_id: str):
                         "progress": job.get("progress", "0.0"),
                     },
                 )
-                pipe.expire(key, 60 * 60)
+                pipe.expire(key, JOB_TTL)
                 pipe.execute()
                 return CreateTranscriptionResponse(
                     job_id=job_id,

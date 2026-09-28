@@ -17,6 +17,18 @@ MetadataCallback = Callable[[dict[str, Any]], None]
 CancellationCallback = Callable[[], bool]
 
 
+AUDIO_FILE_SUFFIXES = {
+    ".aac",
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".webm",
+}
+
+
 @dataclass
 class DownloadedAudio:
     path: Path
@@ -127,6 +139,18 @@ def format_upload_date(value: str | None) -> str | None:
     return f"{value[:4]}-{value[4:6]}-{value[6:]}"
 
 
+def remove_audio_files(output_dir: Path) -> None:
+    for path in output_dir.iterdir():
+        if (
+            path.is_file()
+            and (
+                path.name.startswith("download.")
+                or path.suffix.lower() in AUDIO_FILE_SUFFIXES
+            )
+        ):
+            path.unlink(missing_ok=True)
+
+
 def run_process(
     command: list[str],
     cancellation_callback: CancellationCallback | None = None,
@@ -195,40 +219,43 @@ def transcribe_source(
     if progress_callback:
         progress_callback(0.05)
 
-    downloaded = download_audio(
-        source_url,
-        output_dir,
-        cancellation_callback=cancellation_callback,
-    )
-
-    if metadata_callback:
-        metadata_callback(downloaded.metadata)
-
-    midi_path = (
-        output_dir
-        / "transcription.mid"
-    )
-
-    transcribe_piano(
-        audio_path=downloaded.path,
-        output_path=midi_path,
-        progress_callback=progress_callback,
-        cancellation_callback=cancellation_callback,
-    )
-
-    if not midi_path.exists():
-        raise RuntimeError(
-            "Piano transcription did not "
-            "produce a MIDI file"
+    try:
+        downloaded = download_audio(
+            source_url,
+            output_dir,
+            cancellation_callback=cancellation_callback,
         )
 
-    if midi_path.stat().st_size == 0:
-        raise RuntimeError(
-            "Piano transcription produced "
-            "an empty MIDI file"
+        if metadata_callback:
+            metadata_callback(downloaded.metadata)
+
+        midi_path = (
+            output_dir
+            / "transcription.mid"
         )
 
-    if progress_callback:
-        progress_callback(1.0)
+        transcribe_piano(
+            audio_path=downloaded.path,
+            output_path=midi_path,
+            progress_callback=progress_callback,
+            cancellation_callback=cancellation_callback,
+        )
 
-    return midi_path
+        if not midi_path.exists():
+            raise RuntimeError(
+                "Piano transcription did not "
+                "produce a MIDI file"
+            )
+
+        if midi_path.stat().st_size == 0:
+            raise RuntimeError(
+                "Piano transcription produced "
+                "an empty MIDI file"
+            )
+
+        if progress_callback:
+            progress_callback(1.0)
+
+        return midi_path
+    finally:
+        remove_audio_files(output_dir)
