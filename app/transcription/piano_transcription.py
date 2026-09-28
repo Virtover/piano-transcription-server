@@ -371,7 +371,7 @@ def transcribe_piano(
 
     Progress range:
 
-        0.00 - 0.10   model loading
+        0.07 - 0.10   model loading
         0.10 - 0.15   audio loading
         0.15 - 0.95   Transkun segment processing
         0.95 - 1.00   MIDI writing
@@ -383,7 +383,7 @@ def transcribe_piano(
         raise TranscriptionCancelled()
 
     if progress_callback:
-        progress_callback(0.02)
+        progress_callback(0.07)
 
     model = load_model(device)
 
