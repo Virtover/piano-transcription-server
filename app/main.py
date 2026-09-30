@@ -3,14 +3,23 @@ from fastapi import HTTPException
 from redis import Redis
 
 from app.api.routes.transcriptions import router
+from app.api.routes.billing import router as billing_router, server_info
 from app.config import settings
+from app.google_play import sync_products
 
 app = FastAPI(
     title="Piano Transcription Server",
-    version="0.1.0",
+    version="0.2.0",
 )
 
 app.include_router(router, prefix="/api")
+app.include_router(billing_router, prefix="/api")
+app.add_api_route("/api/server-info", server_info, methods=["GET"], include_in_schema=False)
+
+
+@app.on_event("startup")
+def sync_billing_catalog() -> None:
+    sync_products()
 
 
 @app.get("/health")

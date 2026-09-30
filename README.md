@@ -251,6 +251,14 @@ The generated MIDI contains both detected note events and detected MIDI control-
 
 Completed and failed jobs are retained for a limited time and are then automatically removed.
 
+### Billing and server information
+
+`GET /api/server-info` returns the billing provider, currently offered products, cleanup interval, free-minute policy, and maximum video length. `GET /api/billing/cost?source_url=...` retrieves the video duration and transcription cost before submitting a job. `GET /api/billing/balance` returns the balance for the `X-User-Id` request header, together with `free_minutes_seconds_until_next_grant` and `free_minutes_next_grant_at`. These fields are `null` when billing is disabled.
+
+When Google Play billing is enabled, verify a completed consumable purchase with `POST /api/billing/google-play/verify` and a body containing `product_id` and `purchase_token`. The server verifies the purchase with Google Play and credits the configured transcription minutes once per purchase token.
+
+User balances, purchases, and transcription reservations are stored in the SQLite database at `BILLING_DATABASE_PATH`. A transcription reserves its estimated full cost when queued. Minutes are deducted only after successful completion or cancellation; a failed job releases its reservation.
+
 ## Configuration
 
 Settings are read from environment variables or `.env`:
@@ -259,6 +267,17 @@ Settings are read from environment variables or `.env`:
 | ----------- | -------------------------- | ------------------------------ |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL           |
 | `DATA_DIR`  | `/data`                    | Directory for job output files |
+| `BILLING_DATABASE_PATH` | `/data/billing.sqlite3` | Shared SQLite billing database |
+| `CLEANUP_INTERVAL_SECONDS` | `600` | Cleanup scan interval |
+| `BILLING_PROVIDER` | `none` | `none` or `google_play` |
+| `BILLING_PRODUCTS` | `{}` | JSON mapping of Google Play product IDs to transcription minutes |
+| `FREE_MINUTES_PERIOD` | `30d` | Free-credit interval, using `s`, `m`, `h`, `d`, or `w` |
+| `FREE_MINUTES` | `10` | Free minutes granted per interval |
+| `MAX_VIDEO_LENGTH_MINUTES` | unset | Maximum accepted video length; unset means no limit |
+| `GOOGLE_PLAY_PACKAGE_NAME` | unset | Android application package for Google Play verification |
+| `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` | unset | Service-account JSON filename inside the mounted `./secrets` directory |
+
+For a complete Google Play configuration example, see `.env.google-play.example`. `BILLING_PRODUCTS` maps exact Google Play product IDs to the number of transcription minutes credited after a verified purchase, for example `{"piano_minutes_60":60}`. Compose automatically mounts the local `./secrets` directory into the API and worker at `/run/secrets`; place the service-account JSON there and enable billing by copying the example settings into `.env`.
 
 Docker Compose overrides these values to use the Redis service and the shared `/data` volume.
 
@@ -320,7 +339,7 @@ A separate cleanup service periodically scans the jobs directory. If the corresp
 
 The cleanup process runs independently from the transcription worker.
 
-The cleanup interval is currently 10 minutes, so files may remain for a short period after their one-hour retention period expires.
+The cleanup interval is controlled by `CLEANUP_INTERVAL_SECONDS` (600 seconds by default), so files may remain for a short period after their one-hour retention period expires.
 
 ## Development checks
 

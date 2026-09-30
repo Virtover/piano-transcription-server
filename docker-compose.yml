@@ -10,6 +10,7 @@ services:
       - .env
     volumes:
       - data:${DATA_DIR}
+      - ./secrets:/run/secrets:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -22,6 +23,7 @@ services:
       - .env
     volumes:
       - data:${DATA_DIR}
+      - ./secrets:/run/secrets:ro
     depends_on:
       redis:
         condition: service_healthy

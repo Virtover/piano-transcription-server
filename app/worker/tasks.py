@@ -8,6 +8,7 @@ from redis import Redis
 from redis.exceptions import WatchError
 
 from app.config import settings
+from app.billing import Billing, cancelled_cost
 from app.transcription.cancellation import TranscriptionCancelled
 
 
@@ -25,6 +26,7 @@ redis = Redis.from_url(
     settings.redis_url,
     decode_responses=True,
 )
+billing = Billing()
 
 
 def job_key(job_id: str) -> str:
@@ -148,8 +150,14 @@ def transcribe_job(job_id: str, source_url: str):
             raise TranscriptionCancelled()
 
         complete_job(job_id, midi_path)
+        billing.settle_success(job_id)
 
     except TranscriptionCancelled:
+        job = redis.hgetall(job_key(job_id))
+        if job.get("user_id"):
+            charged = int(job.get("full_cost", 0))
+            progress = float(job.get("progress", 0))
+            billing.settle_cancellation(job_id, cancelled_cost(charged, progress))
         shutil.rmtree(output_dir, ignore_errors=True)
         update_job(
             job_id,
@@ -160,6 +168,9 @@ def transcribe_job(job_id: str, source_url: str):
             JOB_TTL,
         )
     except Exception as e:
+        job = redis.hgetall(job_key(job_id))
+        if job.get("user_id"):
+            billing.release(job_id)
         update_job(
             job_id,
             status="failed",

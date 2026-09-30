@@ -2,13 +2,15 @@ import json
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
 from redis.exceptions import WatchError
 
 from app.config import settings
+from app.billing import Billing, cancelled_cost, transcription_cost, InsufficientMinutes
+from app.api.routes.billing import video_duration
 from app.worker.tasks import (
     JOB_TTL,
     job_key,
@@ -25,6 +27,7 @@ redis = Redis.from_url(
     settings.redis_url,
     decode_responses=True,
 )
+billing = Billing()
 
 
 class CreateTranscriptionRequest(BaseModel):
@@ -66,8 +69,20 @@ class TranscriptionStatusResponse(BaseModel):
 )
 def create_transcription(
     request: CreateTranscriptionRequest,
+    x_user_id: str | None = Header(default=None),
 ):
+    current_user = x_user_id or "anonymous"
+    duration = video_duration(request.source_url)
+    cost = transcription_cost(duration)
     job_id = str(uuid.uuid4())
+    billing.grant_free_minutes(current_user)
+    try:
+        billing.reserve(current_user, job_id, cost)
+    except InsufficientMinutes as error:
+        raise HTTPException(
+            status_code=402,
+            detail={"message": "Insufficient transcription minutes", "required_minutes": cost},
+        ) from error
 
     redis.hset(
         job_key(job_id),
@@ -75,6 +90,9 @@ def create_transcription(
             "status": "queued",
             "progress": "0.0",
             "source_url": str(request.source_url),
+            "user_id": current_user,
+            "duration": str(duration),
+            "full_cost": str(cost),
         },
     )
 
@@ -85,6 +103,7 @@ def create_transcription(
         )
     except Exception as error:
         redis.delete(job_key(job_id))
+        billing.release(job_id)
         raise HTTPException(
             status_code=503,
             detail="The transcription worker is unavailable",
@@ -175,6 +194,12 @@ def cancel_transcription(job_id: str):
                 )
                 pipe.expire(key, JOB_TTL)
                 pipe.execute()
+                user = job.get("user_id")
+                charged = int(job.get("full_cost", 0))
+                progress = float(job.get("progress", 0))
+                if user:
+                    final_cost = cancelled_cost(charged, progress)
+                    billing.settle_cancellation(job_id, final_cost)
                 return CreateTranscriptionResponse(
                     job_id=job_id,
                     status="cancelled",
