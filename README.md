@@ -255,7 +255,65 @@ Completed and failed jobs are retained for a limited time and are then automatic
 
 `GET /api/server-info` returns the billing provider, currently offered products, cleanup interval, free-minute policy, and maximum video length. `GET /api/billing/cost?source_url=...` retrieves the video duration and transcription cost before submitting a job. `GET /api/billing/balance` returns the balance for the `X-User-Id` request header, together with `free_minutes_seconds_until_next_grant` and `free_minutes_next_grant_at`. These fields are `null` when billing is disabled.
 
+Get server and billing configuration:
+
+```powershell
+$serverInfo = Invoke-RestMethod `
+  -Uri http://localhost:8000/api/server-info
+
+$serverInfo
+```
+
+Get the transcription cost for a video before creating a job:
+
+```powershell
+$sourceUrl = 'https://example.com/video'
+$encodedUrl = [uri]::EscapeDataString($sourceUrl)
+
+$cost = Invoke-RestMethod `
+  -Uri "http://localhost:8000/api/billing/cost?source_url=$encodedUrl"
+
+$cost
+# duration_seconds and cost_minutes
+```
+
+Get a user balance and the time remaining until the next free-minute giveaway:
+
+```powershell
+$userId = 'user-123'
+
+$balance = Invoke-RestMethod `
+  -Uri http://localhost:8000/api/billing/balance `
+  -Headers @{ 'X-User-Id' = $userId }
+
+$balance
+# minutes
+# free_minutes_seconds_until_next_grant
+# free_minutes_next_grant_at (Unix timestamp)
+```
+
 When Google Play billing is enabled, verify a completed consumable purchase with `POST /api/billing/google-play/verify` and a body containing `product_id` and `purchase_token`. The server verifies the purchase with Google Play and credits the configured transcription minutes once per purchase token.
+
+After the Android application completes a Google Play purchase, send the product ID and purchase token to the server. The purchase token is supplied by Google Play and must not be replaced with the product ID:
+
+```powershell
+$purchase = @{
+    product_id = 'piano_minutes_60'
+    purchase_token = '<token-returned-by-google-play>'
+} | ConvertTo-Json
+
+$credit = Invoke-RestMethod `
+  -Method Post `
+  -Uri http://localhost:8000/api/billing/google-play/verify `
+  -Headers @{ 'X-User-Id' = 'user-123' } `
+  -ContentType 'application/json' `
+  -Body $purchase
+
+$credit
+# credited_minutes and the resulting minutes balance
+```
+
+Submitting the same purchase token again returns `credited_minutes: 0`; each purchase is credited only once.
 
 User balances, purchases, and transcription reservations are stored in the SQLite database at `BILLING_DATABASE_PATH`. A transcription reserves its estimated full cost when queued. Minutes are deducted only after successful completion or cancellation; a failed job releases its reservation.
 
