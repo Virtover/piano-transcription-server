@@ -264,6 +264,24 @@ $serverInfo = Invoke-RestMethod `
 $serverInfo
 ```
 
+Example response:
+
+```json
+{
+  "billing_provider": "google_play",
+  "offers": [
+    {
+      "product_id": "piano_minutes_60",
+      "transcription_minutes": 60
+    }
+  ],
+  "cleanup_interval_seconds": 600,
+  "max_video_length_minutes": 120,
+  "free_minutes": 10,
+  "free_minutes_period": "30d"
+}
+```
+
 Get the transcription cost for a video before creating a job:
 
 ```powershell
@@ -275,6 +293,15 @@ $cost = Invoke-RestMethod `
 
 $cost
 # duration_seconds and cost_minutes
+```
+
+Example response:
+
+```json
+{
+  "duration_seconds": 245.0,
+  "cost_minutes": 4
+}
 ```
 
 Get a user balance and the time remaining until the next free-minute giveaway:
@@ -290,6 +317,17 @@ $balance
 # minutes
 # free_minutes_seconds_until_next_grant
 # free_minutes_next_grant_at (Unix timestamp)
+```
+
+Example response:
+
+```json
+{
+  "user_id": "user-123",
+  "minutes": 10,
+  "free_minutes_seconds_until_next_grant": 2592000,
+  "free_minutes_next_grant_at": 1791052800
+}
 ```
 
 When Google Play billing is enabled, verify a completed consumable purchase with `POST /api/billing/google-play/verify` and a body containing `product_id` and `purchase_token`. The server verifies the purchase with Google Play and credits the configured transcription minutes once per purchase token.
@@ -311,6 +349,16 @@ $credit = Invoke-RestMethod `
 
 $credit
 # credited_minutes and the resulting minutes balance
+```
+
+Example response:
+
+```json
+{
+  "user_id": "user-123",
+  "credited_minutes": 60,
+  "minutes": 70
+}
 ```
 
 Submitting the same purchase token again returns `credited_minutes: 0`; each purchase is credited only once.
