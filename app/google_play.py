@@ -18,6 +18,38 @@ def service_account_file_path() -> str:
     return str(Path("/run/secrets") / configured_path.name)
 
 
+def _list_product_ids(service) -> set[str]:
+    product_endpoints = [
+        (service.inappproducts().list, "inappproduct"),
+        (service.monetization().oneTimeProducts().list, "oneTimeProducts"),
+    ]
+    errors = []
+
+    for list_products, response_key in product_endpoints:
+        try:
+            products = set()
+            page_token = None
+            while True:
+                arguments = {"packageName": settings.google_play_package_name}
+                if page_token:
+                    arguments["token"] = page_token
+                response = list_products(**arguments).execute()
+                products.update(
+                    product.get("productId") or product.get("sku")
+                    for product in response.get(response_key, [])
+                    if product.get("productId") or product.get("sku")
+                )
+                page_token = response.get("nextPageToken")
+                if not page_token:
+                    break
+            if products:
+                return products
+        except Exception as error:
+            errors.append(error)
+
+    raise RuntimeError("; ".join(str(error) for error in errors))
+
+
 def sync_products() -> None:
     global synced_products
 
@@ -37,28 +69,11 @@ def sync_products() -> None:
             scopes=["https://www.googleapis.com/auth/androidpublisher"],
         )
         service = build("androidpublisher", "v3", credentials=credentials)
-        response = service.monetization().managedproducts().list(
-            packageName=settings.google_play_package_name,
-        ).execute()
-        products = {
-            product["productId"]
-            for product in response.get("managedProducts", [])
-            if product.get("productId")
-        }
-    except Exception:
-        try:
-            response = service.monetization().oneTimeProducts().list(
-                packageName=settings.google_play_package_name,
-            ).execute()
-            products = {
-                product["productId"]
-                for product in response.get("oneTimeProducts", [])
-                if product.get("productId")
-            }
-        except Exception as error:
-            synced_products = set()
-            logger.warning("Could not sync Google Play products: %s", error)
-            return
+        products = _list_product_ids(service)
+    except Exception as error:
+        synced_products = set()
+        logger.warning("Could not sync Google Play products: %s", error)
+        return
 
     synced_products = products
 

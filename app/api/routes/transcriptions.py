@@ -37,6 +37,7 @@ class CreateTranscriptionRequest(BaseModel):
 class CreateTranscriptionResponse(BaseModel):
     job_id: str
     status: str
+    minutes: int | None = None
 
 
 class TranscriptionMetadataResponse(BaseModel):
@@ -60,6 +61,14 @@ class TranscriptionStatusResponse(BaseModel):
     title: str | None = None
     metadata: TranscriptionMetadataResponse | None = None
     error: str | None = None
+    minutes: int | None = None
+
+
+def current_user_balance(user_id: str | None) -> int | None:
+    if settings.billing_provider == "none" or not user_id:
+        return None
+    billing.grant_free_minutes(user_id)
+    return billing.get_balance(user_id)
 
 
 @router.post(
@@ -75,7 +84,7 @@ def create_transcription(
     duration = video_duration(request.source_url)
     cost = transcription_cost(duration)
     job_id = str(uuid.uuid4())
-    billing.grant_free_minutes(current_user)
+    current_balance = current_user_balance(current_user)
     try:
         billing.reserve(current_user, job_id, cost)
     except InsufficientMinutes as error:
@@ -112,6 +121,7 @@ def create_transcription(
     return CreateTranscriptionResponse(
         job_id=job_id,
         status="queued",
+        minutes=current_balance,
     )
 
 
@@ -147,6 +157,7 @@ def get_transcription(job_id: str):
         title=job.get("title"),
         metadata=metadata,
         error=job.get("error"),
+        minutes=current_user_balance(job.get("user_id")),
     )
 
 
@@ -175,6 +186,7 @@ def cancel_transcription(job_id: str):
                     return CreateTranscriptionResponse(
                         job_id=job_id,
                         status=status,
+                        minutes=current_user_balance(job.get("user_id")),
                     )
 
                 if status not in {"queued", "processing"}:
@@ -203,6 +215,7 @@ def cancel_transcription(job_id: str):
                 return CreateTranscriptionResponse(
                     job_id=job_id,
                     status="cancelled",
+                    minutes=current_user_balance(user),
                 )
         except WatchError:
             continue

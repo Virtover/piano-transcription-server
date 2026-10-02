@@ -152,6 +152,7 @@ The status response contains:
 * `title` — the source video title, once retrieved
 * `metadata` with the available author, channel, upload date, duration, thumbnail, URL, view count, and like count
 * `error` when processing fails
+* `minutes` — the current user balance when billing is enabled; `null` otherwise
 
 Example:
 
@@ -174,6 +175,7 @@ Example:
     "view_count": 12345,
     "like_count": 321
   },
+  "minutes": 6,
   "error": null
 }
 ```
@@ -198,7 +200,7 @@ Invoke-RestMethod `
   -Uri "http://localhost:8000/api/transcriptions/$($job.job_id)"
 ```
 
-The endpoint returns the `cancelled` status. The worker stops active audio download, conversion, and transcription work as soon as the current subprocess or model segment can be interrupted, and removes partial job files. Cancelling a completed or failed job returns `409`.
+The endpoint returns the `cancelled` status and the current user balance in `minutes` when billing is enabled. The worker stops active audio download, conversion, and transcription work as soon as the current subprocess or model segment can be interrupted, and removes partial job files. Cancelling a completed or failed job returns `409`.
 
 Poll until the status is `completed`, `failed`, or `cancelled`:
 
@@ -225,6 +227,20 @@ A completed response looks like:
   "status": "completed",
   "progress": 1.0,
   "title": "River Flows in You - Yiruma",
+  "metadata": {
+    "title": "River Flows in You - Yiruma",
+    "author": "Piano Channel",
+    "channel": "Piano Channel",
+    "channel_id": "UC...",
+    "channel_url": "https://example.com/channel/UC...",
+    "upload_date": "2026-01-25",
+    "duration": 245.0,
+    "thumbnail": "https://example.com/thumbnail.jpg",
+    "webpage_url": "https://example.com/video",
+    "view_count": 12345,
+    "like_count": 321
+  },
+  "minutes": 6,
   "error": null
 }
 ```
