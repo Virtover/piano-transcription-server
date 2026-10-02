@@ -2,6 +2,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -217,6 +218,8 @@ def transcribe_source(
         raise TranscriptionCancelled()
 
     if progress_callback:
+        progress_callback(0.03)
+        time.sleep(2)
         progress_callback(0.05)
 
     try:

@@ -106,6 +106,7 @@ def transcribe_job(job_id: str, source_url: str):
         )
 
         if is_job_cancelled(job_id):
+            billing.settle_cancellation(job_id, 0)
             return
 
         update_job(
