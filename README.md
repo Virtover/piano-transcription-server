@@ -280,6 +280,14 @@ $serverInfo = Invoke-RestMethod `
 $serverInfo
 ```
 
+When Google Play billing is enabled, the product catalog is synchronized once when the API starts. There is currently no on-demand sync endpoint. After adding or changing products in Google Play Console, restart the API to refresh the catalog:
+
+```powershell
+docker compose restart api
+```
+
+The updated products are then visible through `GET /api/server-info`.
+
 Example response:
 
 ```json
