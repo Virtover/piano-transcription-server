@@ -19,35 +19,22 @@ def service_account_file_path() -> str:
 
 
 def _list_product_ids(service) -> set[str]:
-    product_endpoints = [
-        (service.inappproducts().list, "inappproduct"),
-        (service.monetization().oneTimeProducts().list, "oneTimeProducts"),
-    ]
-    errors = []
+    products = set()
+    page_token = None
 
-    for list_products, response_key in product_endpoints:
-        try:
-            products = set()
-            page_token = None
-            while True:
-                arguments = {"packageName": settings.google_play_package_name}
-                if page_token:
-                    arguments["token"] = page_token
-                response = list_products(**arguments).execute()
-                products.update(
-                    product.get("productId") or product.get("sku")
-                    for product in response.get(response_key, [])
-                    if product.get("productId") or product.get("sku")
-                )
-                page_token = response.get("nextPageToken")
-                if not page_token:
-                    break
-            if products:
-                return products
-        except Exception as error:
-            errors.append(error)
-
-    raise RuntimeError("; ".join(str(error) for error in errors))
+    while True:
+        arguments = {"packageName": settings.google_play_package_name}
+        if page_token:
+            arguments["pageToken"] = page_token
+        response = service.monetization().onetimeproducts().list(**arguments).execute()
+        products.update(
+            product["productId"]
+            for product in response.get("oneTimeProducts", [])
+            if product.get("productId")
+        )
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            return products
 
 
 def sync_products() -> None:
