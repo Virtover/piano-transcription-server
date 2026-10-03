@@ -28,6 +28,12 @@ redis = Redis.from_url(
     decode_responses=True,
 )
 billing = Billing()
+transcription_submissions_enabled = False
+
+
+def enable_transcription_submissions() -> None:
+    global transcription_submissions_enabled
+    transcription_submissions_enabled = True
 
 
 class CreateTranscriptionRequest(BaseModel):
@@ -80,6 +86,12 @@ def create_transcription(
     request: CreateTranscriptionRequest,
     x_user_id: str | None = Header(default=None),
 ):
+    if not transcription_submissions_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="The transcription server is still starting",
+        )
+
     current_user = x_user_id or "anonymous"
     duration = video_duration(request.source_url)
     cost = transcription_cost(duration)

@@ -46,18 +46,44 @@ def update_job(job_id: str, **values):
 
 
 def is_job_cancelled(job_id: str) -> bool:
-    return redis.hget(job_key(job_id), "status") == "cancelled"
+    return redis.hget(job_key(job_id), "status") != "processing"
 
 
-def complete_job(job_id: str, result: Path) -> None:
+def claim_job(job_id: str) -> bool:
     key = job_key(job_id)
 
     while True:
         try:
             with redis.pipeline() as pipe:
                 pipe.watch(key)
-                if pipe.hget(key, "status") == "cancelled":
+                if pipe.hget(key, "status") != "queued":
+                    return False
+                pipe.multi()
+                pipe.hset(
+                    key,
+                    mapping={
+                        "status": "processing",
+                        "progress": "0.0",
+                    },
+                )
+                pipe.execute()
+                return True
+        except WatchError:
+            continue
+
+
+def complete_job(job_id: str, result: Path) -> bool:
+    key = job_key(job_id)
+
+    while True:
+        try:
+            with redis.pipeline() as pipe:
+                pipe.watch(key)
+                status = pipe.hget(key, "status")
+                if status == "cancelled":
                     raise TranscriptionCancelled()
+                if status != "processing":
+                    return False
 
                 pipe.multi()
                 pipe.hset(
@@ -70,7 +96,7 @@ def complete_job(job_id: str, result: Path) -> None:
                 )
                 pipe.expire(key, JOB_TTL)
                 pipe.execute()
-                return
+                return True
         except WatchError:
             continue
 
@@ -92,6 +118,38 @@ def cleanup_expired_jobs():
             print(f"Removed expired job: {job_id}")
 
 
+def fail_active_jobs(reason: str) -> None:
+    for key in redis.scan_iter(match="transcription:*"):
+        while True:
+            try:
+                with redis.pipeline() as pipe:
+                    pipe.watch(key)
+                    job = pipe.hgetall(key)
+                    if job.get("status") not in {"queued", "processing"}:
+                        break
+                    pipe.multi()
+                    pipe.hset(
+                        key,
+                        mapping={
+                            "status": "failed",
+                            "error": reason,
+                        },
+                    )
+                    pipe.expire(key, JOB_TTL)
+                    pipe.execute()
+                    if job.get("user_id"):
+                        billing.release(key.removeprefix("transcription:"))
+                    shutil.rmtree(
+                        Path(settings.data_dir)
+                        / "jobs"
+                        / key.removeprefix("transcription:"),
+                        ignore_errors=True,
+                    )
+                    break
+            except WatchError:
+                continue
+
+
 @dramatiq.actor
 def transcribe_job(job_id: str, source_url: str):
     output_dir = (
@@ -105,15 +163,8 @@ def transcribe_job(job_id: str, source_url: str):
             transcribe_source,
         )
 
-        if is_job_cancelled(job_id):
-            billing.settle_cancellation(job_id, 0)
+        if not claim_job(job_id):
             return
-
-        update_job(
-            job_id,
-            status="processing",
-            progress="0.0",
-        )
 
         output_dir.mkdir(
             parents=True,
@@ -150,11 +201,15 @@ def transcribe_job(job_id: str, source_url: str):
         if is_job_cancelled(job_id):
             raise TranscriptionCancelled()
 
-        complete_job(job_id, midi_path)
+        if not complete_job(job_id, midi_path):
+            return
         billing.settle_success(job_id)
 
     except TranscriptionCancelled:
         job = redis.hgetall(job_key(job_id))
+        if job.get("status") == "failed":
+            shutil.rmtree(output_dir, ignore_errors=True)
+            return
         if job.get("user_id"):
             charged = int(job.get("full_cost", 0))
             progress = float(job.get("progress", 0))

@@ -2,10 +2,14 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from redis import Redis
 
-from app.api.routes.transcriptions import router
+from app.api.routes.transcriptions import (
+    enable_transcription_submissions,
+    router,
+)
 from app.api.routes.billing import router as billing_router, server_info
 from app.config import settings
 from app.google_play import sync_products
+from app.worker.tasks import fail_active_jobs
 
 app = FastAPI(
     title="Piano Transcription Server",
@@ -19,7 +23,9 @@ app.add_api_route("/api/server-info", server_info, methods=["GET"], include_in_s
 
 @app.on_event("startup")
 def sync_billing_catalog() -> None:
+    fail_active_jobs("Transcription interrupted because the server restarted")
     sync_products()
+    enable_transcription_submissions()
 
 
 @app.get("/health")

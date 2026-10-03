@@ -495,6 +495,8 @@ Job state is stored in Redis and generated files are stored under:
 
 Jobs are not given a Redis expiration while they are queued or being processed. This prevents a long-running transcription from disappearing simply because no progress update occurred for some time.
 
+When the API server starts, it immediately marks all queued and processing jobs from the previous server session as failed, releases any billing reservations, and removes partial job files. Clients therefore receive a terminal status after a restart instead of having to infer that progress has stopped.
+
 When a transcription finishes successfully or fails, its Redis key receives a one-hour TTL.
 
 A separate cleanup service periodically scans the jobs directory. If the corresponding Redis key no longer exists, the cleanup service removes the job directory and its generated files.
