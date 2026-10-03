@@ -1,6 +1,12 @@
 # Piano Transcription Server
 
-A small FastAPI service that downloads a piano performance from online video URL, transcribes it to MIDI asynchronously, and returns the resulting MIDI file.
+> Download a piano performance, transcribe it to MIDI, and retrieve the result through a simple asynchronous API.
+
+[📱 PianoWeave](https://github.com/Virtover/pianoweave) · [🚀 Quick start](#-run-locally-with-docker) · [🔌 API](#-api) · [⚙️ Configuration](#-configuration) · [🧪 Development checks](#-development-checks)
+
+| 🎬 Input | 🎼 Output | ⚡ Processing | 🐳 Deployment |
+| --- | --- | --- | --- |
+| Online video URL | MIDI file with notes and pedal events | Async FastAPI + Redis queue | Docker with optional NVIDIA GPU |
 
 The transcription uses [Transkun](https://github.com/Yujia-Yan/Transkun), a neural audio-to-MIDI transcription model with GPU acceleration through PyTorch/CUDA.
 
@@ -8,7 +14,7 @@ The Transkun checkpoint used by the service detects sustain-pedal events separat
 
 Piano Transcription Server is an independent open-source project.
 
-## Android application
+## 📱 Android application
 
 This server can be used independently by any client capable of making HTTP requests and downloading MIDI files.
 
@@ -33,7 +39,7 @@ The Android application is maintained as a separate project:
 
 The server itself does not depend on the Android application and can be integrated with other clients or applications.
 
-## Requirements
+## 📋 Requirements
 
 * Docker Desktop with Docker Compose and Linux containers enabled
 * NVIDIA drivers and NVIDIA Container Toolkit, if using the GPU configuration
@@ -57,7 +63,7 @@ The worker automatically selects CUDA when PyTorch detects an available NVIDIA G
 
 CPU execution is significantly slower and may require removing `gpus: all` from the worker service if GPU support is not available.
 
-## Run locally with Docker
+## 🚀 Run locally with Docker
 
 ```powershell
 Copy-Item .env.example .env
@@ -117,9 +123,9 @@ Invoke-RestMethod http://localhost:8000/health
 Invoke-RestMethod http://localhost:8000/ready
 ```
 
-## API
+## 🔌 API
 
-### Create a transcription
+### ➕ Create a transcription
 
 ```powershell
 $job = Invoke-RestMethod `
@@ -137,7 +143,7 @@ The URL must be an HTTP(S) URL.
 
 The worker downloads the audio, retrieves the source video title, and runs Transkun. Processing time depends on the track length and available hardware.
 
-### Poll status
+### 🔄 Poll status
 
 ```powershell
 Invoke-RestMethod `
@@ -190,7 +196,7 @@ Possible statuses are:
 * `failed`
 * `cancelled`
 
-### Cancel a transcription
+### ⏹️ Cancel a transcription
 
 Cancel a queued or processing job with:
 
@@ -247,7 +253,7 @@ A completed response looks like:
 
 Progress is reported by the transcription pipeline. The Transkun command itself does not currently expose exact per-segment progress, so the progress reported while Transkun is running is an estimate rather than an exact measure of completed model computation.
 
-### Download MIDI
+### 🎹 Download MIDI
 
 After the status is `completed`:
 
@@ -267,7 +273,7 @@ The generated MIDI contains both detected note events and detected MIDI control-
 
 Completed and failed jobs are retained for a limited time and are then automatically removed.
 
-### Billing and server information
+### 💳 Billing and server information
 
 `GET /api/server-info` returns the billing provider, currently offered products, cleanup interval, free-minute policy, and maximum video length. `GET /api/billing/cost?source_url=...` retrieves the video duration and transcription cost before submitting a job. `GET /api/billing/balance` returns the balance for the `X-User-Id` request header, together with `free_minutes_seconds_until_next_grant` and `free_minutes_next_grant_at`. These fields are `null` when billing is disabled.
 
@@ -415,7 +421,7 @@ Submitting the same purchase token again returns `credited_minutes: 0`; each pur
 
 User balances, purchases, and transcription reservations are stored in the SQLite database at `BILLING_DATABASE_PATH`. A transcription reserves its estimated full cost when queued. Minutes are deducted only after successful completion or cancellation; a failed job releases its reservation.
 
-## Configuration
+## ⚙️ Configuration
 
 Settings are read from environment variables or `.env`:
 
@@ -439,7 +445,7 @@ Docker Compose overrides these values to use the Redis service and the shared `/
 
 The API, worker, and cleanup service must use the same `DATA_DIR`.
 
-## Transcription
+## 🎼 Transcription
 
 The transcription pipeline consists of:
 
@@ -479,7 +485,7 @@ The resulting MIDI can contain:
 
 The Transkun checkpoint used by the service is intended to keep sustain-pedal events separate from note durations. Therefore, a note sounding while the sustain pedal is held should not automatically become a long MIDI note whose duration extends until pedal release.
 
-## Job cleanup
+## 🧹 Job cleanup
 
 Job state is stored in Redis and generated files are stored under:
 
@@ -497,7 +503,7 @@ The cleanup process runs independently from the transcription worker.
 
 The cleanup interval is controlled by `CLEANUP_INTERVAL_SECONDS` (600 seconds by default), so files may remain for a short period after their one-hour retention period expires.
 
-## Development checks
+## 🧪 Development checks
 
 Run the syntax check from the repository root:
 
@@ -515,7 +521,7 @@ Running the complete stack with Docker is recommended because the worker require
 * PyTorch
 * CUDA support when using the GPU configuration
 
-## Architecture
+## 🏗️ Architecture
 
 ```text
                     ┌──────────────┐
@@ -555,7 +561,7 @@ Running the complete stack with Docker is recommended because the worker require
                     └──────────────┘
 ```
 
-### Components
+### 🧩 Components
 
 * `app/main.py` — FastAPI application and health endpoints
 * `app/api/routes/transcriptions.py` — job creation, status polling, and MIDI download
@@ -568,7 +574,7 @@ Running the complete stack with Docker is recommended because the worker require
 * `Dockerfile.worker` — CUDA-enabled transcription worker image
 * `app/worker/launcher.py` — resource-aware Dramatiq process and thread startup
 
-## Limitations
+## ⚠️ Limitations
 
 This is an asynchronous transcription service, not a sheet-music editor.
 
