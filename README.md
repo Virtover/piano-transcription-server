@@ -2,7 +2,7 @@
 
 > Download a piano performance, transcribe it to MIDI, and retrieve the result through a simple asynchronous API.
 
-[🚀 Quick start](#-run-locally-with-docker) · [📱 PianoWeave](https://github.com/Virtover/pianoweave) · [🔌 API](#-api) · [⚙️ Configuration](#-configuration) · [🧪 Development checks](#-development-checks)
+[🚀 Quick start](#-run-locally-with-docker) · [📱 Piano Weave](https://github.com/Virtover/pianoweave) · [🔌 API](#-api) · [⚙️ Configuration](#-configuration) · [🧪 Development checks](#-development-checks)
 
 | 🎬 Input | 🎼 Output | ⚡ Processing | 🐳 Deployment |
 | --- | --- | --- | --- |
@@ -18,7 +18,7 @@ Piano Transcription Server is an independent open-source project.
 
 This server can be used independently by any client capable of making HTTP requests and downloading MIDI files.
 
-One client using the server is **PianoWeave**, an Android application for learning piano songs from online videos.
+One client using the server is **Piano Weave**, an Android application for learning piano songs from online videos.
 
 The application uses the server for the computationally intensive transcription process and provides the user-facing learning experience, including:
 
@@ -35,7 +35,7 @@ The application uses the server for the computationally intensive transcription 
 
 The Android application is maintained as a separate project:
 
-**[PianoWeave](https://github.com/Virtover/pianoweave)**
+**[Piano Weave](https://github.com/Virtover/pianoweave)**
 
 The server itself does not depend on the Android application and can be integrated with other clients or applications.
 
