@@ -2,7 +2,7 @@
 
 > Download a piano performance, transcribe it to MIDI, and retrieve the result through a simple asynchronous API.
 
-[📱 PianoWeave](https://github.com/Virtover/pianoweave) · [🚀 Quick start](#-run-locally-with-docker) · [🔌 API](#-api) · [⚙️ Configuration](#-configuration) · [🧪 Development checks](#-development-checks)
+[🚀 Quick start](#-run-locally-with-docker) · [📱 PianoWeave](https://github.com/Virtover/pianoweave) · [🔌 API](#-api) · [⚙️ Configuration](#-configuration) · [🧪 Development checks](#-development-checks)
 
 | 🎬 Input | 🎼 Output | ⚡ Processing | 🐳 Deployment |
 | --- | --- | --- | --- |
