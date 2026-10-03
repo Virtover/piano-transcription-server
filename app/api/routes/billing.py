@@ -75,7 +75,7 @@ def server_info() -> dict[str, Any]:
 
 
 @router.get("/balance")
-def balance(x_user_id: str | None = Header(default=None)) -> dict[str, int | str]:
+def balance(x_user_id: str | None = Header(default=None)) -> dict[str, int | str | None]:
     current_user = user_id(x_user_id)
     if settings.billing_provider != "none":
         billing.grant_free_minutes(current_user)

@@ -433,8 +433,8 @@ Settings are read from environment variables or `.env`:
 | `CLEANUP_INTERVAL_SECONDS` | `600` | Cleanup scan interval |
 | `BILLING_PROVIDER` | `none` | `none` or `google_play` |
 | `BILLING_PRODUCTS` | `{}` | JSON mapping of Google Play product IDs to transcription minutes |
-| `FREE_MINUTES_PERIOD` | `30d` | Free-credit interval, using `s`, `m`, `h`, `d`, or `w` |
-| `FREE_MINUTES` | `10` | Free minutes granted per interval |
+| `FREE_MINUTES_PERIOD` | unset | Free-credit interval, using `s`, `m`, `h`, `d`, or `w`; only used when free minutes are enabled |
+| `FREE_MINUTES` | unset | Free minutes granted per interval; omit to disable free credits |
 | `MAX_VIDEO_LENGTH_MINUTES` | unset | Maximum accepted video length; unset means no limit |
 | `GOOGLE_PLAY_PACKAGE_NAME` | unset | Android application package for Google Play verification |
 | `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` | unset | Service-account JSON filename inside the mounted `./secrets` directory |

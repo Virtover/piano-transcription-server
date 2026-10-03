@@ -60,7 +60,8 @@ class Billing:
         )
 
     def grant_free_minutes(self, user_id: str) -> int:
-        if settings.billing_provider == "none" or settings.free_minutes <= 0:
+        free_minutes = settings.free_minutes or 0
+        if settings.billing_provider == "none" or free_minutes <= 0:
             return 0
 
         now = int(time.time())
@@ -73,7 +74,7 @@ class Billing:
             ).fetchone()
             if now - user["free_grant_at"] < period_seconds():
                 return 0
-            grant = max(0, settings.free_minutes - user["minutes"])
+            grant = max(0, free_minutes - user["minutes"])
             connection.execute(
                 "UPDATE users SET minutes = minutes + ?, free_grant_at = ? WHERE user_id = ?",
                 (grant, now, user_id),
@@ -91,7 +92,7 @@ class Billing:
             return int(user["minutes"]) if user else 0
 
     def free_minutes_status(self, user_id: str) -> dict[str, int | None]:
-        if settings.billing_provider == "none" or settings.free_minutes <= 0:
+        if settings.billing_provider == "none" or (settings.free_minutes or 0) <= 0:
             return {
                 "free_minutes_seconds_until_next_grant": None,
                 "free_minutes_next_grant_at": None,
@@ -194,7 +195,7 @@ class InsufficientMinutes(Exception):
 
 
 def period_seconds() -> int:
-    value = settings.free_minutes_period.strip().lower()
+    value = (settings.free_minutes_period or "30d").strip().lower()
     units = {"s": 1, "m": 60, "h": 60 * 60, "d": 24 * 60 * 60, "w": 7 * 24 * 60 * 60}
     try:
         amount = int(value[:-1])
