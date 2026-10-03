@@ -104,6 +104,7 @@ def verify_google_purchase(
     if not settings.google_play_package_name or not settings.google_play_service_account_file:
         raise HTTPException(status_code=503, detail="Google Play verification is not configured")
 
+    service: Any = None
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
@@ -112,7 +113,8 @@ def verify_google_purchase(
             google_play.service_account_file_path(),
             scopes=["https://www.googleapis.com/auth/androidpublisher"],
         )
-        response = build("androidpublisher", "v3", credentials=credentials).purchases().products().get(
+        service = build("androidpublisher", "v3", credentials=credentials)
+        response = service.purchases().products().get(
             packageName=settings.google_play_package_name,
             productId=request.product_id,
             token=request.purchase_token,
@@ -123,4 +125,13 @@ def verify_google_purchase(
     if response.get("purchaseState") != 0:
         raise HTTPException(status_code=400, detail="Purchase is not completed")
     credited = billing.credit_purchase(user_id(x_user_id), request.product_id, request.purchase_token)
+    try:
+        service.purchases().products().consume(
+            packageName=settings.google_play_package_name,
+            productId=request.product_id,
+            token=request.purchase_token,
+        ).execute()
+    except Exception as error:
+        logger.exception("Could not consume Google Play purchase")
+        raise HTTPException(status_code=502, detail="Google Play purchase consumption failed") from error
     return {"user_id": user_id(x_user_id), "credited_minutes": credited, "minutes": billing.get_balance(user_id(x_user_id))}
