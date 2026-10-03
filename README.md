@@ -288,6 +288,32 @@ docker compose restart api
 
 The updated products are then visible through `GET /api/server-info`.
 
+When billing is enabled, each transcription reserves its full cost before it is queued. For a video of duration $d$ seconds, the full cost in transcription minutes is:
+
+$$
+m =
+\begin{cases}
+1, & d / 60 < 2 \\
+\lfloor d / 60 \rfloor, & d / 60 \ge 2
+\end{cases}
+$$
+
+The reservation is settled as follows:
+
+* A completed transcription charges all $m$ reserved minutes.
+* A failed transcription releases the reservation and charges nothing.
+* A cancelled transcription uses the reported progress $p$, from `0` to `1`:
+
+$$
+c =
+\begin{cases}
+0, & p < 0.05 \\
+\lceil 0.6 \times m \times p \rceil, & p \ge 0.05
+\end{cases}
+$$
+
+The cancellation charge is capped at the reserved full cost, so it cannot exceed $m$ minutes.
+
 Example response:
 
 ```json
