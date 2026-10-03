@@ -30,7 +30,7 @@ The application uses the server for the computationally intensive transcription 
 * playback speed control and seeking
 * loop sections for practice
 * transposition
-* wait mode
+* wait mode with acoustic note detection support
 * MIDI keyboard support
 
 The Android application is maintained as a separate project:
