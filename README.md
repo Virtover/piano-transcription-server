@@ -51,7 +51,7 @@ Redis stores job state, while generated files are stored in the shared `data` vo
 
 The worker is configured for GPU execution through `gpus: all` in `docker-compose.yml`.
 
-Multiple transcription jobs can run at the same time. By default, the worker automatically chooses concurrency from the available CPU count and currently free CUDA VRAM. On CPU-only systems it can use one job per detected CPU, with no built-in four-job cap. On GPU systems it uses approximately one job per `WORKER_MEMORY_PER_JOB_GIB` GiB of currently free VRAM, also bounded by the available CPU count. The default budget is `3` GiB and can be fractional, such as `2.5`. A GPU with less than one full budget available is not selected; transcription falls back to CPU for that job. Configure `WORKER_PROCESSES` and `WORKER_THREADS` in `.env`; each can be `auto` or an explicit positive integer.
+Multiple transcription jobs can run at the same time. By default, the worker uses one concurrent job in CPU-only mode, which avoids multiplying Transkun's RAM usage across all CPU cores. Set `WORKER_CPU_CONCURRENCY` to increase CPU concurrency after monitoring RAM usage. On GPU systems it uses approximately one job per `WORKER_MEMORY_PER_JOB_GIB` GiB of currently free VRAM, also bounded by the available CPU count. The default budget is `3` GiB and can be fractional, such as `2.5`. A GPU with less than one full budget available is not selected; transcription falls back to CPU for that job. Configure `WORKER_PROCESSES` and `WORKER_THREADS` in `.env`; each can be `auto` or an explicit positive integer.
 
 Verify that Docker can access the GPU before starting the stack:
 
@@ -84,6 +84,8 @@ WORKER_PROCESSES=auto
 
 WORKER_THREADS=auto
 
+WORKER_CPU_CONCURRENCY=1
+
 WORKER_MAX_CONCURRENCY=auto
 ```
 
@@ -101,6 +103,12 @@ To force four threads in one process instead:
 WORKER_PROCESSES=1
 
 WORKER_THREADS=4
+```
+
+For CPU execution, increase the automatic concurrency only after checking memory usage. For example:
+
+```env
+WORKER_CPU_CONCURRENCY=4
 ```
 
 You can also tune the automatic GPU estimate with `WORKER_MEMORY_PER_JOB_GIB`; its default is `3` GiB and fractional values are supported. Capacity is calculated independently for each visible GPU from its currently free VRAM, so GPUs with different sizes or existing workloads are handled correctly. Each transcription re-checks free VRAM and chooses the eligible GPU with the most free memory when it starts. If no GPU has enough free VRAM for one budget, that transcription runs on CPU. Set `WORKER_MAX_CONCURRENCY` to an explicit value when you want an operational safety limit; leave it as `auto` to use all detected capacity. The API accepts jobs immediately and Redis queues any jobs beyond the available worker capacity.

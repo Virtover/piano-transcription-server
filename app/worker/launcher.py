@@ -4,6 +4,9 @@ import shutil
 from app.transcription.device import cuda_job_capacities
 
 
+DEFAULT_CPU_CONCURRENCY = 1
+
+
 def configured_value(name: str) -> int | None:
     value = os.environ.get(name, "").strip().lower()
 
@@ -57,9 +60,13 @@ def worker_capacity() -> tuple[int, int, str]:
             f"({gpu_summary})"
         )
     else:
-        automatic_capacity = cpu_count()
+        cpu_concurrency = configured_value("WORKER_CPU_CONCURRENCY")
+        automatic_capacity = cpu_concurrency or DEFAULT_CPU_CONCURRENCY
         automatic_processes = 1
-        resource_summary = f"{cpu_count()} CPU(s), no CUDA GPU detected"
+        resource_summary = (
+            f"{cpu_count()} CPU(s), no CUDA GPU detected, "
+            f"up to {automatic_capacity} CPU job(s)"
+        )
 
     if configured_max:
         automatic_capacity = min(automatic_capacity, configured_max)
