@@ -3,13 +3,14 @@ import logging
 import subprocess
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
 
 from app.billing import Billing, transcription_cost
 from app.config import settings
 from app import google_play
+from app.auth import current_user_id
 
 
 logger = logging.getLogger(__name__)
@@ -26,16 +27,6 @@ class CostResponse(BaseModel):
 class GooglePurchaseRequest(BaseModel):
     product_id: str
     purchase_token: str = Field(min_length=1)
-
-
-def user_id(value: str | None) -> str:
-    normalized = (value or "").strip()
-    if settings.billing_provider != "none" and not normalized:
-        raise HTTPException(
-            status_code=401,
-            detail="X-User-Id header is required when billing is enabled",
-        )
-    return normalized or "anonymous"
 
 
 def video_duration(source_url: HttpUrl) -> float:
@@ -81,8 +72,8 @@ def server_info() -> dict[str, Any]:
 
 
 @router.get("/balance")
-def balance(x_user_id: str | None = Header(default=None)) -> dict[str, int | str | None]:
-    current_user = user_id(x_user_id)
+def balance(current_user: str | None = Depends(current_user_id)) -> dict[str, int | str | None]:
+    current_user = current_user or "anonymous"
     if settings.billing_provider != "none":
         billing.grant_free_minutes(current_user)
     return {
@@ -101,11 +92,12 @@ def cost(source_url: HttpUrl) -> CostResponse:
 @router.post("/google-play/verify")
 def verify_google_purchase(
     request: GooglePurchaseRequest,
-    x_user_id: str | None = Header(default=None),
+    current_user: str | None = Depends(current_user_id),
 ) -> dict[str, int | str]:
     if settings.billing_provider != "google_play":
         raise HTTPException(status_code=409, detail="Google Play billing is disabled")
-    current_user = user_id(x_user_id)
+    if current_user is None:
+        raise HTTPException(status_code=409, detail="Google Play billing is disabled")
     if request.product_id not in settings.billing_products:
         raise HTTPException(status_code=400, detail="Unknown product")
     if not settings.google_play_package_name or not settings.google_play_service_account_file:

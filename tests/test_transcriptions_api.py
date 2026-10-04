@@ -38,12 +38,16 @@ def test_transcription_validation_and_insufficient_balance(api_context):
     settings.free_minutes = 1
     settings.free_minutes_period = "1d"
 
-    invalid = client.post("/api/transcriptions", json={"source_url": "not-a-url"})
+    invalid = client.post(
+        "/api/transcriptions",
+        headers={"Authorization": "Bearer short-user"},
+        json={"source_url": "not-a-url"},
+    )
     assert invalid.status_code == 422
 
     insufficient = client.post(
         "/api/transcriptions",
-        headers={"X-User-Id": "short-user"},
+        headers={"Authorization": "Bearer short-user"},
         json={"source_url": "https://example.com/video"},
     )
     assert insufficient.status_code == 402
@@ -63,7 +67,7 @@ def test_concurrent_transcriptions_cannot_over_reserve_balance(api_context):
     def submit():
         return client.post(
             "/api/transcriptions",
-            headers={"X-User-Id": "racer"},
+            headers={"Authorization": "Bearer racer"},
             json={"source_url": "https://example.com/video"},
         )
 
@@ -71,4 +75,29 @@ def test_concurrent_transcriptions_cannot_over_reserve_balance(api_context):
         responses = list(executor.map(lambda _: submit(), range(2)))
 
     assert sorted(response.status_code for response in responses) == [202, 402]
-    assert client.get("/api/billing/balance", headers={"X-User-Id": "racer"}).json()["minutes"] == 1
+    assert client.get(
+        "/api/billing/balance",
+        headers={"Authorization": "Bearer racer"},
+    ).json()["minutes"] == 1
+
+
+def test_billed_job_is_only_visible_to_authenticated_owner(api_context):
+    client, settings, _ = api_context
+    settings.billing_provider = "google_play"
+    settings.free_minutes = 5
+    settings.free_minutes_period = "1d"
+
+    created = client.post(
+        "/api/transcriptions",
+        headers={"Authorization": "Bearer owner"},
+        json={"source_url": "https://example.com/video"},
+    )
+    assert created.status_code == 202
+
+    job_id = created.json()["job_id"]
+    response = client.get(
+        f"/api/transcriptions/{job_id}",
+        headers={"Authorization": "Bearer other-user"},
+    )
+
+    assert response.status_code == 404

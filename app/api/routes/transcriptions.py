@@ -2,7 +2,7 @@ import json
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
@@ -10,7 +10,8 @@ from redis.exceptions import WatchError
 
 from app.config import settings
 from app.billing import Billing, cancelled_cost, transcription_cost, InsufficientMinutes
-from app.api.routes.billing import user_id, video_duration
+from app.api.routes.billing import video_duration
+from app.auth import current_user_id
 from app.worker.tasks import (
     JOB_TTL,
     job_key,
@@ -77,6 +78,11 @@ def current_user_balance(user_id: str | None) -> int | None:
     return billing.get_balance(user_id)
 
 
+def require_job_owner(job: dict[str, str], authenticated_user_id: str | None) -> None:
+    if settings.billing_provider != "none" and job.get("user_id") != authenticated_user_id:
+        raise HTTPException(status_code=404, detail="Transcription job not found")
+
+
 @router.post(
     "",
     response_model=CreateTranscriptionResponse,
@@ -84,7 +90,7 @@ def current_user_balance(user_id: str | None) -> int | None:
 )
 def create_transcription(
     request: CreateTranscriptionRequest,
-    x_user_id: str | None = Header(default=None),
+    authenticated_user_id: str | None = Depends(current_user_id),
 ):
     if not transcription_submissions_enabled:
         raise HTTPException(
@@ -92,7 +98,7 @@ def create_transcription(
             detail="The transcription server is still starting",
         )
 
-    current_user = user_id(x_user_id)
+    current_user = authenticated_user_id or "anonymous"
     duration = video_duration(request.source_url)
     cost = transcription_cost(duration)
     job_id = str(uuid.uuid4())
@@ -141,7 +147,10 @@ def create_transcription(
     "/{job_id}",
     response_model=TranscriptionStatusResponse,
 )
-def get_transcription(job_id: str):
+def get_transcription(
+    job_id: str,
+    authenticated_user_id: str | None = Depends(current_user_id),
+):
     job = redis.hgetall(job_key(job_id))
 
     if not job:
@@ -149,6 +158,7 @@ def get_transcription(job_id: str):
             status_code=404,
             detail="Transcription job not found",
         )
+    require_job_owner(job, authenticated_user_id)
 
     try:
         progress = float(job.get("progress", 0))
@@ -177,7 +187,10 @@ def get_transcription(job_id: str):
     "/{job_id}",
     response_model=CreateTranscriptionResponse,
 )
-def cancel_transcription(job_id: str):
+def cancel_transcription(
+    job_id: str,
+    authenticated_user_id: str | None = Depends(current_user_id),
+):
     key = job_key(job_id)
 
     while True:
@@ -191,6 +204,7 @@ def cancel_transcription(job_id: str):
                         status_code=404,
                         detail="Transcription job not found",
                     )
+                require_job_owner(job, authenticated_user_id)
 
                 status = job.get("status", "unknown")
 
@@ -234,7 +248,10 @@ def cancel_transcription(job_id: str):
 
 
 @router.get("/{job_id}/midi")
-def get_midi(job_id: str):
+def get_midi(
+    job_id: str,
+    authenticated_user_id: str | None = Depends(current_user_id),
+):
     job = redis.hgetall(job_key(job_id))
 
     if not job:
@@ -242,6 +259,7 @@ def get_midi(job_id: str):
             status_code=404,
             detail="Transcription job not found",
         )
+    require_job_owner(job, authenticated_user_id)
 
     if job.get("status") != "completed":
         raise HTTPException(

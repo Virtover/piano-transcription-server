@@ -302,9 +302,21 @@ Completed and failed jobs are retained for a limited time and are then automatic
 
 ### 💳 Billing and server information
 
-`GET /api/server-info` returns the billing provider, currently offered products, cleanup interval, free-minute policy, and maximum video length. `GET /api/billing/cost?source_url=...` retrieves the video duration and transcription cost before submitting a job. `GET /api/billing/balance` returns the balance for the `X-User-Id` request header, together with `free_minutes_seconds_until_next_grant` and `free_minutes_next_grant_at`. These fields are `null` when billing is disabled.
+`GET /api/server-info` returns the billing provider, currently offered products, cleanup interval, free-minute policy, and maximum video length. `GET /api/billing/cost?source_url=...` retrieves the video duration and transcription cost before submitting a job. `GET /api/billing/balance` returns the balance for the authenticated Google account, together with `free_minutes_seconds_until_next_grant` and `free_minutes_next_grant_at`. These fields are `null` when billing is disabled.
 
-When billing is enabled, `X-User-Id` is required and must not be blank for balance, purchase, and transcription requests. The server does not create or use a shared anonymous billing account. Clients should send a stable authenticated user identifier; the header is an identity key, not an authentication mechanism by itself.
+When billing is enabled, requests require a valid Google OpenID Connect ID token in `Authorization: Bearer <token>`. The server verifies the token audience against the client ID loaded from `GOOGLE_OAUTH_CLIENT_FILE` and uses the verified Google `sub` claim as the billing identity. `X-User-Id` is ignored and cannot select another user's balance. The server does not create or use a shared anonymous billing account.
+
+#### Google authentication setup
+
+1. In Google Cloud Console, create an OAuth 2.0 client ID for the application. Download its JSON credentials file.
+2. Place that file in the local `./secrets` directory. The downloaded file normally contains a `web` or `installed` object with a `client_id` value.
+3. Set only the filename in `.env`:
+
+```env
+GOOGLE_OAUTH_CLIENT_FILE=google-oauth-client.json
+```
+
+Docker mounts `./secrets` at `/run/secrets`, and the API reads the file from there. The Android client must request Google ID tokens whose audience is this client ID. The OAuth JSON file and Google Play service-account JSON are separate credentials; do not commit either file.
 
 Get server and billing configuration:
 
@@ -396,7 +408,7 @@ $userId = 'user-123'
 
 $balance = Invoke-RestMethod `
   -Uri http://localhost:8000/api/billing/balance `
-  -Headers @{ 'X-User-Id' = $userId }
+  -Headers @{ Authorization = "Bearer $googleIdToken" }
 
 $balance
 # minutes
@@ -428,7 +440,7 @@ $purchase = @{
 $credit = Invoke-RestMethod `
   -Method Post `
   -Uri http://localhost:8000/api/billing/google-play/verify `
-  -Headers @{ 'X-User-Id' = 'user-123' } `
+  -Headers @{ Authorization = "Bearer $googleIdToken" } `
   -ContentType 'application/json' `
   -Body $purchase
 
@@ -459,12 +471,18 @@ Settings are read from environment variables or `.env`:
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL           |
 | `DATA_DIR`  | `/data`                    | Directory for job output files |
 | `BILLING_DATABASE_PATH` | `/data/billing.sqlite3` | Shared SQLite billing database |
+| `WORKER_PROCESSES` | `auto` | Dramatiq worker processes; `auto` uses one process |
+| `WORKER_THREADS` | `auto` | Threads per process; `auto` derives from detected capacity |
+| `WORKER_CPU_CONCURRENCY` | `1` | Automatic concurrent jobs when no usable GPU is available; increase after monitoring RAM |
+| `WORKER_MEMORY_PER_JOB_GIB` | `3` | Approximate free VRAM budget per GPU job; fractional values are supported |
+| `WORKER_MAX_CONCURRENCY` | `auto` | Optional cap for automatically calculated concurrency |
 | `CLEANUP_INTERVAL_SECONDS` | `600` | Cleanup scan interval |
 | `BILLING_PROVIDER` | `none` | `none` or `google_play` |
 | `BILLING_PRODUCTS` | `{}` | JSON mapping of Google Play product IDs to transcription minutes |
 | `FREE_MINUTES_PERIOD` | unset | Free-credit interval, using `s`, `m`, `h`, `d`, or `w`; only used when free minutes are enabled |
 | `FREE_MINUTES` | unset | Free minutes granted per interval; omit to disable free credits |
 | `MAX_VIDEO_LENGTH_MINUTES` | unset | Maximum accepted video length; unset means no limit |
+| `GOOGLE_OAUTH_CLIENT_FILE` | unset | OAuth client JSON filename inside the mounted `./secrets` directory; required when billing is enabled |
 | `GOOGLE_PLAY_PACKAGE_NAME` | unset | Android application package for Google Play verification |
 | `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` | unset | Service-account JSON filename inside the mounted `./secrets` directory |
 

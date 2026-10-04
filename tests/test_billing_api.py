@@ -72,12 +72,12 @@ def test_google_play_purchase_is_idempotent(api_context, monkeypatch):
 
     first = client.post(
         "/api/billing/google-play/verify",
-        headers={"X-User-Id": "user-1"},
+        headers={"Authorization": "Bearer user-1"},
         json={"product_id": "starter", "purchase_token": "token"},
     )
     second = client.post(
         "/api/billing/google-play/verify",
-        headers={"X-User-Id": "user-1"},
+        headers={"Authorization": "Bearer user-1"},
         json={"product_id": "starter", "purchase_token": "token"},
     )
 
@@ -96,10 +96,59 @@ def test_google_play_free_grant_is_thread_safe(api_context):
     settings.free_minutes_period = "1d"
 
     def read_balance():
-        return client.get("/api/billing/balance", headers={"X-User-Id": "racer"})
+        return client.get("/api/billing/balance", headers={"Authorization": "Bearer racer"})
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         responses = list(executor.map(lambda _: read_balance(), range(8)))
 
     assert all(response.status_code == 200 for response in responses)
-    assert client.get("/api/billing/balance", headers={"X-User-Id": "racer"}).json()["minutes"] == 7
+    assert client.get("/api/billing/balance", headers={"Authorization": "Bearer racer"}).json()["minutes"] == 7
+
+
+def test_billed_balance_requires_verified_bearer_token(api_context):
+    client, settings, _ = api_context
+    settings.billing_provider = "google_play"
+
+    missing = client.get("/api/billing/balance")
+    assert missing.status_code == 401
+
+    spoofed = client.get(
+        "/api/billing/balance",
+        headers={"X-User-Id": "spoofed"},
+    )
+    assert spoofed.status_code == 401
+
+
+def test_invalid_google_token_is_rejected(api_context, monkeypatch):
+    client, settings, _ = api_context
+
+    settings.billing_provider = "google_play"
+
+    def reject_token(*args, **kwargs):
+        raise ValueError("invalid token")
+
+    monkeypatch.setattr(
+        "app.auth.id_token.verify_oauth2_token",
+        reject_token,
+    )
+    response = client.get(
+        "/api/billing/balance",
+        headers={"Authorization": "Bearer invalid"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_google_oauth_client_id_can_be_loaded_from_secrets_file(api_context, tmp_path):
+    _, settings, _ = api_context
+    from app import auth
+
+    client_file = tmp_path / "google-oauth-client.json"
+    client_file.write_text(
+        '{"web": {"client_id": "file-client-id.apps.googleusercontent.com"}}',
+        encoding="utf-8",
+    )
+    settings.google_oauth_client_id = None
+    settings.google_oauth_client_file = str(client_file)
+
+    assert auth.google_oauth_client_id() == "file-client-id.apps.googleusercontent.com"
