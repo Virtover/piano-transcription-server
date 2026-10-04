@@ -302,7 +302,7 @@ Completed and failed jobs are retained for a limited time and are then automatic
 
 ### 💳 Billing and server information
 
-`GET /api/server-info` returns the billing provider, currently offered products, cleanup interval, free-minute policy, and maximum video length. `GET /api/billing/cost?source_url=...` retrieves the video duration and transcription cost before submitting a job. `GET /api/billing/balance` returns the balance for the authenticated Google account, together with `free_minutes_seconds_until_next_grant` and `free_minutes_next_grant_at`. These fields are `null` when billing is disabled.
+`GET /api/server-info` returns the billing provider, currently offered products, cleanup interval, free-minute policy, maximum video length, and `google_oauth_client_id` when billing is enabled. `GET /api/billing/cost?source_url=...` retrieves the video duration and transcription cost before submitting a job. `GET /api/billing/balance` returns the balance for the authenticated Google account, together with `free_minutes_seconds_until_next_grant` and `free_minutes_next_grant_at`. These fields are `null` when billing is disabled.
 
 When billing is enabled, requests require a valid Google OpenID Connect ID token in `Authorization: Bearer <token>`. The server verifies the token audience against the client ID loaded from `GOOGLE_OAUTH_CLIENT_FILE` and uses the verified Google `sub` claim as the billing identity. `X-User-Id` is ignored and cannot select another user's balance. The server does not create or use a shared anonymous billing account.
 
@@ -375,7 +375,8 @@ Example response:
   "cleanup_interval_seconds": 600,
   "max_video_length_minutes": 120,
   "free_minutes": 10,
-  "free_minutes_period": "30d"
+  "free_minutes_period": "30d",
+  "google_oauth_client_id": "123456789-example.apps.googleusercontent.com"
 }
 ```
 

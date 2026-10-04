@@ -10,7 +10,7 @@ from redis import Redis
 from app.billing import Billing, transcription_cost
 from app.config import settings
 from app import google_play
-from app.auth import current_user_id
+from app.auth import current_user_id, google_oauth_client_id
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,7 @@ def server_info() -> dict[str, Any]:
         response.update({
             "free_minutes": settings.free_minutes,
             "free_minutes_period": settings.free_minutes_period,
+            "google_oauth_client_id": google_oauth_client_id(),
         })
     return response
 

@@ -19,6 +19,19 @@ def test_none_provider_exposes_balance_and_rejects_google_play(api_context):
     )
     assert response.status_code == 409
 
+
+def test_server_info_exposes_oauth_client_id_only_when_billing_is_enabled(api_context):
+    client, settings, _ = api_context
+
+    disabled = client.get("/api/billing/server-info")
+    assert disabled.status_code == 200
+    assert "google_oauth_client_id" not in disabled.json()
+
+    settings.billing_provider = "google_play"
+    enabled = client.get("/api/billing/server-info")
+    assert enabled.status_code == 200
+    assert enabled.json()["google_oauth_client_id"] == "test-client-id"
+
     settings.billing_provider = "google_play"
     response = client.get("/api/billing/balance")
     assert response.status_code == 401
