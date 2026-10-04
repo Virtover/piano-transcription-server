@@ -131,6 +131,25 @@ Invoke-RestMethod http://localhost:8000/health
 Invoke-RestMethod http://localhost:8000/ready
 ```
 
+## 🧪 Development checks
+
+Create and activate a virtual environment, install the test dependencies, then run the REST API suite:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.test.txt
+python -m pytest -q
+```
+
+The tests use an in-memory Redis substitute and temporary SQLite databases, so they do not require a running Docker Compose stack or Google Play credentials.
+
+Run the application syntax check separately:
+
+```powershell
+python -m compileall -q app
+```
+
 ## 🔌 API
 
 ### ➕ Create a transcription
@@ -514,14 +533,6 @@ A separate cleanup service periodically scans the jobs directory. If the corresp
 The cleanup process runs independently from the transcription worker.
 
 The cleanup interval is controlled by `CLEANUP_INTERVAL_SECONDS` (600 seconds by default), so files may remain for a short period after their one-hour retention period expires.
-
-## 🧪 Development checks
-
-Run the syntax check from the repository root:
-
-```powershell
-python -m compileall -q app
-```
 
 Install `requirements.api.txt` for API-only development or `requirements.worker.txt` for transcription-worker development.
 
