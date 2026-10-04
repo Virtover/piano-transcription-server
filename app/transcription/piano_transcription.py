@@ -18,6 +18,8 @@ from transkun.ModelTransformer import (
     resolveOverlapping,
 )
 
+from app.transcription.device import cuda_job_capacities
+
 
 ProgressCallback = Callable[[float], None]
 CancellationCallback = Callable[[], bool]
@@ -94,22 +96,20 @@ def load_model(device: str):
 
 
 def select_device() -> str:
-    if not torch.cuda.is_available():
+    capacities = cuda_job_capacities()
+    if not capacities:
         return "cpu"
 
     # Jobs share a worker process, so choose a device for each job instead of
     # relying on CUDA's default device 0.
-    candidates = []
-    for device_index in range(torch.cuda.device_count()):
-        try:
-            free_memory, _ = torch.cuda.mem_get_info(device_index)
-        except RuntimeError:
-            continue
-
-        candidates.append((free_memory, device_index))
+    candidates = [
+        (free_memory, device_index)
+        for device_index, capacity, free_memory, _ in capacities
+        if capacity > 0
+    ]
 
     if not candidates:
-        return "cuda:0"
+        return "cpu"
 
     _, device_index = max(candidates)
     return f"cuda:{device_index}"

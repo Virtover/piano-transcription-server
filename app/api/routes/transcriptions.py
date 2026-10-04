@@ -10,7 +10,7 @@ from redis.exceptions import WatchError
 
 from app.config import settings
 from app.billing import Billing, cancelled_cost, transcription_cost, InsufficientMinutes
-from app.api.routes.billing import video_duration
+from app.api.routes.billing import user_id, video_duration
 from app.worker.tasks import (
     JOB_TTL,
     job_key,
@@ -92,11 +92,11 @@ def create_transcription(
             detail="The transcription server is still starting",
         )
 
-    current_user = x_user_id or "anonymous"
+    current_user = user_id(x_user_id)
     duration = video_duration(request.source_url)
     cost = transcription_cost(duration)
     job_id = str(uuid.uuid4())
-    current_balance = current_user_balance(current_user)
+    current_user_balance(current_user)
     try:
         billing.reserve(current_user, job_id, cost)
     except InsufficientMinutes as error:
@@ -133,7 +133,7 @@ def create_transcription(
     return CreateTranscriptionResponse(
         job_id=job_id,
         status="queued",
-        minutes=current_balance,
+        minutes=current_user_balance(current_user),
     )
 
 

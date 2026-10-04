@@ -9,7 +9,7 @@ from app.api.routes.transcriptions import (
 from app.api.routes.billing import router as billing_router, server_info
 from app.config import settings
 from app.google_play import sync_products
-from app.worker.tasks import fail_active_jobs
+from app.worker.tasks import fail_active_jobs, reconcile_billing
 
 app = FastAPI(
     title="Piano Transcription Server",
@@ -24,6 +24,7 @@ app.add_api_route("/api/server-info", server_info, methods=["GET"], include_in_s
 @app.on_event("startup")
 def sync_billing_catalog() -> None:
     fail_active_jobs("Transcription interrupted because the server restarted")
+    reconcile_billing()
     sync_products()
     enable_transcription_submissions()
 

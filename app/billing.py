@@ -86,10 +86,17 @@ class Billing:
             return 0
         with self._connect() as connection:
             user = connection.execute(
-                "SELECT minutes FROM users WHERE user_id = ?",
-                (user_id,),
+                """SELECT u.minutes - COALESCE(
+                           (SELECT SUM(reserved_minutes)
+                            FROM transcription_reservations
+                            WHERE user_id = ? AND status = 'reserved'),
+                           0
+                       ) AS available_minutes
+                    FROM users AS u
+                    WHERE u.user_id = ?""",
+                (user_id, user_id),
             ).fetchone()
-            return int(user["minutes"]) if user else 0
+            return max(0, int(user["available_minutes"])) if user else 0
 
     def free_minutes_status(self, user_id: str) -> dict[str, int | None]:
         if settings.billing_provider == "none" or (settings.free_minutes or 0) <= 0:
@@ -145,6 +152,13 @@ class Billing:
                 "UPDATE transcription_reservations SET status = 'released' WHERE job_id = ? AND status = 'reserved'",
                 (job_id,),
             )
+
+    def reserved_job_ids(self) -> list[str]:
+        with self._connect() as connection:
+            reservations = connection.execute(
+                "SELECT job_id FROM transcription_reservations WHERE status = 'reserved'",
+            ).fetchall()
+        return [reservation["job_id"] for reservation in reservations]
 
     def _settle(self, job_id: str, charged_minutes: int | None) -> None:
         with self._connect() as connection:

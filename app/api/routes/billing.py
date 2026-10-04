@@ -29,7 +29,13 @@ class GooglePurchaseRequest(BaseModel):
 
 
 def user_id(value: str | None) -> str:
-    return value or "anonymous"
+    normalized = (value or "").strip()
+    if settings.billing_provider != "none" and not normalized:
+        raise HTTPException(
+            status_code=401,
+            detail="X-User-Id header is required when billing is enabled",
+        )
+    return normalized or "anonymous"
 
 
 def video_duration(source_url: HttpUrl) -> float:
@@ -99,6 +105,7 @@ def verify_google_purchase(
 ) -> dict[str, int | str]:
     if settings.billing_provider != "google_play":
         raise HTTPException(status_code=409, detail="Google Play billing is disabled")
+    current_user = user_id(x_user_id)
     if request.product_id not in settings.billing_products:
         raise HTTPException(status_code=400, detail="Unknown product")
     if not settings.google_play_package_name or not settings.google_play_service_account_file:
@@ -124,7 +131,7 @@ def verify_google_purchase(
 
     if response.get("purchaseState") != 0:
         raise HTTPException(status_code=400, detail="Purchase is not completed")
-    credited = billing.credit_purchase(user_id(x_user_id), request.product_id, request.purchase_token)
+    credited = billing.credit_purchase(current_user, request.product_id, request.purchase_token)
     try:
         service.purchases().products().consume(
             packageName=settings.google_play_package_name,
@@ -134,4 +141,4 @@ def verify_google_purchase(
     except Exception as error:
         logger.exception("Could not consume Google Play purchase")
         raise HTTPException(status_code=502, detail="Google Play purchase consumption failed") from error
-    return {"user_id": user_id(x_user_id), "credited_minutes": credited, "minutes": billing.get_balance(user_id(x_user_id))}
+    return {"user_id": current_user, "credited_minutes": credited, "minutes": billing.get_balance(current_user)}

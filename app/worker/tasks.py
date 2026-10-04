@@ -118,6 +118,32 @@ def cleanup_expired_jobs():
             print(f"Removed expired job: {job_id}")
 
 
+def reconcile_billing() -> None:
+    """Finish billing transitions left incomplete by a worker interruption."""
+    for job_id in billing.reserved_job_ids():
+        job = redis.hgetall(job_key(job_id))
+
+        if not job:
+            billing.release(job_id)
+            continue
+
+        status = job.get("status")
+        if status == "completed":
+            billing.settle_success(job_id)
+        elif status == "failed":
+            billing.release(job_id)
+        elif status == "cancelled":
+            try:
+                full_cost = int(job.get("full_cost", 0))
+                progress = float(job.get("progress", 0))
+            except (TypeError, ValueError):
+                continue
+            billing.settle_cancellation(
+                job_id,
+                cancelled_cost(full_cost, progress),
+            )
+
+
 def fail_active_jobs(reason: str) -> None:
     for key in redis.scan_iter(match="transcription:*"):
         while True:

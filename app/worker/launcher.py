@@ -1,9 +1,7 @@
 import os
 import shutil
-from typing import Final
 
-
-DEFAULT_MEMORY_PER_JOB_GIB: Final = 8
+from app.transcription.device import cuda_job_capacities
 
 
 def configured_value(name: str) -> int | None:
@@ -28,40 +26,20 @@ def cpu_count() -> int:
 
 
 def gpu_capacity() -> tuple[int, int, str] | None:
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return None
-
-        memory_per_job = int(
-            os.environ.get(
-                "WORKER_MEMORY_PER_JOB_GIB",
-                DEFAULT_MEMORY_PER_JOB_GIB,
-            )
-        )
-        if memory_per_job < 1:
-            raise ValueError("WORKER_MEMORY_PER_JOB_GIB must be at least 1")
-
-        device_capacities = []
-        for device_index in range(torch.cuda.device_count()):
-            total_memory = torch.cuda.get_device_properties(
-                device_index,
-            ).total_memory
-            capacity = max(
-                1,
-                total_memory // (memory_per_job * 1024**3),
-            )
-            device_capacities.append(int(capacity))
-
-        total_capacity = sum(device_capacities)
-        summary = ", ".join(
-            f"GPU {index}: {capacity} job(s)"
-            for index, capacity in enumerate(device_capacities)
-        )
-        return len(device_capacities), total_capacity, summary
-    except (ImportError, RuntimeError):
+    capacities = cuda_job_capacities()
+    if not capacities:
         return None
+
+    device_capacities = [capacity for _, capacity, _, _ in capacities]
+    total_capacity = sum(device_capacities)
+    if total_capacity < 1:
+        return None
+
+    summary = ", ".join(
+        f"GPU {index}: {capacity} job(s)"
+        for index, capacity in enumerate(device_capacities)
+    )
+    return len(device_capacities), total_capacity, summary
 
 
 def worker_capacity() -> tuple[int, int, str]:

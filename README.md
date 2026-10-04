@@ -51,7 +51,7 @@ Redis stores job state, while generated files are stored in the shared `data` vo
 
 The worker is configured for GPU execution through `gpus: all` in `docker-compose.yml`.
 
-Multiple transcription jobs can run at the same time. By default, the worker automatically chooses concurrency from the available CPU count and CUDA VRAM. On CPU-only systems it can use one job per detected CPU, with no built-in four-job cap. On GPU systems it uses approximately one job per `WORKER_MEMORY_PER_JOB_GIB` GiB of VRAM, also bounded by the available CPU count. Configure `WORKER_PROCESSES` and `WORKER_THREADS` in `.env`; each can be `auto` or an explicit positive integer.
+Multiple transcription jobs can run at the same time. By default, the worker automatically chooses concurrency from the available CPU count and currently free CUDA VRAM. On CPU-only systems it can use one job per detected CPU, with no built-in four-job cap. On GPU systems it uses approximately one job per `WORKER_MEMORY_PER_JOB_GIB` GiB of currently free VRAM, also bounded by the available CPU count. The default budget is `3` GiB and can be fractional, such as `2.5`. A GPU with less than one full budget available is not selected; transcription falls back to CPU for that job. Configure `WORKER_PROCESSES` and `WORKER_THREADS` in `.env`; each can be `auto` or an explicit positive integer.
 
 Verify that Docker can access the GPU before starting the stack:
 
@@ -103,7 +103,7 @@ WORKER_PROCESSES=1
 WORKER_THREADS=4
 ```
 
-You can also tune the automatic GPU estimate with `WORKER_MEMORY_PER_JOB_GIB`; its default is `8`. Capacity is calculated independently for each visible GPU, so GPUs with different VRAM sizes are handled correctly. Each transcription chooses the visible GPU with the most free memory when it starts. Set `WORKER_MAX_CONCURRENCY` to an explicit value when you want an operational safety limit; leave it as `auto` to use all detected capacity. The API accepts jobs immediately and Redis queues any jobs beyond the available worker capacity.
+You can also tune the automatic GPU estimate with `WORKER_MEMORY_PER_JOB_GIB`; its default is `3` GiB and fractional values are supported. Capacity is calculated independently for each visible GPU from its currently free VRAM, so GPUs with different sizes or existing workloads are handled correctly. Each transcription re-checks free VRAM and chooses the eligible GPU with the most free memory when it starts. If no GPU has enough free VRAM for one budget, that transcription runs on CPU. Set `WORKER_MAX_CONCURRENCY` to an explicit value when you want an operational safety limit; leave it as `auto` to use all detected capacity. The API accepts jobs immediately and Redis queues any jobs beyond the available worker capacity.
 
 Do not commit local secrets or machine-specific values from `.env`.
 
@@ -277,6 +277,8 @@ Completed and failed jobs are retained for a limited time and are then automatic
 
 `GET /api/server-info` returns the billing provider, currently offered products, cleanup interval, free-minute policy, and maximum video length. `GET /api/billing/cost?source_url=...` retrieves the video duration and transcription cost before submitting a job. `GET /api/billing/balance` returns the balance for the `X-User-Id` request header, together with `free_minutes_seconds_until_next_grant` and `free_minutes_next_grant_at`. These fields are `null` when billing is disabled.
 
+When billing is enabled, `X-User-Id` is required and must not be blank for balance, purchase, and transcription requests. The server does not create or use a shared anonymous billing account. Clients should send a stable authenticated user identifier; the header is an identity key, not an authentication mechanism by itself.
+
 Get server and billing configuration:
 
 ```powershell
@@ -419,7 +421,7 @@ Example response:
 
 Submitting the same purchase token again returns `credited_minutes: 0`; each purchase is credited only once.
 
-User balances, purchases, and transcription reservations are stored in the SQLite database at `BILLING_DATABASE_PATH`. A transcription reserves its estimated full cost when queued. Minutes are deducted only after successful completion or cancellation; a failed job releases its reservation.
+User balances, purchases, and transcription reservations are stored in the SQLite database at `BILLING_DATABASE_PATH`. A transcription reserves its estimated full cost when queued. Minutes are deducted only after successful completion or cancellation; a failed job releases its reservation. Billing transitions are idempotent and periodically reconciled, so a worker interruption between updating Redis and updating SQLite does not leave a completed job uncharged or a failed job permanently reserved.
 
 ## ⚙️ Configuration
 
