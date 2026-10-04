@@ -116,9 +116,9 @@ class Billing:
             "free_minutes_next_grant_at": next_grant_at,
         }
 
-    def reserve(self, user_id: str, job_id: str, cost: int) -> None:
+    def reserve(self, user_id: str, job_id: str, cost: int) -> int | None:
         if settings.billing_provider == "none" or cost <= 0:
-            return
+            return None
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._ensure_user(connection, user_id)
@@ -139,6 +139,7 @@ class Billing:
                    VALUES (?, ?, ?, 'reserved')""",
                 (job_id, user_id, cost),
             )
+            return max(0, int(user["minutes"] - reserved - cost))
 
     def settle_success(self, job_id: str) -> None:
         self._settle(job_id, None)

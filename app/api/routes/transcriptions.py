@@ -98,7 +98,7 @@ def create_transcription(
     job_id = str(uuid.uuid4())
     current_user_balance(current_user)
     try:
-        billing.reserve(current_user, job_id, cost)
+        current_balance = billing.reserve(current_user, job_id, cost)
     except InsufficientMinutes as error:
         raise HTTPException(
             status_code=402,
@@ -133,7 +133,7 @@ def create_transcription(
     return CreateTranscriptionResponse(
         job_id=job_id,
         status="queued",
-        minutes=current_user_balance(current_user),
+        minutes=current_balance,
     )
 
 
