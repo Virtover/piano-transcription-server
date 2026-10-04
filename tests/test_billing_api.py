@@ -152,16 +152,10 @@ def test_invalid_google_token_is_rejected(api_context, monkeypatch):
     assert response.status_code == 401
 
 
-def test_google_oauth_client_id_can_be_loaded_from_secrets_file(api_context, tmp_path):
+def test_google_oauth_client_id_uses_configured_value(api_context):
     _, settings, _ = api_context
     from app import auth
 
-    client_file = tmp_path / "google-oauth-client.json"
-    client_file.write_text(
-        '{"web": {"client_id": "file-client-id.apps.googleusercontent.com"}}',
-        encoding="utf-8",
-    )
-    settings.google_oauth_client_id = None
-    settings.google_oauth_client_file = str(client_file)
+    settings.google_oauth_client_id = "direct-client-id.apps.googleusercontent.com"
 
-    assert auth.google_oauth_client_id() == "file-client-id.apps.googleusercontent.com"
+    assert auth.google_oauth_client_id() == "direct-client-id.apps.googleusercontent.com"

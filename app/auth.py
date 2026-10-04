@@ -1,5 +1,3 @@
-import json
-from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, HTTPException
@@ -14,35 +12,6 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def google_oauth_client_id() -> str | None:
-    configured_file = settings.google_oauth_client_file
-    if configured_file:
-        configured_path = Path(configured_file)
-        path = (
-            configured_path
-            if configured_path.is_absolute()
-            else Path("/run/secrets") / configured_path.name
-        )
-        try:
-            with path.open(encoding="utf-8") as file:
-                configuration = json.load(file)
-            client_configuration = (
-                configuration.get("web")
-                or configuration.get("installed")
-                or {}
-            )
-            client_id = client_configuration.get("client_id")
-        except (OSError, TypeError, ValueError) as error:
-            raise HTTPException(
-                status_code=503,
-                detail="Google authentication credentials cannot be read",
-            ) from error
-        if not isinstance(client_id, str) or not client_id:
-            raise HTTPException(
-                status_code=503,
-                detail="Google authentication client ID is missing",
-            )
-        return client_id
-
     return settings.google_oauth_client_id
 
 
