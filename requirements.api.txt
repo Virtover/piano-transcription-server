@@ -6,4 +6,5 @@ redis
 dramatiq[redis]
 google-api-python-client
 google-auth
+PyJWT
 yt-dlp

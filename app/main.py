@@ -7,6 +7,7 @@ from app.api.routes.transcriptions import (
     router,
 )
 from app.api.routes.billing import router as billing_router, server_info
+from app.auth import router as auth_router
 from app.config import settings
 from app.google_play import sync_products
 from app.worker.tasks import fail_active_jobs, reconcile_billing
@@ -18,6 +19,7 @@ app = FastAPI(
 
 app.include_router(router, prefix="/api")
 app.include_router(billing_router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
 app.add_api_route("/api/server-info", server_info, methods=["GET"], include_in_schema=False)
 
 

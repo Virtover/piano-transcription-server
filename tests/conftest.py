@@ -23,6 +23,7 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     settings.google_play_package_name = None
     settings.google_play_service_account_file = None
     settings.google_oauth_client_id = "test-client-id"
+    settings.auth_jwt_secret = "test-auth-secret"
     settings.billing_database_path = str(tmp_path / "billing.sqlite3")
     settings.data_dir = str(tmp_path / "data")
     settings.max_video_length_minutes = 20

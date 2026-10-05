@@ -1,6 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
 
 
+def access_token(client, user_id):
+    return client.post("/api/auth/sign-in", json={"google_id_token": user_id}).json()["access_token"]
+
+
 def test_transcription_lifecycle_and_invalid_jobs(api_context):
     client, _, _ = api_context
 
@@ -40,14 +44,14 @@ def test_transcription_validation_and_insufficient_balance(api_context):
 
     invalid = client.post(
         "/api/transcriptions",
-        headers={"Authorization": "Bearer short-user"},
+        headers={"Authorization": f"Bearer {access_token(client, 'short-user')}"},
         json={"source_url": "not-a-url"},
     )
     assert invalid.status_code == 422
 
     insufficient = client.post(
         "/api/transcriptions",
-        headers={"Authorization": "Bearer short-user"},
+        headers={"Authorization": f"Bearer {access_token(client, 'short-user')}"},
         json={"source_url": "https://example.com/video"},
     )
     assert insufficient.status_code == 402
@@ -63,11 +67,12 @@ def test_concurrent_transcriptions_cannot_over_reserve_balance(api_context):
     settings.billing_products = {"starter": 3}
     settings.free_minutes = 0
     billing.credit_purchase("racer", "starter", "unique-token")
+    racer_token = access_token(client, "racer")
 
     def submit():
         return client.post(
             "/api/transcriptions",
-            headers={"Authorization": "Bearer racer"},
+            headers={"Authorization": f"Bearer {racer_token}"},
             json={"source_url": "https://example.com/video"},
         )
 
@@ -77,7 +82,7 @@ def test_concurrent_transcriptions_cannot_over_reserve_balance(api_context):
     assert sorted(response.status_code for response in responses) == [202, 402]
     assert client.get(
         "/api/billing/balance",
-        headers={"Authorization": "Bearer racer"},
+        headers={"Authorization": f"Bearer {racer_token}"},
     ).json()["minutes"] == 1
 
 
@@ -89,7 +94,7 @@ def test_billed_job_is_only_visible_to_authenticated_owner(api_context):
 
     created = client.post(
         "/api/transcriptions",
-        headers={"Authorization": "Bearer owner"},
+        headers={"Authorization": f"Bearer {access_token(client, 'owner')}"},
         json={"source_url": "https://example.com/video"},
     )
     assert created.status_code == 202
@@ -97,7 +102,7 @@ def test_billed_job_is_only_visible_to_authenticated_owner(api_context):
     job_id = created.json()["job_id"]
     response = client.get(
         f"/api/transcriptions/{job_id}",
-        headers={"Authorization": "Bearer other-user"},
+        headers={"Authorization": f"Bearer {access_token(client, 'other-user')}"},
     )
 
     assert response.status_code == 404

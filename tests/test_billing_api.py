@@ -83,14 +83,15 @@ def test_google_play_purchase_is_idempotent(api_context, monkeypatch):
     )
     monkeypatch.setattr("googleapiclient.discovery.build", lambda *args, **kwargs: FakeService())
 
+    access_token = client.post("/api/auth/sign-in", json={"google_id_token": "user-1"}).json()["access_token"]
     first = client.post(
         "/api/billing/google-play/verify",
-        headers={"Authorization": "Bearer user-1"},
+        headers={"Authorization": f"Bearer {access_token}"},
         json={"product_id": "starter", "purchase_token": "token"},
     )
     second = client.post(
         "/api/billing/google-play/verify",
-        headers={"Authorization": "Bearer user-1"},
+        headers={"Authorization": f"Bearer {access_token}"},
         json={"product_id": "starter", "purchase_token": "token"},
     )
 
@@ -109,13 +110,15 @@ def test_google_play_free_grant_is_thread_safe(api_context):
     settings.free_minutes_period = "1d"
 
     def read_balance():
-        return client.get("/api/billing/balance", headers={"Authorization": "Bearer racer"})
+        access_token = client.post("/api/auth/sign-in", json={"google_id_token": "racer"}).json()["access_token"]
+        return client.get("/api/billing/balance", headers={"Authorization": f"Bearer {access_token}"})
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         responses = list(executor.map(lambda _: read_balance(), range(8)))
 
     assert all(response.status_code == 200 for response in responses)
-    assert client.get("/api/billing/balance", headers={"Authorization": "Bearer racer"}).json()["minutes"] == 7
+    access_token = client.post("/api/auth/sign-in", json={"google_id_token": "racer"}).json()["access_token"]
+    assert client.get("/api/billing/balance", headers={"Authorization": f"Bearer {access_token}"}).json()["minutes"] == 7
 
 
 def test_billed_balance_requires_verified_bearer_token(api_context):
@@ -132,21 +135,14 @@ def test_billed_balance_requires_verified_bearer_token(api_context):
     assert spoofed.status_code == 401
 
 
-def test_invalid_google_token_is_rejected(api_context, monkeypatch):
+def test_invalid_access_token_is_rejected(api_context):
     client, settings, _ = api_context
 
     settings.billing_provider = "google_play"
 
-    def reject_token(*args, **kwargs):
-        raise ValueError("invalid token")
-
-    monkeypatch.setattr(
-        "app.auth.id_token.verify_oauth2_token",
-        reject_token,
-    )
     response = client.get(
         "/api/billing/balance",
-        headers={"Authorization": "Bearer invalid"},
+        headers={"Authorization": "Bearer a-google-token-is-not-an-access-token"},
     )
 
     assert response.status_code == 401
