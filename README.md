@@ -302,9 +302,9 @@ Completed and failed jobs are retained for a limited time and are then automatic
 
 ### 💳 Billing and server information
 
-`GET /api/server-info` returns the billing provider, currently offered products, cleanup interval, free-minute policy, maximum video length, and `google_oauth_client_id` when billing is enabled. `GET /api/billing/cost?source_url=...` retrieves the video duration and transcription cost before submitting a job. `GET /api/billing/balance` returns the balance for the authenticated Google account, together with `free_minutes_seconds_until_next_grant` and `free_minutes_next_grant_at`. These fields are `null` when billing is disabled.
+`GET /api/server-info` returns the billing provider, currently offered products, cleanup interval, free-minute policy, maximum video length, and `google_oauth_client_ids` when billing is enabled. `GET /api/billing/cost?source_url=...` retrieves the video duration and transcription cost before submitting a job. `GET /api/billing/balance` returns the balance for the authenticated Google account, together with `free_minutes_seconds_until_next_grant` and `free_minutes_next_grant_at`. These fields are `null` when billing is disabled.
 
-When billing is enabled, requests require a valid Google OpenID Connect ID token in `Authorization: Bearer <token>`. The server verifies the token audience against the public `GOOGLE_OAUTH_CLIENT_ID` setting and uses the verified Google `sub` claim as the billing identity. `X-User-Id` is ignored and cannot select another user's balance. The server does not create or use a shared anonymous billing account.
+When billing is enabled, requests require a valid Google OpenID Connect ID token in `Authorization: Bearer <token>`. The server verifies the token audience against the public `GOOGLE_OAUTH_CLIENT_IDS` setting and uses the verified Google `sub` claim as the billing identity. `X-User-Id` is ignored and cannot select another user's balance. The server does not create or use a shared anonymous billing account.
 
 #### Google authentication setup
 
@@ -312,7 +312,7 @@ When billing is enabled, requests require a valid Google OpenID Connect ID token
 2. Set its public client ID in `.env`:
 
 ```env
-GOOGLE_OAUTH_CLIENT_ID=123456789-example.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_IDS=["123456789-example.apps.googleusercontent.com"]
 ```
 
 The Android client must request Google ID tokens whose audience is this client ID. The client ID is public configuration; do not commit Google service-account credentials.
@@ -375,7 +375,7 @@ Example response:
   "max_video_length_minutes": 120,
   "free_minutes": 10,
   "free_minutes_period": "30d",
-  "google_oauth_client_id": "123456789-example.apps.googleusercontent.com"
+  "google_oauth_client_ids": ["123456789-example.apps.googleusercontent.com"]
 }
 ```
 
@@ -482,7 +482,7 @@ Settings are read from environment variables or `.env`:
 | `FREE_MINUTES_PERIOD` | unset | Free-credit interval, using `s`, `m`, `h`, `d`, or `w`; only used when free minutes are enabled |
 | `FREE_MINUTES` | unset | Free minutes granted per interval; omit to disable free credits |
 | `MAX_VIDEO_LENGTH_MINUTES` | unset | Maximum accepted video length; unset means no limit |
-| `GOOGLE_OAUTH_CLIENT_ID` | unset | Public Google OAuth client ID; required when billing is enabled |
+| `GOOGLE_OAUTH_CLIENT_IDS` | [] | Public Google OAuth client IDS; required when billing is enabled |
 | `GOOGLE_PLAY_PACKAGE_NAME` | unset | Android application package for Google Play verification |
 | `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` | unset | Service-account JSON filename inside the mounted `./secrets` directory |
 

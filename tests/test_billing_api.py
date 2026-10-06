@@ -20,17 +20,17 @@ def test_none_provider_exposes_balance_and_rejects_google_play(api_context):
     assert response.status_code == 409
 
 
-def test_server_info_exposes_oauth_client_id_only_when_billing_is_enabled(api_context):
+def test_server_info_exposes_oauth_client_ids_only_when_billing_is_enabled(api_context):
     client, settings, _ = api_context
 
     disabled = client.get("/api/billing/server-info")
     assert disabled.status_code == 200
-    assert "google_oauth_client_id" not in disabled.json()
+    assert "google_oauth_client_ids" not in disabled.json()
 
     settings.billing_provider = "google_play"
     enabled = client.get("/api/billing/server-info")
     assert enabled.status_code == 200
-    assert enabled.json()["google_oauth_client_id"] == "test-client-id"
+    assert enabled.json()["google_oauth_client_ids"] == ["test-client-id"]
 
     settings.billing_provider = "google_play"
     response = client.get("/api/billing/balance")
@@ -132,18 +132,10 @@ def test_billed_balance_requires_verified_bearer_token(api_context):
     assert spoofed.status_code == 401
 
 
-def test_invalid_google_token_is_rejected(api_context, monkeypatch):
+def test_invalid_google_token_is_rejected(api_context):
     client, settings, _ = api_context
 
     settings.billing_provider = "google_play"
-
-    def reject_token(*args, **kwargs):
-        raise ValueError("invalid token")
-
-    monkeypatch.setattr(
-        "app.auth.id_token.verify_oauth2_token",
-        reject_token,
-    )
     response = client.get(
         "/api/billing/balance",
         headers={"Authorization": "Bearer invalid"},
@@ -152,10 +144,13 @@ def test_invalid_google_token_is_rejected(api_context, monkeypatch):
     assert response.status_code == 401
 
 
-def test_google_oauth_client_id_uses_configured_value(api_context):
+def test_google_oauth_client_ids_use_configured_values(api_context):
     _, settings, _ = api_context
     from app import auth
 
-    settings.google_oauth_client_id = "direct-client-id.apps.googleusercontent.com"
+    settings.google_oauth_client_ids = [
+        "direct-client-id.apps.googleusercontent.com",
+        "another-client-id.apps.googleusercontent.com",
+    ]
 
-    assert auth.google_oauth_client_id() == "direct-client-id.apps.googleusercontent.com"
+    assert auth.google_oauth_client_ids() == settings.google_oauth_client_ids

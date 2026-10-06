@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+import time
 
 import fakeredis
 import pytest
@@ -22,7 +23,7 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     settings.free_minutes_period = None
     settings.google_play_package_name = None
     settings.google_play_service_account_file = None
-    settings.google_oauth_client_id = "test-client-id"
+    settings.google_oauth_client_ids = ["test-client-id"]
     settings.billing_database_path = str(tmp_path / "billing.sqlite3")
     settings.data_dir = str(tmp_path / "data")
     settings.max_video_length_minutes = 20
@@ -37,11 +38,28 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     monkeypatch.setattr(tasks, "billing", billing)
     monkeypatch.setattr(transcription_routes, "video_duration", lambda source_url: 130.0)
     monkeypatch.setattr(transcription_routes.transcribe_job, "send", lambda *args: None)
-    monkeypatch.setattr(
-        auth.id_token,
-        "verify_oauth2_token",
-        lambda token, request, audience: {"sub": token},
-    )
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        @property
+        def ok(self):
+            return 200 <= self.status_code < 300
+
+        def json(self):
+            return self._payload
+
+    def fake_google_request(url, **kwargs):
+        token = kwargs["params"]["access_token"]
+        if token == "invalid":
+            return FakeResponse(401, {})
+        return FakeResponse(
+            200,
+            {"aud": "test-client-id", "sub": token, "exp": str(int(time.time()) + 3600)},
+        )
+
+    monkeypatch.setattr(auth.requests, "get", fake_google_request)
 
     monkeypatch.setattr(main, "fail_active_jobs", lambda reason: None)
     monkeypatch.setattr(main, "reconcile_billing", lambda: None)
