@@ -4,10 +4,6 @@
 
 Piano Transcription Server accepts a public video URL, downloads its audio, runs [Transkun](https://github.com/Yujia-Yan/Transkun), and exposes the resulting MIDI file through FastAPI. Redis stores job state and Docker Compose runs the API, worker, cleanup service, and Redis together. The worker uses NVIDIA CUDA when available and falls back to CPU.
 
-## 🎼 Piano Weave
-
-The server is independent of any client that can make HTTP requests and download MIDI files. One client is [Piano Weave](https://github.com/Virtover/pianoweave), an Android application for learning piano songs from online videos.
-
 ## 🚀 Start here
 
 ```powershell
@@ -36,6 +32,10 @@ See [Local setup](docs/setup.md) for requirements, GPU checks, health checks, an
 ### ⚙️ Operating and contributing
 
 * [Architecture and operations](docs/architecture.md) - service boundaries, transcription behavior, retention, cleanup, and limitations.
+
+## 🎼 Piano Weave
+
+The server is independent of any client that can make HTTP requests and download MIDI files. One client is [Piano Weave](https://github.com/Virtover/pianoweave), an Android application for learning piano songs from online videos.
 
 ## 📄 License
 
