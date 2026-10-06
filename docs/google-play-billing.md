@@ -5,7 +5,6 @@ This guide covers the additional setup required when `BILLING_PROVIDER=google_pl
 ## 🔐 Google Cloud and OAuth
 
 1. In Google Cloud Console, create the OAuth 2.0 client IDs used by the application, including the **Android client ID** and **Web client ID**.
-
 2. Put the public client IDs in `.env`:
 
 ```env
@@ -19,13 +18,9 @@ The client IDs are public configuration. Never commit OAuth client secrets or se
 ## 🔑 Google Play service account
 
 1. Create or select a Google Cloud service account.
-
 2. Enable the Android Publisher API for its project.
-
 3. Grant the service account access to the Android application in Google Play Console with permission to view and manage orders and subscriptions, as required by the Publisher API.
-
 4. Download its JSON key and place it in the local `secrets` directory. Do not commit it.
-
 5. Set the package name and filename in `.env`:
 
 ```env

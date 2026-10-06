@@ -1,6 +1,6 @@
-# Local setup
+# 🛠️ Local setup
 
-## Requirements
+## 📋 Requirements
 
 * Docker Desktop with Docker Compose and Linux containers enabled.
 * NVIDIA drivers and NVIDIA Container Toolkit for GPU transcription.
@@ -8,7 +8,7 @@
 
 The worker image includes `ffmpeg`, Transkun, and the Python dependencies. Redis and shared job storage are provided by Compose.
 
-## Run the stack
+## 🚀 Run the stack
 
 ```powershell
 Copy-Item .env.example .env
@@ -26,7 +26,7 @@ Invoke-RestMethod http://localhost:8000/ready
 
 Do not commit `.env` or any machine-specific values.
 
-## GPU and CPU execution
+## 🎮 GPU and CPU execution
 
 Verify GPU access before starting the stack:
 
@@ -38,7 +38,7 @@ The worker automatically uses CUDA when PyTorch detects a usable NVIDIA GPU. Oth
 
 By default, CPU mode runs one transcription at a time. GPU capacity is estimated from currently free VRAM using `WORKER_MEMORY_PER_JOB_GIB` (3 GiB by default). See [Configuration](configuration.md) for tuning details.
 
-## Worker scaling
+## 📈 Worker scaling
 
 Run multiple worker containers:
 

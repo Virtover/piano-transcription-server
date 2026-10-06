@@ -1,8 +1,8 @@
-# API guide
+# 📡 API guide
 
 The API base URL is `http://localhost:8000`. FastAPI's generated reference is available at `/docs`.
 
-## Transcriptions
+## 🎹 Transcriptions
 
 Create a job with an HTTP(S) video URL:
 
@@ -42,7 +42,7 @@ Invoke-WebRequest `
 
 The MIDI can contain piano notes, velocities, onset and offset information, sustain-pedal events (`CC64`), and other detected MIDI control events. The download returns `409` while processing, `404` for an unknown or missing result, and `500` for invalid stored result metadata.
 
-## Billing endpoints
+## 💳 Billing endpoints
 
 * `GET /api/server-info` returns billing provider, available offers, cleanup interval, free-minute policy, and maximum video length.
 * `GET /api/billing/cost?source_url=...` reads video duration and returns the transcription cost before submission.
