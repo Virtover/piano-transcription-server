@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.transcription.cancellation import TranscriptionCancelled
+from app.transcription.device import automatic_cpu_threads
 from app.transcription.piano_transcription import (
     transcribe_piano,
 )
@@ -34,6 +35,19 @@ AUDIO_FILE_SUFFIXES = {
 class DownloadedAudio:
     path: Path
     metadata: dict[str, Any]
+
+
+def ffmpeg_thread_count() -> int | None:
+    value = os.environ.get("WORKER_THREADS", "auto").strip().lower()
+    if value == "auto":
+        return automatic_cpu_threads()
+    try:
+        thread_count = int(value)
+    except ValueError as error:
+        raise ValueError("WORKER_THREADS must be an integer or 'auto'") from error
+    if thread_count < 1:
+        raise ValueError("WORKER_THREADS must be at least 1")
+    return thread_count
 
 
 def download_audio(
@@ -98,18 +112,23 @@ def download_audio(
 
     wav_path = output_dir / "audio.wav"
 
+    ffmpeg_threads = ffmpeg_thread_count()
+    ffmpeg_command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(downloaded_path),
+        "-ar",
+        "44100",
+        "-ac",
+        "1",
+    ]
+    if ffmpeg_threads is not None:
+        ffmpeg_command.extend(["-threads", str(ffmpeg_threads)])
+    ffmpeg_command.append(str(wav_path))
+
     run_process(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(downloaded_path),
-            "-ar",
-            "44100",
-            "-ac",
-            "1",
-            str(wav_path),
-        ],
+        ffmpeg_command,
         cancellation_callback=cancellation_callback,
     )
 

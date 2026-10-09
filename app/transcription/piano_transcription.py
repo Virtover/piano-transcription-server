@@ -1,5 +1,12 @@
+import gc
 import math
+import os
+import queue
+import threading
+import time
+from concurrent.futures import Future
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -18,11 +25,61 @@ from transkun.ModelTransformer import (
     resolveOverlapping,
 )
 
-from app.transcription.device import cuda_job_capacities
+from app.transcription.device import (
+    automatic_cpu_threads,
+    cuda_job_capacities,
+)
 
 
 ProgressCallback = Callable[[float], None]
 CancellationCallback = Callable[[], bool]
+
+
+def configure_cpu_threads() -> None:
+    value = os.environ.get("WORKER_THREADS", "auto").strip().lower()
+    if value == "auto":
+        thread_count = automatic_cpu_threads()
+    else:
+        thread_count = int(value)
+    if thread_count < 1:
+        raise ValueError("WORKER_THREADS must be at least 1")
+    torch.set_num_threads(thread_count)
+
+
+@dataclass
+class _BatchRequest:
+    audio: np.ndarray
+    progress_callback: ProgressCallback | None
+    cancellation_callback: CancellationCallback | None
+    result: Future
+
+
+def _positive_int(name: str, default: int) -> int:
+    value = os.environ.get(name, str(default)).strip().lower()
+    if value == "auto":
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer or 'auto'") from error
+    if parsed < 1:
+        raise ValueError(f"{name} must be at least 1")
+    return parsed
+
+
+def _batch_timeout_seconds() -> float:
+    value = os.environ.get("WORKER_BATCH_TIMEOUT_SECONDS", "2").strip()
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise ValueError(
+            "WORKER_BATCH_TIMEOUT_SECONDS must be a positive number"
+        ) from error
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(
+            "WORKER_BATCH_TIMEOUT_SECONDS must be a positive number"
+        )
+    return parsed
 
 
 def read_audio(
@@ -360,6 +417,234 @@ def transcribe_audio(
     return events_all
 
 
+def _transcribe_audio_batch(
+    model,
+    requests: list[_BatchRequest],
+) -> None:
+    device = next(model.parameters()).device
+    step_in_second = model.segmentHopSizeInSecond
+    segment_size_in_second = model.segmentSizeInSecond
+    pad_time_begin = segment_size_in_second - step_in_second
+    segment_size = math.ceil(segment_size_in_second * model.fs)
+    step_size = math.ceil(
+        step_in_second * model.fs / model.hopSize
+    ) * model.hopSize
+    start_frame_idx = math.floor(
+        pad_time_begin * model.fs / model.hopSize
+    )
+
+    states = []
+    for request in requests:
+        try:
+            x = torch.from_numpy(request.audio).to(device)
+            x = x.transpose(-1, -2)
+            x = F.pad(
+                x,
+                (
+                    math.ceil(pad_time_begin * model.fs),
+                    math.ceil(pad_time_begin * model.fs),
+                ),
+            )
+            n_sample = x.shape[-1]
+            states.append(
+                {
+                    "request": request,
+                    "x": x,
+                    "n_sample": n_sample,
+                    "segment_count": math.ceil(n_sample / step_size),
+                    "segment_index": 0,
+                    "events": defaultdict(list),
+                    "start_pos": [
+                        start_frame_idx
+                    ] * len(model.targetMIDIPitch),
+                }
+            )
+        except Exception as error:
+            request.result.set_exception(error)
+
+    while states:
+        active = []
+        frames = []
+        forced_start_positions = []
+
+        for state in states:
+            request = state["request"]
+            if (
+                request.cancellation_callback
+                and request.cancellation_callback()
+            ):
+                request.result.set_exception(TranscriptionCancelled())
+                continue
+
+            segment_index = state["segment_index"] + 1
+            if request.progress_callback:
+                request.progress_callback(
+                    (segment_index - 1) / state["segment_count"]
+                )
+
+            i = state["segment_index"] * step_size
+            j = min(i + segment_size, state["n_sample"])
+            cur_slice = state["x"][:, i:j]
+            if cur_slice.shape[-1] < segment_size:
+                cur_slice = F.pad(
+                    cur_slice,
+                    (0, segment_size - cur_slice.shape[-1]),
+                )
+
+            frames.append(
+                makeFrame(
+                    cur_slice,
+                    model.hopSize,
+                    model.windowSize,
+                )
+            )
+            forced_start_positions.extend(state["start_pos"])
+            active.append(state)
+
+        if not active:
+            states = []
+            continue
+
+        try:
+            with torch.no_grad():
+                batch_events, last_positions = model.transcribeFrames(
+                    torch.stack(frames),
+                    forcedStartPos=forced_start_positions,
+                    velocityCriteron="hamming",
+                    onsetBound=None,
+                    lastFrameIdx=round(segment_size / model.hopSize),
+                )
+        except Exception as error:
+            for state in active:
+                state["request"].result.set_exception(error)
+            return
+
+        next_states = []
+        last_position_index = 0
+        for state, cur_events in zip(active, batch_events):
+            request = state["request"]
+            segment_index = state["segment_index"] + 1
+            begin_time = (
+                state["segment_index"] * step_size / model.fs
+                - pad_time_begin
+            )
+            for event in cur_events:
+                event.start = max(event.start + begin_time, 0)
+                event.end = max(event.end + begin_time, event.start)
+                pitch = event.pitch
+                events = state["events"][pitch]
+                if events and event.start < events[-1].end:
+                    if event.hasOnset:
+                        events[-1] = event
+                    else:
+                        events[-1].hasOffset = event.hasOffset
+                        events[-1].end = max(event.end, events[-1].end)
+                elif event.hasOnset:
+                    events.append(event)
+
+            symbol_count = len(model.targetMIDIPitch)
+            state["start_pos"] = [
+                max(
+                    position - int(step_size / model.hopSize),
+                    0,
+                )
+                for position in last_positions[
+                    last_position_index:last_position_index + symbol_count
+                ]
+            ]
+            last_position_index += symbol_count
+            state["segment_index"] = segment_index
+            if request.progress_callback:
+                request.progress_callback(
+                    segment_index / state["segment_count"]
+                )
+
+            if segment_index < state["segment_count"]:
+                next_states.append(state)
+            else:
+                for events in state["events"].values():
+                    if events:
+                        events[-1].hasOffset = True
+                events_all = [
+                    event
+                    for events in state["events"].values()
+                    for event in events
+                    if event.hasOffset
+                ]
+                request.result.set_result(resolveOverlapping(events_all))
+
+        states = next_states
+
+
+class _GpuBatcher:
+    def __init__(self, device: str):
+        self.device = device
+        self.model = load_model(device)
+        self.requests: queue.Queue[_BatchRequest] = queue.Queue()
+        self.batch_size = _positive_int("WORKER_BATCH_SIZE", 6)
+        self.timeout = _batch_timeout_seconds()
+        self.thread = threading.Thread(
+            target=self._run,
+            name=f"transcription-batcher-{device}",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def submit(
+        self,
+        audio: np.ndarray,
+        progress_callback: ProgressCallback | None,
+        cancellation_callback: CancellationCallback | None,
+    ) -> list:
+        result = Future()
+        self.requests.put(
+            _BatchRequest(
+                audio=audio,
+                progress_callback=progress_callback,
+                cancellation_callback=cancellation_callback,
+                result=result,
+            )
+        )
+        return result.result()
+
+    def _run(self) -> None:
+        while True:
+            batch = [self.requests.get()]
+            end_time = time.monotonic() + self.timeout
+            while len(batch) < self.batch_size:
+                remaining = end_time - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    batch.append(self.requests.get(timeout=remaining))
+                except queue.Empty:
+                    break
+            try:
+                _transcribe_audio_batch(self.model, batch)
+            except Exception as error:
+                for request in batch:
+                    if not request.result.done():
+                        request.result.set_exception(error)
+            finally:
+                batch.clear()
+                gc.collect()
+                if self.device.startswith("cuda:"):
+                    torch.cuda.empty_cache()
+
+
+_gpu_batchers: dict[str, _GpuBatcher] = {}
+_gpu_batchers_lock = threading.Lock()
+
+
+def _get_gpu_batcher(device: str) -> _GpuBatcher:
+    with _gpu_batchers_lock:
+        batcher = _gpu_batchers.get(device)
+        if batcher is None:
+            batcher = _GpuBatcher(device)
+            _gpu_batchers[device] = batcher
+        return batcher
+
+
 def transcribe_piano(
     audio_path: Path,
     output_path: Path,
@@ -385,7 +670,11 @@ def transcribe_piano(
     if progress_callback:
         progress_callback(0.07)
 
-    model = load_model(device)
+    if device == "cpu":
+        configure_cpu_threads()
+
+    batcher = _get_gpu_batcher(device)
+    model = batcher.model
 
     if cancellation_callback and cancellation_callback():
         raise TranscriptionCancelled()
@@ -426,8 +715,7 @@ def transcribe_piano(
                 )
             )
 
-    events = transcribe_audio(
-        model=model,
+    events = batcher.submit(
         audio=audio,
         progress_callback=report_progress,
         cancellation_callback=cancellation_callback,

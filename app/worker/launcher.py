@@ -1,7 +1,11 @@
 import os
 import shutil
 
-from app.transcription.device import cuda_job_capacities
+from app.transcription.device import (
+    automatic_cpu_threads,
+    cuda_job_capacities,
+    physical_cpu_count,
+)
 
 
 DEFAULT_CPU_CONCURRENCY = 1
@@ -25,7 +29,27 @@ def configured_value(name: str) -> int | None:
 
 
 def cpu_count() -> int:
-    return max(1, os.cpu_count() or 1)
+    return physical_cpu_count()
+
+
+def cpu_thread_count() -> int:
+    configured = configured_value("WORKER_THREADS")
+    automatic = automatic_cpu_threads()
+    return min(configured, cpu_count()) if configured else automatic
+
+
+def batch_size() -> int:
+    return configured_value("WORKER_BATCH_SIZE") or 6
+
+
+def configure_cpu_environment(gpu: tuple[int, int, str] | None) -> None:
+    if gpu:
+        return
+
+    thread_count = str(cpu_thread_count())
+    os.environ["WORKER_THREADS"] = thread_count
+    os.environ["OMP_NUM_THREADS"] = thread_count
+    os.environ["MKL_NUM_THREADS"] = thread_count
 
 
 def gpu_capacity() -> tuple[int, int, str] | None:
@@ -46,9 +70,6 @@ def gpu_capacity() -> tuple[int, int, str] | None:
 
 
 def worker_capacity() -> tuple[int, int, str]:
-    processes = configured_value("WORKER_PROCESSES")
-    threads = configured_value("WORKER_THREADS")
-
     configured_max = configured_value("WORKER_MAX_CONCURRENCY")
     gpu = gpu_capacity()
     if gpu:
@@ -60,25 +81,28 @@ def worker_capacity() -> tuple[int, int, str]:
             f"({gpu_summary})"
         )
     else:
-        cpu_concurrency = configured_value("WORKER_CPU_CONCURRENCY")
-        automatic_capacity = cpu_concurrency or DEFAULT_CPU_CONCURRENCY
+        automatic_capacity = DEFAULT_CPU_CONCURRENCY
         automatic_processes = 1
         resource_summary = (
             f"{cpu_count()} CPU(s), no CUDA GPU detected, "
-            f"up to {automatic_capacity} CPU job(s)"
+            "one batched CPU job"
         )
 
     if configured_max:
         automatic_capacity = min(automatic_capacity, configured_max)
 
-    processes = processes or automatic_processes
-    threads = threads or max(1, automatic_capacity // processes)
+    processes = automatic_processes
+    if gpu:
+        threads = automatic_capacity
+    else:
+        threads = batch_size()
 
     return processes, threads, resource_summary
 
 
 def main() -> None:
     processes, threads, resource_summary = worker_capacity()
+    configure_cpu_environment(gpu_capacity())
     print(
         f"Starting Dramatiq with {processes} process(es) and "
         f"{threads} thread(s) per process ({resource_summary})",

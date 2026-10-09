@@ -7,10 +7,11 @@ Settings are read from `.env`. Start from [.env.example](../.env.example). Docke
 | `REDIS_URL`                        | `redis://localhost:6379/0` | Redis connection URL. Compose uses `redis://redis:6379/0`.                 |
 | `DATA_DIR`                         | `/data`                    | Shared directory for job output files.                                     |
 | `BILLING_DATABASE_PATH`            | `/data/billing.sqlite3`    | SQLite database for balances, purchases, and reservations.                 |
-| `WORKER_PROCESSES`                 | `auto`                     | Dramatiq worker processes; `auto` uses one process.                        |
-| `WORKER_THREADS`                   | `auto`                     | Threads per process; `auto` derives from detected capacity.                |
-| `WORKER_CPU_CONCURRENCY`           | `1`                        | Automatic concurrent jobs without a usable GPU.                            |
-| `WORKER_MEMORY_PER_JOB_GIB`        | `3`                        | Approximate free VRAM budget per GPU job; fractional values are supported. |
+| `WORKER_THREADS`                   | `auto`                     | CPU thread limit; auto uses physical CPU cores minus two, capped at capacity. |
+| `WORKER_MODEL_MEMORY_GIB`          | `3.0`                      | VRAM reserved for the transcription model on each GPU.                      |
+| `WORKER_MEMORY_PER_JOB_GIB`        | `1.5`                      | VRAM reserved for each concurrent transcription job.                       |
+| `WORKER_BATCH_SIZE`                | `6`                        | Maximum batch size and CPU request-thread count.                             |
+| `WORKER_BATCH_TIMEOUT_SECONDS`     | `2`                        | Maximum CPU or GPU batch wait before running a partial batch.               |
 | `WORKER_MAX_CONCURRENCY`           | `auto`                     | Optional cap for automatic concurrency.                                    |
 | `CLEANUP_INTERVAL_SECONDS`         | `600`                      | Cleanup scan interval.                                                     |
 | `BILLING_PROVIDER`                 | `none`                     | `none` or `google_play`.                                                   |

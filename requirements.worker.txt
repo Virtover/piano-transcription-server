@@ -1,5 +1,6 @@
 redis
 dramatiq[redis]
+psutil
 pydantic-settings
 yt-dlp
 torch
