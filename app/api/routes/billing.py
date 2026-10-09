@@ -32,7 +32,17 @@ class GooglePurchaseRequest(BaseModel):
 def video_duration(source_url: HttpUrl) -> float:
     try:
         result = subprocess.run(
-            ["yt-dlp", "--dump-single-json", "--no-download", str(source_url)],
+            [
+                "yt-dlp",
+                "--no-playlist",
+                "--js-runtimes",
+                "deno",
+                "--extractor-args",
+                "youtube:player_client=web,android",
+                "--dump-single-json",
+                "--no-download",
+                str(source_url),
+            ],
             check=True,
             capture_output=True,
             text=True,

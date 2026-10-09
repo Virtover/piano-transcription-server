@@ -8,6 +8,11 @@ RUN apt-get update \
         python3-pip \
         ffmpeg \
         wget \
+        unzip \
+    && wget -qO /tmp/deno.zip https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
+    && unzip -p /tmp/deno.zip deno > /usr/local/bin/deno \
+    && chmod +x /usr/local/bin/deno \
+    && rm -f /tmp/deno.zip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.worker.txt .

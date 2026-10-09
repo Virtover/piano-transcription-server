@@ -2,6 +2,17 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		ca-certificates \
+		unzip \
+		wget \
+	&& wget -qO /tmp/deno.zip https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
+	&& unzip -p /tmp/deno.zip deno > /usr/local/bin/deno \
+	&& chmod +x /usr/local/bin/deno \
+	&& rm -f /tmp/deno.zip \
+	&& rm -rf /var/lib/apt/lists/*
+
 COPY requirements.api.txt .
 
 RUN pip install --no-cache-dir -r requirements.api.txt

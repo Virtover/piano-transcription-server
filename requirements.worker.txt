@@ -3,6 +3,7 @@ dramatiq[redis]
 psutil
 pydantic-settings
 yt-dlp
+yt-dlp-ejs
 torch
 torchaudio
 transkun
