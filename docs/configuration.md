@@ -9,10 +9,10 @@ Settings are read from `.env`. Start from [.env.example](../.env.example). Docke
 | `BILLING_DATABASE_PATH`            | `/data/billing.sqlite3`    | SQLite database for balances, purchases, and reservations.                 |
 | `WORKER_THREADS`                   | `auto`                     | CPU thread limit; auto uses physical CPU cores minus two, capped at capacity. |
 | `WORKER_MODEL_MEMORY_GIB`          | `3.0`                      | VRAM reserved for the transcription model on each GPU.                      |
-| `WORKER_MEMORY_PER_JOB_GIB`        | `1.5`                      | VRAM reserved for each concurrent transcription job.                       |
-| `WORKER_BATCH_SIZE`                | `6`                        | Maximum batch size and CPU request-thread count.                             |
+| `WORKER_MEMORY_PER_JOB_GIB`        | `0.65`                     | Estimated VRAM budget for each concurrent GPU transcription job.            |
+| `WORKER_BATCH_SIZE`                | `6`                        | Maximum requests combined into one model batch; also CPU worker thread count. |
 | `WORKER_BATCH_TIMEOUT_SECONDS`     | `2`                        | Maximum CPU or GPU batch wait before running a partial batch.               |
-| `WORKER_MAX_CONCURRENCY`           | `auto`                     | Optional cap for automatic concurrency.                                    |
+| `WORKER_MAX_CONCURRENCY`           | `auto`                     | Optional cap for automatically calculated GPU job concurrency.               |
 | `CLEANUP_INTERVAL_SECONDS`         | `600`                      | Cleanup scan interval.                                                     |
 | `BILLING_PROVIDER`                 | `none`                     | `none` or `google_play`.                                                   |
 | `BILLING_PRODUCTS`                 | `{}`                       | JSON mapping of Play product IDs to transcription minutes.                 |
@@ -24,5 +24,7 @@ Settings are read from `.env`. Start from [.env.example](../.env.example). Docke
 | `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` | unset                      | Service-account JSON filename in the mounted `secrets` directory.          |
 
 The API, worker, and cleanup service must use the same `DATA_DIR`. Compose mounts `./secrets` read-only at `/run/secrets` for the API and worker.
+
+`WORKER_BATCH_SIZE` and `WORKER_MEMORY_PER_JOB_GIB` control different limits. The batch size controls how many queued requests are combined for one model inference call. The per-job VRAM setting estimates how many GPU jobs fit alongside the loaded model. A larger batch size does not increase the calculated GPU capacity.
 
 For billing configuration, use [.env.google-play.example](../.env.google-play.example) and follow the [Google Play billing guide](google-play-billing.md).
