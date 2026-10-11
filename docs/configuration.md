@@ -28,3 +28,11 @@ The API, worker, and cleanup service must use the same `DATA_DIR`. Compose mount
 `WORKER_BATCH_SIZE` and `WORKER_MEMORY_PER_JOB_GIB` control different limits. The batch size controls how many queued requests are combined for one model inference call. The per-job VRAM setting estimates how many GPU jobs fit alongside the loaded model. A larger batch size does not increase the calculated GPU capacity.
 
 For billing configuration, use [.env.google-play.example](../.env.google-play.example) and follow the [Google Play billing guide](google-play-billing.md).
+
+To manually add transcription minutes to an existing billed user, run the command in the API container:
+
+```powershell
+docker compose exec api python -m app.admin_credit --user user@example.com --minutes 30
+```
+
+The email must belong to a user who has authenticated with the API at least once.

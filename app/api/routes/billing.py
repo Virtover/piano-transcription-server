@@ -10,7 +10,7 @@ from redis import Redis
 from app.billing import Billing, transcription_cost
 from app.config import settings
 from app import google_play
-from app.auth import current_user_id, google_oauth_client_ids
+from app.auth import AuthenticatedUser, current_user, google_oauth_client_ids
 
 
 logger = logging.getLogger(__name__)
@@ -83,10 +83,11 @@ def server_info() -> dict[str, Any]:
 
 
 @router.get("/balance")
-def balance(current_user: str | None = Depends(current_user_id)) -> dict[str, int | str | None]:
-    current_user = current_user or "anonymous"
+def balance(user: AuthenticatedUser | None = Depends(current_user)) -> dict[str, int | str | None]:
+    current_user = user.user_id if user else "anonymous"
+    email = user.email if user else None
     if settings.billing_provider != "none":
-        billing.grant_free_minutes(current_user)
+        billing.grant_free_minutes(current_user, email)
     return {
         "user_id": current_user,
         "minutes": billing.get_balance(current_user),
@@ -103,11 +104,11 @@ def cost(source_url: HttpUrl) -> CostResponse:
 @router.post("/google-play/verify")
 def verify_google_purchase(
     request: GooglePurchaseRequest,
-    current_user: str | None = Depends(current_user_id),
+    user: AuthenticatedUser | None = Depends(current_user),
 ) -> dict[str, int | str]:
     if settings.billing_provider != "google_play":
         raise HTTPException(status_code=409, detail="Google Play billing is disabled")
-    if current_user is None:
+    if user is None:
         raise HTTPException(status_code=409, detail="Google Play billing is disabled")
     if request.product_id not in settings.billing_products:
         raise HTTPException(status_code=400, detail="Unknown product")
@@ -134,7 +135,7 @@ def verify_google_purchase(
 
     if response.get("purchaseState") != 0:
         raise HTTPException(status_code=400, detail="Purchase is not completed")
-    credited = billing.credit_purchase(current_user, request.product_id, request.purchase_token)
+    credited = billing.credit_purchase(user.user_id, request.product_id, request.purchase_token, user.email)
     try:
         service.purchases().products().consume(
             packageName=settings.google_play_package_name,
@@ -144,4 +145,4 @@ def verify_google_purchase(
     except Exception as error:
         logger.exception("Could not consume Google Play purchase")
         raise HTTPException(status_code=502, detail="Google Play purchase consumption failed") from error
-    return {"user_id": current_user, "credited_minutes": credited, "minutes": billing.get_balance(current_user)}
+    return {"user_id": user.user_id, "credited_minutes": credited, "minutes": billing.get_balance(user.user_id)}

@@ -11,7 +11,7 @@ from redis.exceptions import WatchError
 from app.config import settings
 from app.billing import Billing, cancelled_cost, transcription_cost, InsufficientMinutes
 from app.api.routes.billing import video_duration
-from app.auth import current_user_id
+from app.auth import AuthenticatedUser, current_user
 from app.worker.tasks import (
     JOB_TTL,
     job_key,
@@ -90,7 +90,7 @@ def require_job_owner(job: dict[str, str], authenticated_user_id: str | None) ->
 )
 def create_transcription(
     request: CreateTranscriptionRequest,
-    authenticated_user_id: str | None = Depends(current_user_id),
+    user: AuthenticatedUser | None = Depends(current_user),
 ):
     if not transcription_submissions_enabled:
         raise HTTPException(
@@ -98,13 +98,16 @@ def create_transcription(
             detail="The transcription server is still starting",
         )
 
-    current_user = authenticated_user_id or "anonymous"
+    current_user = user.user_id if user else "anonymous"
+    email = user.email if user else None
     duration = video_duration(request.source_url)
     cost = transcription_cost(duration)
     job_id = str(uuid.uuid4())
+    if email:
+        billing.grant_free_minutes(current_user, email)
     current_user_balance(current_user)
     try:
-        current_balance = billing.reserve(current_user, job_id, cost)
+        current_balance = billing.reserve(current_user, job_id, cost, email)
     except InsufficientMinutes as error:
         raise HTTPException(
             status_code=402,
@@ -149,7 +152,7 @@ def create_transcription(
 )
 def get_transcription(
     job_id: str,
-    authenticated_user_id: str | None = Depends(current_user_id),
+    user: AuthenticatedUser | None = Depends(current_user),
 ):
     job = redis.hgetall(job_key(job_id))
 
@@ -158,7 +161,7 @@ def get_transcription(
             status_code=404,
             detail="Transcription job not found",
         )
-    require_job_owner(job, authenticated_user_id)
+    require_job_owner(job, user.user_id if user else None)
 
     try:
         progress = float(job.get("progress", 0))
@@ -189,7 +192,7 @@ def get_transcription(
 )
 def cancel_transcription(
     job_id: str,
-    authenticated_user_id: str | None = Depends(current_user_id),
+    user: AuthenticatedUser | None = Depends(current_user),
 ):
     key = job_key(job_id)
 
@@ -204,7 +207,7 @@ def cancel_transcription(
                         status_code=404,
                         detail="Transcription job not found",
                     )
-                require_job_owner(job, authenticated_user_id)
+                require_job_owner(job, user.user_id if user else None)
 
                 status = job.get("status", "unknown")
 
@@ -250,7 +253,7 @@ def cancel_transcription(
 @router.get("/{job_id}/midi")
 def get_midi(
     job_id: str,
-    authenticated_user_id: str | None = Depends(current_user_id),
+    user: AuthenticatedUser | None = Depends(current_user),
 ):
     job = redis.hgetall(job_key(job_id))
 
@@ -259,7 +262,7 @@ def get_midi(
             status_code=404,
             detail="Transcription job not found",
         )
-    require_job_owner(job, authenticated_user_id)
+    require_job_owner(job, user.user_id if user else None)
 
     if job.get("status") != "completed":
         raise HTTPException(

@@ -56,7 +56,12 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
             return FakeResponse(401, {})
         return FakeResponse(
             200,
-            {"aud": "test-client-id", "sub": token, "exp": str(int(time.time()) + 3600)},
+            {
+                "aud": "test-client-id",
+                "sub": token,
+                "email": f"{token}@example.com",
+                "exp": str(int(time.time()) + 3600),
+            },
         )
 
     monkeypatch.setattr(auth.requests, "get", fake_google_request)

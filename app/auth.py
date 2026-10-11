@@ -1,4 +1,5 @@
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import requests
@@ -17,6 +18,12 @@ USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 # Avoids a call to Google on every API request. Worst-case delay before a
 # revoked token is noticed is the TTL.
 _token_cache: TTLCache = TTLCache(maxsize=10_000, ttl=300)
+
+
+@dataclass(frozen=True)
+class AuthenticatedUser:
+    user_id: str
+    email: str
 
 
 def google_allowed_client_ids() -> set[str]:
@@ -120,7 +127,10 @@ def _fetch_token_info(token: str, allowed_client_ids: set[str]) -> dict[str, Any
             raise HTTPException(status_code=401, detail="Invalid Google authentication token")
         if not userinfo.ok:
             raise _unavailable(RuntimeError(f"userinfo returned {userinfo.status_code}"))
-        info["sub"] = userinfo.json().get("sub")
+        userinfo_data = userinfo.json()
+        info["sub"] = userinfo_data.get("sub")
+        if not info.get("email"):
+            info["email"] = userinfo_data.get("email")
 
     if not info.get("sub"):
         raise HTTPException(
@@ -131,9 +141,9 @@ def _fetch_token_info(token: str, allowed_client_ids: set[str]) -> dict[str, Any
     return info
 
 
-def current_user_id(
+def current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-) -> str | None:
+) -> AuthenticatedUser | None:
     if settings.billing_provider == "none":
         return None
 
@@ -144,4 +154,8 @@ def current_user_id(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    return str(verify_google_access_token(credentials.credentials)["sub"])
+    info = verify_google_access_token(credentials.credentials)
+    email = info.get("email")
+    if not isinstance(email, str) or not email.strip():
+        raise HTTPException(status_code=401, detail="Google authentication token has no email")
+    return AuthenticatedUser(user_id=str(info["sub"]), email=email.strip().lower())

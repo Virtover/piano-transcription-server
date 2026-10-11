@@ -102,6 +102,16 @@ def test_google_play_purchase_is_idempotent(api_context, monkeypatch):
     assert second.json()["minutes"] == 5
 
 
+def test_manual_credit_uses_authenticated_email(api_context):
+    _, settings, billing = api_context
+    settings.billing_provider = "google_play"
+    settings.billing_products = {"starter": 1}
+    billing.credit_purchase("user-1", "starter", "purchase-token", "user@example.com")
+
+    assert billing.credit_minutes_by_email("USER@EXAMPLE.COM", 4) == 4
+    assert billing.get_balance("user-1") == 5
+
+
 def test_google_play_free_grant_is_thread_safe(api_context):
     client, settings, _ = api_context
     settings.billing_provider = "google_play"

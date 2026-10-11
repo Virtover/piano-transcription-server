@@ -26,6 +26,7 @@ class Billing:
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
+                    email TEXT UNIQUE,
                     minutes INTEGER NOT NULL DEFAULT 0,
                     free_grant_at INTEGER NOT NULL DEFAULT 0
                 );
@@ -45,6 +46,10 @@ class Billing:
                 );
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
+            if "email" not in columns:
+                connection.execute("ALTER TABLE users ADD COLUMN email TEXT")
+            connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_email_index ON users (email)")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=30)
@@ -53,13 +58,18 @@ class Billing:
         return connection
 
     @staticmethod
-    def _ensure_user(connection: sqlite3.Connection, user_id: str) -> None:
+    def _ensure_user(connection: sqlite3.Connection, user_id: str, email: str | None = None) -> None:
         connection.execute(
             "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
             (user_id,),
         )
+        if email:
+            connection.execute(
+                "UPDATE users SET email = ? WHERE user_id = ?",
+                (email, user_id),
+            )
 
-    def grant_free_minutes(self, user_id: str) -> int:
+    def grant_free_minutes(self, user_id: str, email: str | None = None) -> int:
         free_minutes = settings.free_minutes or 0
         if settings.billing_provider == "none" or free_minutes <= 0:
             return 0
@@ -67,7 +77,7 @@ class Billing:
         now = int(time.time())
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._ensure_user(connection, user_id)
+            self._ensure_user(connection, user_id, email)
             user = connection.execute(
                 "SELECT minutes, free_grant_at FROM users WHERE user_id = ?",
                 (user_id,),
@@ -116,12 +126,12 @@ class Billing:
             "free_minutes_next_grant_at": next_grant_at,
         }
 
-    def reserve(self, user_id: str, job_id: str, cost: int) -> int | None:
+    def reserve(self, user_id: str, job_id: str, cost: int, email: str | None = None) -> int | None:
         if settings.billing_provider == "none" or cost <= 0:
             return None
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._ensure_user(connection, user_id)
+            self._ensure_user(connection, user_id, email)
             user = connection.execute(
                 "SELECT minutes FROM users WHERE user_id = ?",
                 (user_id,),
@@ -183,7 +193,7 @@ class Billing:
                 (charge, job_id),
             )
 
-    def credit_purchase(self, user_id: str, product_id: str, token: str) -> int:
+    def credit_purchase(self, user_id: str, product_id: str, token: str, email: str | None = None) -> int:
         minutes = settings.billing_products[product_id]
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -193,7 +203,7 @@ class Billing:
             ).fetchone()
             if existing:
                 return 0
-            self._ensure_user(connection, user_id)
+            self._ensure_user(connection, user_id, email)
             connection.execute(
                 "INSERT INTO purchases VALUES (?, ?, ?, ?)",
                 (product_id, token, user_id, minutes),
@@ -201,6 +211,22 @@ class Billing:
             connection.execute(
                 "UPDATE users SET minutes = minutes + ? WHERE user_id = ?",
                 (minutes, user_id),
+            )
+            return minutes
+
+    def credit_minutes_by_email(self, email: str, minutes: int) -> int:
+        normalized_email = email.strip().lower()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            user = connection.execute(
+                "SELECT user_id FROM users WHERE email = ?",
+                (normalized_email,),
+            ).fetchone()
+            if user is None:
+                raise ValueError(f"No billed user found for email: {normalized_email}")
+            connection.execute(
+                "UPDATE users SET minutes = minutes + ? WHERE user_id = ?",
+                (minutes, user["user_id"]),
             )
             return minutes
 
