@@ -36,6 +36,29 @@ class VerifyPurchaseResponse(BaseModel):
     consumed: bool
 
 
+class Offer(BaseModel):
+    product_id: str
+    transcription_minutes: int
+
+
+class ServerInfoResponse(BaseModel):
+    billing_provider: str
+    offers: list[Offer]
+    cleanup_interval_seconds: int
+    max_video_length_minutes: int | None = None
+    # only present when billing is enabled
+    free_minutes: int | None = None
+    free_minutes_period: str | None = None
+    google_oauth_client_ids: list[str] | None = None
+
+
+class BalanceResponse(BaseModel):
+    user_id: str
+    minutes: int
+    free_minutes_seconds_until_next_grant: int | None = None
+    free_minutes_next_grant_at: int | None = None
+
+
 def video_duration(source_url: HttpUrl) -> float:
     try:
         result = subprocess.run(
@@ -65,41 +88,43 @@ def video_duration(source_url: HttpUrl) -> float:
     return float(duration)
 
 
-@router.get("/server-info")
-def server_info() -> dict[str, Any]:
+@router.get(
+    "/server-info",
+    response_model=ServerInfoResponse,
+    response_model_exclude_unset=True,
+)
+def server_info() -> ServerInfoResponse:
     product_ids = set(settings.billing_products)
     if settings.billing_provider == "google_play":
         product_ids &= google_play.synced_products or set()
-    response = {
-        "billing_provider": settings.billing_provider,
-        "offers": [
-            {"product_id": product_id, "transcription_minutes": minutes}
+    info = ServerInfoResponse(
+        billing_provider=settings.billing_provider,
+        offers=[
+            Offer(product_id=product_id, transcription_minutes=minutes)
             for product_id, minutes in settings.billing_products.items()
             if product_id in product_ids
         ],
-        "cleanup_interval_seconds": settings.cleanup_interval_seconds,
-        "max_video_length_minutes": settings.max_video_length_minutes,
-    }
+        cleanup_interval_seconds=settings.cleanup_interval_seconds,
+        max_video_length_minutes=settings.max_video_length_minutes,
+    )
     if settings.billing_provider != "none":
-        response.update({
-            "free_minutes": settings.free_minutes,
-            "free_minutes_period": settings.free_minutes_period,
-            "google_oauth_client_ids": google_oauth_client_ids(),
-        })
-    return response
+        info.free_minutes = settings.free_minutes
+        info.free_minutes_period = settings.free_minutes_period
+        info.google_oauth_client_ids = google_oauth_client_ids()
+    return info
 
 
-@router.get("/balance")
-def balance(user: AuthenticatedUser | None = Depends(current_user)) -> dict[str, int | str | None]:
-    current_user = user.user_id if user else "anonymous"
+@router.get("/balance", response_model=BalanceResponse)
+def balance(user: AuthenticatedUser | None = Depends(current_user)) -> BalanceResponse:
+    user_id = user.user_id if user else "anonymous"
     email = user.email if user else None
     if settings.billing_provider != "none":
-        billing.grant_free_minutes(current_user, email)
-    return {
-        "user_id": current_user,
-        "minutes": billing.get_balance(current_user),
-        **billing.free_minutes_status(current_user),
-    }
+        billing.grant_free_minutes(user_id, email)
+    return BalanceResponse(
+        user_id=user_id,
+        minutes=billing.get_balance(user_id),
+        **billing.free_minutes_status(user_id),
+    )
 
 
 @router.get("/cost", response_model=CostResponse)
