@@ -11,6 +11,16 @@ class Settings(BaseSettings):
     data_dir: str = "/data"
     billing_database_path: str = "/data/billing.sqlite3"
     cleanup_interval_seconds: int = Field(default=600, ge=1)
+    source_url_allowed_hosts: list[str] = [
+        "youtube.com","youtu.be","youtube-nocookie.com",
+        "vimeo.com","soundcloud.com","bandcamp.com","dailymotion.com",
+        "instagram.com","instagr.am",
+        "facebook.com","fb.watch",
+        "tiktok.com",
+        "x.com","twitter.com",
+        "reddit.com","redd.it",
+        "twitch.tv"
+    ]
     billing_provider: Literal["none", "google_play"] = "none"
     billing_products: dict[str, int] = Field(default_factory=dict)
     google_oauth_client_ids: list[str] = Field(default_factory=list)

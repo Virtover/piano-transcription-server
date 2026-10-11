@@ -12,6 +12,7 @@ from app.transcription.device import automatic_cpu_threads
 from app.transcription.piano_transcription import (
     transcribe_piano,
 )
+from app.url_safety import ensure_safe_source_url
 
 
 ProgressCallback = Callable[[float], None]
@@ -59,6 +60,8 @@ def download_audio(
         output_dir / "download.%(ext)s"
     )
 
+    safe_url = ensure_safe_source_url(str(source_url))
+
     result = run_process(
         [
             "yt-dlp",
@@ -83,7 +86,7 @@ def download_audio(
             "wav",
             "-o",
             output_template,
-            source_url,
+            safe_url,
         ],
         cancellation_callback=cancellation_callback,
     )

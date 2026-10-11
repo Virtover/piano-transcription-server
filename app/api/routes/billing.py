@@ -11,6 +11,7 @@ from app.billing import Billing, transcription_cost
 from app.config import settings
 from app import google_play
 from app.auth import AuthenticatedUser, current_user, google_oauth_client_ids
+from app.url_safety import ensure_safe_source_url, UnsafeSourceUrl
 
 
 logger = logging.getLogger(__name__)
@@ -61,9 +62,14 @@ class BalanceResponse(BaseModel):
 
 def video_duration(source_url: HttpUrl) -> float:
     try:
+        safe_url = ensure_safe_source_url(str(source_url))
+    except UnsafeSourceUrl as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    try:
         result = subprocess.run(
             [
                 "yt-dlp",
+                "--ignore-config",
                 "--no-playlist",
                 "--js-runtimes",
                 "deno",
@@ -71,7 +77,8 @@ def video_duration(source_url: HttpUrl) -> float:
                 "youtube:player_client=web,android",
                 "--dump-single-json",
                 "--no-download",
-                str(source_url),
+                "--",
+                safe_url,
             ],
             check=True,
             capture_output=True,

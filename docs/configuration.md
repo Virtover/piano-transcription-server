@@ -14,6 +14,7 @@ Settings are read from `.env`. Start from [.env.example](../.env.example). Docke
 | `WORKER_BATCH_TIMEOUT_SECONDS`     | `2`                        | Maximum CPU or GPU batch wait before running a partial batch.               |
 | `WORKER_MAX_CONCURRENCY`           | `auto`                     | Optional cap for automatically calculated GPU job concurrency.               |
 | `CLEANUP_INTERVAL_SECONDS`         | `600`                      | Cleanup scan interval.                                                     |
+| `SOURCE_URL_ALLOWED_HOSTS`         | see below                  | JSON list of hosts accepted as transcription sources. Subdomains match too.   |
 | `BILLING_PROVIDER`                 | `none`                     | `none` or `google_play`.                                                   |
 | `BILLING_PRODUCTS`                 | `{}`                       | JSON mapping of Play product IDs to transcription minutes.                 |
 | `FREE_MINUTES_PERIOD`              | unset                      | Free-credit interval using `s`, `m`, `h`, `d`, or `w`.                     |
@@ -22,6 +23,14 @@ Settings are read from `.env`. Start from [.env.example](../.env.example). Docke
 | `GOOGLE_OAUTH_CLIENT_IDS`          | `[]`                       | Public OAuth client IDs required for billing.                              |
 | `GOOGLE_PLAY_PACKAGE_NAME`         | unset                      | Android package name used for Play verification.                           |
 | `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` | unset                      | Service-account JSON filename in the mounted `secrets` directory.          |
+
+Default for `SOURCE_URL_ALLOWED_HOSTS`:
+
+```env
+SOURCE_URL_ALLOWED_HOSTS=["youtube.com","youtu.be","youtube-nocookie.com","vimeo.com","soundcloud.com","bandcamp.com","dailymotion.com","instagram.com","instagr.am","facebook.com","fb.watch","tiktok.com","x.com","twitter.com","reddit.com","redd.it","twitch.tv"]
+```
+
+Write it on a single line. Subdomains match too, so `youtube.com` also covers `music.youtube.com`.
 
 The API, worker, and cleanup service must use the same `DATA_DIR`. Compose mounts `./secrets` read-only at `/run/secrets` for the API and worker.
 
