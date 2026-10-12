@@ -23,7 +23,7 @@ The billing database is stored in the host-side `billing-data` directory and bac
 ### 🛠️ Getting started
 
 * [Local setup](docs/setup.md) - run the Docker stack, check services, and tune CPU/GPU workers.
-* [Configuration and environment](docs/configuration.md) - environment variables, shared volumes, and secrets.
+* [Configuration and environment](docs/configuration.md) - environment variables, shared volumes, secrets, and database backups.
 * [Testing](docs/testing.md) - install development dependencies and run checks.
 
 ### 🎵 Using the service
