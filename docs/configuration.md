@@ -52,7 +52,7 @@ For billing configuration, use [.env.google-play.example](../.env.google-play.ex
 To manually add transcription minutes to an existing billed user, run the command in the API container:
 
 ```powershell
-docker compose exec api python -m app.admin_credit --user user@example.com --user-id google-sub --minutes 30
+docker compose exec api python -m app.admin_credit --user user@example.com --minutes 30
 ```
 
 The email must belong to a user who has authenticated with the API at least once.

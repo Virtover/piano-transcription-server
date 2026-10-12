@@ -224,16 +224,16 @@ class Billing:
             )
             return minutes
 
-    def credit_minutes_by_email(self, email: str, user_id: str, minutes: int) -> int:
+    def credit_minutes_by_email(self, email: str, minutes: int) -> int:
         normalized_email = email.strip().lower()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             user = connection.execute(
-                "SELECT user_id FROM users WHERE email = ? AND user_id = ?",
-                (normalized_email, user_id),
+                "SELECT user_id FROM users WHERE email = ?",
+                (normalized_email,),
             ).fetchone()
             if user is None:
-                raise ValueError(f"No billed user found for email and user ID: {normalized_email}")
+                raise ValueError(f"No billed user found for email: {normalized_email}")
             connection.execute(
                 "UPDATE users SET minutes = minutes + ? WHERE user_id = ?",
                 (minutes, user["user_id"]),

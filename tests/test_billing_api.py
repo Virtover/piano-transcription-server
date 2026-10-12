@@ -108,7 +108,7 @@ def test_manual_credit_uses_authenticated_email(api_context):
     settings.billing_products = {"starter": 1}
     billing.credit_purchase("user-1", "starter", "purchase-token", "order-1", "user@example.com")
 
-    assert billing.credit_minutes_by_email("USER@EXAMPLE.COM", "user-1", 4) == 4
+    assert billing.credit_minutes_by_email("USER@EXAMPLE.COM", 4) == 4
     assert billing.get_balance("user-1") == 5
 
 
