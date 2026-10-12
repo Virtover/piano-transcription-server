@@ -62,7 +62,7 @@ def test_concurrent_transcriptions_cannot_over_reserve_balance(api_context):
     settings.billing_provider = "google_play"
     settings.billing_products = {"starter": 3}
     settings.free_minutes = 0
-    billing.credit_purchase("racer", "starter", "unique-token")
+    billing.credit_purchase("racer", "starter", "unique-token", "order-1")
 
     def submit():
         return client.post(

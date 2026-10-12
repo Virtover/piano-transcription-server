@@ -13,7 +13,7 @@ Client -> FastAPI API -> Redis job state -> Dramatiq worker -> shared data volum
 * `worker` downloads audio and runs the transcription pipeline.
 * `cleanup` removes files whose Redis job state has expired.
 * `redis` stores job state and queues work.
-* The shared `data` volume stores job files and the billing SQLite database.
+* The shared `data` volume stores job files. Billing SQLite data and hourly backups are stored in the host-mounted `billing-data` directory, available only to API and worker.
 
 The main implementation surfaces are `app/main.py`, `app/api/routes/`, `app/worker/`, and `app/transcription/`.
 

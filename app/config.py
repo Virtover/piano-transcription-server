@@ -9,7 +9,8 @@ class Settings(BaseSettings):
 
     redis_url: str = "redis://localhost:6379/0"
     data_dir: str = "/data"
-    billing_database_path: str = "/data/billing.sqlite3"
+    billing_database_path: str = "/billing/billing.sqlite3"
+    billing_backup_dir: str = "/billing/backups"
     cleanup_interval_seconds: int = Field(default=600, ge=1)
     source_url_allowed_hosts: list[str] = [
         "youtube.com","youtu.be","youtube-nocookie.com",

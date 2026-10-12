@@ -60,6 +60,7 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
                 "aud": "test-client-id",
                 "sub": token,
                 "email": f"{token}@example.com",
+                "email_verified": "true",
                 "exp": str(int(time.time()) + 3600),
             },
         )

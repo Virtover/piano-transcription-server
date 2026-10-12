@@ -1,3 +1,7 @@
+import logging
+import threading
+import time
+
 from fastapi import FastAPI
 from fastapi import HTTPException
 from redis import Redis
@@ -10,6 +14,20 @@ from app.api.routes.billing import router as billing_router, server_info
 from app.config import settings
 from app.google_play import sync_products
 from app.worker.tasks import fail_active_jobs, reconcile_billing
+from app.billing import Billing
+
+
+logger = logging.getLogger(__name__)
+
+
+def backup_billing_database() -> None:
+    while True:
+        try:
+            destination = f"{settings.billing_backup_dir}/billing-{int(time.time())}.sqlite3"
+            Billing(settings.billing_database_path).backup(destination)
+        except Exception:
+            logger.exception("Could not back up billing database")
+        time.sleep(3600)
 
 app = FastAPI(
     title="Piano Transcription Server",
@@ -27,6 +45,7 @@ def sync_billing_catalog() -> None:
     reconcile_billing()
     sync_products()
     enable_transcription_submissions()
+    threading.Thread(target=backup_billing_database, daemon=True).start()
 
 
 @app.get("/health")

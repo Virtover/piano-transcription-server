@@ -60,7 +60,7 @@ def test_google_play_purchase_is_idempotent(api_context, monkeypatch):
 
     class FakeRequest:
         def execute(self):
-            return {"purchaseState": 0}
+            return {"purchaseState": 0, "orderId": "order-1"}
 
     class FakeProducts:
         def get(self, **kwargs):
@@ -106,9 +106,9 @@ def test_manual_credit_uses_authenticated_email(api_context):
     _, settings, billing = api_context
     settings.billing_provider = "google_play"
     settings.billing_products = {"starter": 1}
-    billing.credit_purchase("user-1", "starter", "purchase-token", "user@example.com")
+    billing.credit_purchase("user-1", "starter", "purchase-token", "order-1", "user@example.com")
 
-    assert billing.credit_minutes_by_email("USER@EXAMPLE.COM", 4) == 4
+    assert billing.credit_minutes_by_email("USER@EXAMPLE.COM", "user-1", 4) == 4
     assert billing.get_balance("user-1") == 5
 
 

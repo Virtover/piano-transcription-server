@@ -10,6 +10,7 @@ services:
       - .env
     volumes:
       - data:${DATA_DIR}
+      - ./billing-data:/billing
       - ./secrets:/run/secrets:ro
     depends_on:
       redis:
@@ -23,6 +24,7 @@ services:
       - .env
     volumes:
       - data:${DATA_DIR}
+      - ./billing-data:/billing
       - ./secrets:/run/secrets:ro
     depends_on:
       redis:

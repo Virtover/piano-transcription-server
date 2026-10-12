@@ -174,7 +174,16 @@ def verify_google_purchase(
 
     if response.get("purchaseState") != 0:
         raise HTTPException(status_code=400, detail="Purchase is not completed")
-    credited = billing.credit_purchase(user.user_id, request.product_id, request.purchase_token, user.email)
+    order_id = response.get("orderId")
+    if not isinstance(order_id, str) or not order_id:
+        raise HTTPException(status_code=502, detail="Google Play purchase has no order ID")
+    credited = billing.credit_purchase(
+        user.user_id,
+        request.product_id,
+        request.purchase_token,
+        order_id,
+        user.email,
+    )
     consumed = True
     try:
         service.purchases().products().consume(

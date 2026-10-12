@@ -16,6 +16,8 @@ The API is available at `http://localhost:8000`; interactive documentation is at
 
 See [Local setup](docs/setup.md) for requirements, GPU checks, health checks, and worker scaling.
 
+The billing database is stored in the host-side `billing-data` directory and backed up hourly. When upgrading an existing deployment, follow the SQLite migration steps in [configuration](docs/configuration.md) while the stack is stopped.
+
 ## 📚 Documentation
 
 ### 🛠️ Getting started

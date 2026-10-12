@@ -50,6 +50,9 @@ class Billing:
             if "email" not in columns:
                 connection.execute("ALTER TABLE users ADD COLUMN email TEXT")
             connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_email_index ON users (email)")
+            purchase_columns = {row[1] for row in connection.execute("PRAGMA table_info(purchases)")}
+            if "order_id" not in purchase_columns:
+                connection.execute("ALTER TABLE purchases ADD COLUMN order_id TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=30)
@@ -193,7 +196,14 @@ class Billing:
                 (charge, job_id),
             )
 
-    def credit_purchase(self, user_id: str, product_id: str, token: str, email: str | None = None) -> int:
+    def credit_purchase(
+        self,
+        user_id: str,
+        product_id: str,
+        token: str,
+        order_id: str,
+        email: str | None = None,
+    ) -> int:
         minutes = settings.billing_products[product_id]
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -205,8 +215,8 @@ class Billing:
                 return 0
             self._ensure_user(connection, user_id, email)
             connection.execute(
-                "INSERT INTO purchases VALUES (?, ?, ?, ?)",
-                (product_id, token, user_id, minutes),
+                "INSERT INTO purchases (product_id, purchase_token, order_id, user_id, minutes) VALUES (?, ?, ?, ?, ?)",
+                (product_id, token, order_id, user_id, minutes),
             )
             connection.execute(
                 "UPDATE users SET minutes = minutes + ? WHERE user_id = ?",
@@ -214,21 +224,26 @@ class Billing:
             )
             return minutes
 
-    def credit_minutes_by_email(self, email: str, minutes: int) -> int:
+    def credit_minutes_by_email(self, email: str, user_id: str, minutes: int) -> int:
         normalized_email = email.strip().lower()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             user = connection.execute(
-                "SELECT user_id FROM users WHERE email = ?",
-                (normalized_email,),
+                "SELECT user_id FROM users WHERE email = ? AND user_id = ?",
+                (normalized_email, user_id),
             ).fetchone()
             if user is None:
-                raise ValueError(f"No billed user found for email: {normalized_email}")
+                raise ValueError(f"No billed user found for email and user ID: {normalized_email}")
             connection.execute(
                 "UPDATE users SET minutes = minutes + ? WHERE user_id = ?",
                 (minutes, user["user_id"]),
             )
             return minutes
+
+    def backup(self, destination: str) -> None:
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as source, sqlite3.connect(destination) as target:
+            source.backup(target)
 
 
 class InsufficientMinutes(Exception):

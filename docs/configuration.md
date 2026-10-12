@@ -6,7 +6,7 @@ Settings are read from `.env`. Start from [.env.example](../.env.example). Docke
 | ---------------------------------- | -------------------------- | -------------------------------------------------------------------------- |
 | `REDIS_URL`                        | `redis://localhost:6379/0` | Redis connection URL. Compose uses `redis://redis:6379/0`.                 |
 | `DATA_DIR`                         | `/data`                    | Shared directory for job output files.                                     |
-| `BILLING_DATABASE_PATH`            | `/data/billing.sqlite3`    | SQLite database for balances, purchases, and reservations.                 |
+| `BILLING_DATABASE_PATH`            | `/billing/billing.sqlite3` | SQLite database for balances, purchases, and reservations.                 |
 | `WORKER_THREADS`                   | `auto`                     | CPU thread limit; auto uses physical CPU cores minus two, capped at capacity. |
 | `WORKER_MODEL_MEMORY_GIB`          | `3.0`                      | VRAM reserved for the transcription model on each GPU.                      |
 | `WORKER_MEMORY_PER_JOB_GIB`        | `0.65`                     | Estimated VRAM budget for each concurrent GPU transcription job.            |
@@ -32,7 +32,18 @@ SOURCE_URL_ALLOWED_HOSTS=["youtube.com","youtu.be","youtube-nocookie.com","vimeo
 
 Write it on a single line. Subdomains match too, so `youtube.com` also covers `music.youtube.com`.
 
-The API, worker, and cleanup service must use the same `DATA_DIR`. Compose mounts `./secrets` read-only at `/run/secrets` for the API and worker.
+The API, worker, and cleanup service must use the same `DATA_DIR`. Billing is stored separately in the host directory `./billing-data`, mounted at `/billing` only in the API and worker. The cleanup service cannot access the billing database. Compose mounts `./secrets` read-only at `/run/secrets` for the API and worker.
+
+The API creates a SQLite backup in `/billing/backups` every hour. Before switching an existing deployment from the old shared volume, stop the stack and copy the database with SQLite's online backup command, then start the stack again:
+
+```powershell
+docker compose down
+New-Item -ItemType Directory -Force billing-data | Out-Null
+docker run --rm -v yt-piano-to-midi-server_data:/data -v "${PWD}/billing-data:/billing" python:3.12-slim python -c "import sqlite3; src=sqlite3.connect('/data/billing.sqlite3'); dst=sqlite3.connect('/billing/billing.sqlite3'); src.backup(dst); dst.close(); src.close()"
+docker compose up -d
+```
+
+Use the actual Compose project volume name if it differs from `yt-piano-to-midi-server_data`. Do not copy a live SQLite file with a filesystem copy command.
 
 `WORKER_BATCH_SIZE` and `WORKER_MEMORY_PER_JOB_GIB` control different limits. The batch size controls how many queued requests are combined for one model inference call. The per-job VRAM setting estimates how many GPU jobs fit alongside the loaded model. A larger batch size does not increase the calculated GPU capacity.
 
@@ -41,7 +52,7 @@ For billing configuration, use [.env.google-play.example](../.env.google-play.ex
 To manually add transcription minutes to an existing billed user, run the command in the API container:
 
 ```powershell
-docker compose exec api python -m app.admin_credit --user user@example.com --minutes 30
+docker compose exec api python -m app.admin_credit --user user@example.com --user-id google-sub --minutes 30
 ```
 
 The email must belong to a user who has authenticated with the API at least once.

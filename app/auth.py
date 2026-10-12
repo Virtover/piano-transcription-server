@@ -1,3 +1,4 @@
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -8,6 +9,9 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import settings
+
+
+logger = logging.getLogger(__name__)
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -109,7 +113,7 @@ def _fetch_token_info(token: str, allowed_client_ids: set[str]) -> dict[str, Any
     try:
         info["exp"] = int(info["exp"])
     except (KeyError, TypeError, ValueError) as error:
-        print(f"Token info missing or invalid 'exp' field: {info}") #
+        logger.warning("Token info missing or invalid exp field")
         raise HTTPException(status_code=401, detail="Invalid Google authentication token") from error
 
     # tokeninfo includes `sub` when the openid scope was granted. Fall back to userinfo if not.
@@ -123,7 +127,7 @@ def _fetch_token_info(token: str, allowed_client_ids: set[str]) -> dict[str, Any
         except requests.RequestException as error:
             raise _unavailable(error) from error
         if userinfo.status_code in (400, 401):
-            print(f"Userinfo returned {userinfo.status_code}: {userinfo.text}") #
+            logger.warning("Userinfo request rejected with status %s", userinfo.status_code)
             raise HTTPException(status_code=401, detail="Invalid Google authentication token")
         if not userinfo.ok:
             raise _unavailable(RuntimeError(f"userinfo returned {userinfo.status_code}"))
@@ -131,12 +135,17 @@ def _fetch_token_info(token: str, allowed_client_ids: set[str]) -> dict[str, Any
         info["sub"] = userinfo_data.get("sub")
         if not info.get("email"):
             info["email"] = userinfo_data.get("email")
+        if "email_verified" not in info:
+            info["email_verified"] = userinfo_data.get("email_verified")
 
     if not info.get("sub"):
         raise HTTPException(
             status_code=401,
             detail="Google authentication token has no subject",
         )
+
+    if info.get("email_verified") is not True and str(info.get("email_verified")).lower() != "true":
+        raise HTTPException(status_code=401, detail="Google authentication email is not verified")
 
     return info
 
