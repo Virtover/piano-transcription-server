@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     data_dir: str = "/data"
     billing_database_path: str = "/billing/billing.sqlite3"
     billing_backup_dir: str = "/billing/backups"
+    billing_backup_interval: str = "1h"
+    billing_backup_retention: str = "30d"
     cleanup_interval_seconds: int = Field(default=600, ge=1)
     source_url_allowed_hosts: list[str] = [
         "youtube.com","youtu.be","youtube-nocookie.com",

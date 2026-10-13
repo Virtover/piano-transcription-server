@@ -20,6 +20,29 @@ python -m pip install -r requirements.test.txt
 python -m pytest -q
 ```
 
+Run one file or one test while working on a feature:
+
+```powershell
+python -m pytest -q tests/test_account_api.py
+python -m pytest -q -k cancellation
+```
+
+## 🗂️ What is covered
+
+| File | Covers |
+| --- | --- |
+| `test_transcriptions_api.py` | Job creation, status, cancellation, MIDI download, path checks, job ownership, reservations, and startup and worker errors. |
+| `test_billing_api.py` | Server info, cost, balance, Google Play purchase verification, and free-minute grants. |
+| `test_account_api.py` | Account deletion: removed data, kept anonymous purchases, running jobs, free-minute abuse protection, and the `admin_delete` command. |
+| `test_billing.py` | Cost formulas, reservations and settlement, free minutes, and the `admin_credit` command. |
+| `test_backups.py` | Backup creation, retention pruning, interval and retention settings, and duration parsing. |
+| `test_worker_tasks.py` | Worker job lifecycle, billing reconciliation, restart handling, and file cleanup. |
+| `test_auth.py` | Google token checks: audience, expiry, verified email, userinfo fallback, caching, and outages. |
+| `test_url_safety.py` | Source URL validation: allowed hosts, schemes, ports, credentials, and private addresses. |
+| `test_server_api.py` | Health and readiness, server info offers, and `yt-dlp` duration handling. |
+
+The tests replace Google, Google Play, `yt-dlp`, DNS, and the transcription pipeline with fakes, so they never use the network or a model.
+
 ## 🔎 Syntax check
 
 Run the application syntax check:

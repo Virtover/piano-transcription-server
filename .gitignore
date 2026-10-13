@@ -3,3 +3,4 @@
 /secrets/
 /.venv
 /billing-data/
+__pycache__/

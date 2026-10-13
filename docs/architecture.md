@@ -13,7 +13,7 @@ Client -> FastAPI API -> Redis job state -> Dramatiq worker -> shared data volum
 * `worker` downloads audio and runs the transcription pipeline.
 * `cleanup` removes files whose Redis job state has expired.
 * `redis` stores job state and queues work.
-* The shared `data` volume stores job files. Billing SQLite data and hourly backups are stored in the host-mounted `billing-data` directory, available only to API and worker.
+* The shared `data` volume stores job files. Billing SQLite data and its periodic backups are stored in the host-mounted `billing-data` directory, available only to API and worker.
 
 The main implementation surfaces are `app/main.py`, `app/api/routes/`, `app/worker/`, and `app/transcription/`.
 
@@ -32,6 +32,10 @@ The Transkun checkpoint detects sustain-pedal events separately instead of autom
 Job files are stored under `/data/jobs/<job_id>/`. Queued and processing jobs do not receive a Redis expiration. On API startup, jobs left in those states by a previous session are marked failed, billing reservations are released, and partial files are removed.
 
 Completed and failed jobs receive a one-hour Redis TTL. The cleanup service periodically removes job directories whose Redis keys no longer exist, so files can remain briefly after the TTL expires.
+
+Deleting an account removes the user's Redis jobs and job directories immediately. A worker still processing one of those jobs sees it as cancelled at its next progress check and stops.
+
+Billing backups are pruned by the API after each backup, using `BILLING_BACKUP_RETENTION`.
 
 ## ⚠️ Limitations
 

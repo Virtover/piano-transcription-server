@@ -93,3 +93,9 @@ c =
 $$
 
 The cancellation charge cannot exceed the reserved cost. Billing records are stored in the SQLite database configured by `BILLING_DATABASE_PATH`.
+
+## 🗑️ Account deletion
+
+Google Play requires apps that let users create an account to also let them delete it. The client can call `DELETE /api/account` with the user's Google ID token. See **Account deletion** in the [API guide](api.md) for what is deleted and what is kept.
+
+Google Play also requires a web link where users can request deletion without the app. Handle those requests with the `app.admin_delete` command described in [Configuration](configuration.md).

@@ -1,9 +1,16 @@
+import hashlib
 import math
+import re
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 from app.config import settings
+
+DELETED_USER_ID = "deleted"
+BACKUP_FILE_PATTERN = re.compile(r"^billing-(\d+)\.sqlite3$")
+
 
 def transcription_cost(duration_seconds: float) -> int:
     minutes = duration_seconds / 60
@@ -44,6 +51,10 @@ class Billing:
                     charged_minutes INTEGER,
                     status TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS deleted_users (
+                    user_hash TEXT PRIMARY KEY,
+                    free_grant_at INTEGER NOT NULL
+                );
                 """
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
@@ -62,10 +73,27 @@ class Billing:
 
     @staticmethod
     def _ensure_user(connection: sqlite3.Connection, user_id: str, email: str | None = None) -> None:
-        connection.execute(
+        created = connection.execute(
             "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
             (user_id,),
-        )
+        ).rowcount
+        if created:
+            # A recreated account keeps the free-grant time of the deleted one,
+            # so deleting an account cannot be used to reset free minutes.
+            _purge_expired_deleted_users(connection)
+            deleted = connection.execute(
+                "SELECT free_grant_at FROM deleted_users WHERE user_hash = ?",
+                (_user_hash(user_id),),
+            ).fetchone()
+            if deleted:
+                connection.execute(
+                    "UPDATE users SET free_grant_at = ? WHERE user_id = ?",
+                    (deleted["free_grant_at"], user_id),
+                )
+                connection.execute(
+                    "DELETE FROM deleted_users WHERE user_hash = ?",
+                    (_user_hash(user_id),),
+                )
         if email:
             connection.execute(
                 "UPDATE users SET email = ? WHERE user_id = ?",
@@ -224,6 +252,14 @@ class Billing:
             )
             return minutes
 
+    def user_id_by_email(self, email: str) -> str | None:
+        with self._connect() as connection:
+            user = connection.execute(
+                "SELECT user_id FROM users WHERE email = ?",
+                (email.strip().lower(),),
+            ).fetchone()
+        return user["user_id"] if user else None
+
     def credit_minutes_by_email(self, email: str, minutes: int) -> int:
         normalized_email = email.strip().lower()
         with self._connect() as connection:
@@ -240,9 +276,33 @@ class Billing:
             )
             return minutes
 
+    def delete_user(self, user_id: str) -> bool:
+        """Delete a user's account data. Purchases are kept without the user ID
+        so a purchase token cannot be credited twice."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            user = connection.execute(
+                "SELECT free_grant_at FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            connection.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+            connection.execute("DELETE FROM transcription_reservations WHERE user_id = ?", (user_id,))
+            connection.execute(
+                "UPDATE purchases SET user_id = ? WHERE user_id = ?",
+                (DELETED_USER_ID, user_id),
+            )
+            _purge_expired_deleted_users(connection)
+            if user and user["free_grant_at"] and _free_minutes_enabled():
+                if user["free_grant_at"] + period_seconds() > time.time():
+                    connection.execute(
+                        "INSERT OR REPLACE INTO deleted_users (user_hash, free_grant_at) VALUES (?, ?)",
+                        (_user_hash(user_id), user["free_grant_at"]),
+                    )
+            return user is not None
+
     def backup(self, destination: str) -> None:
         Path(destination).parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as source, sqlite3.connect(destination) as target:
+        with self._connect() as source, closing(sqlite3.connect(destination)) as target:
             source.backup(target)
 
 
@@ -250,14 +310,60 @@ class InsufficientMinutes(Exception):
     pass
 
 
-def period_seconds() -> int:
-    value = (settings.free_minutes_period or "30d").strip().lower()
+def duration_seconds(value: str, name: str) -> int:
+    value = value.strip().lower()
     units = {"s": 1, "m": 60, "h": 60 * 60, "d": 24 * 60 * 60, "w": 7 * 24 * 60 * 60}
     try:
         amount = int(value[:-1])
         multiplier = units[value[-1]]
     except (KeyError, ValueError, IndexError) as error:
-        raise ValueError("FREE_MINUTES_PERIOD must use a format such as 12h, 7d, or 1w") from error
+        raise ValueError(f"{name} must use a format such as 12h, 7d, or 1w") from error
     if amount < 1:
-        raise ValueError("FREE_MINUTES_PERIOD must be positive")
+        raise ValueError(f"{name} must be positive")
     return amount * multiplier
+
+
+def period_seconds() -> int:
+    return duration_seconds(settings.free_minutes_period or "30d", "FREE_MINUTES_PERIOD")
+
+
+def backup_interval_seconds() -> int:
+    return duration_seconds(settings.billing_backup_interval or "1h", "BILLING_BACKUP_INTERVAL")
+
+
+def backup_retention_seconds() -> int:
+    return duration_seconds(settings.billing_backup_retention or "30d", "BILLING_BACKUP_RETENTION")
+
+
+def prune_backups(directory: str, max_age_seconds: int, now: float | None = None) -> list[Path]:
+    """Delete backups older than max_age_seconds. Only files named like the
+    automatic backups are touched; the age comes from the name's timestamp."""
+    backup_dir = Path(directory)
+    if not backup_dir.is_dir():
+        return []
+    cutoff = (time.time() if now is None else now) - max_age_seconds
+    removed = []
+    for path in backup_dir.iterdir():
+        match = BACKUP_FILE_PATTERN.match(path.name)
+        if match and path.is_file() and int(match.group(1)) < cutoff:
+            path.unlink()
+            removed.append(path)
+    return removed
+
+
+def _free_minutes_enabled() -> bool:
+    return settings.billing_provider != "none" and (settings.free_minutes or 0) > 0
+
+
+def _user_hash(user_id: str) -> str:
+    return hashlib.sha256(user_id.encode()).hexdigest()
+
+
+def _purge_expired_deleted_users(connection: sqlite3.Connection) -> None:
+    if not _free_minutes_enabled():
+        connection.execute("DELETE FROM deleted_users")
+        return
+    connection.execute(
+        "DELETE FROM deleted_users WHERE free_grant_at <= ?",
+        (int(time.time()) - period_seconds(),),
+    )

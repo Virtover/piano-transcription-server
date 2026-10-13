@@ -7,6 +7,8 @@ Settings are read from `.env`. Start from [.env.example](../.env.example). Docke
 | `REDIS_URL`                        | `redis://localhost:6379/0` | Redis connection URL. Compose uses `redis://redis:6379/0`.                 |
 | `DATA_DIR`                         | `/data`                    | Shared directory for job output files.                                     |
 | `BILLING_DATABASE_PATH`            | `/billing/billing.sqlite3` | SQLite database for balances, purchases, and reservations.                 |
+| `BILLING_BACKUP_INTERVAL`          | `1h`                       | How often the billing database is backed up. Uses `s`, `m`, `h`, `d`, or `w`. |
+| `BILLING_BACKUP_RETENTION`         | `30d`                      | Age after which automatic backups are deleted. Uses `s`, `m`, `h`, `d`, or `w`. |
 | `WORKER_THREADS`                   | `auto`                     | CPU thread limit; auto uses physical CPU cores minus two, capped at capacity. |
 | `WORKER_MODEL_MEMORY_GIB`          | `3.0`                      | VRAM reserved for the transcription model on each GPU.                      |
 | `WORKER_MEMORY_PER_JOB_GIB`        | `0.65`                     | Estimated VRAM budget for each concurrent GPU transcription job.            |
@@ -46,10 +48,27 @@ docker compose exec api python -m app.admin_credit --user user@example.com --min
 
 The email must belong to a user who has authenticated with the API at least once.
 
+To delete a user's account and data, for example after a deletion request by email or through a web form, run:
+
+```powershell
+docker compose exec api python -m app.admin_delete --user user@example.com
+```
+
+The command asks for confirmation; add `--yes` to skip it. It deletes the same data as `DELETE /api/account`, including running jobs and remaining minutes, and cannot be undone. See **Account deletion** in the [API guide](api.md) for what is kept.
+
 
 ## 💾 Billing database backups
 
-The API creates a SQLite backup in `/billing/backups` every hour. On the host these files are in `./billing-data/backups`. They are made with SQLite's online backup, so they are consistent while the API is running.
+The API creates a SQLite backup in `/billing/backups` every `BILLING_BACKUP_INTERVAL` (default `1h`), starting when the API starts. On the host these files are in `./billing-data/backups`. They are made with SQLite's online backup, so they are consistent while the API is running.
+
+After each backup, the API deletes automatic backups older than `BILLING_BACKUP_RETENTION` (default `30d`). The age is read from the timestamp in the file name, `billing-<unix-time>.sqlite3`. Other files in the directory, such as manually renamed copies, are never deleted. The API refuses to start if either value is invalid.
+
+```env
+BILLING_BACKUP_INTERVAL=6h
+BILLING_BACKUP_RETENTION=14d
+```
+
+Data from a deleted account stays in older backups until they expire, so the retention period is also the longest time deleted data is kept. Copies you make elsewhere are not pruned; apply the same retention to them.
 
 These backups are on the same disk as the live database. They protect against a bad migration, a wrong manual edit, or file corruption, but not against losing the machine or the disk. Copy `./billing-data/backups` to another location regularly, for example with `rclone` or `rsync` from a host cron job, and encrypt the copy first (for example with `age`). The files contain user emails, Google account IDs, and purchase tokens.
 

@@ -118,6 +118,28 @@ def cleanup_expired_jobs():
             print(f"Removed expired job: {job_id}")
 
 
+def delete_user_jobs(user_id: str) -> None:
+    """Remove every job and result file owned by user_id. A running worker
+    sees the missing job as cancelled and stops."""
+    for key in redis.scan_iter(match="transcription:*"):
+        if redis.hget(key, "user_id") != user_id:
+            continue
+        redis.delete(key)
+        shutil.rmtree(
+            Path(settings.data_dir)
+            / "jobs"
+            / key.removeprefix("transcription:"),
+            ignore_errors=True,
+        )
+
+
+def delete_account(user_id: str) -> bool:
+    """Delete a user's jobs, files, and billing data. Jobs go first: a running
+    worker then sees its job as cancelled and stops without charging."""
+    delete_user_jobs(user_id)
+    return billing.delete_user(user_id)
+
+
 def reconcile_billing() -> None:
     """Finish billing transitions left incomplete by a worker interruption."""
     for job_id in billing.reserved_job_ids():

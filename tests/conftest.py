@@ -14,7 +14,7 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     from app.api.routes import billing as billing_routes
     from app.api.routes import transcriptions as transcription_routes
     from app.billing import Billing
-    from app.config import settings
+    from app.config import Settings, settings
     from app.worker import tasks
 
     settings.billing_provider = "none"
@@ -25,8 +25,12 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     settings.google_play_service_account_file = None
     settings.google_oauth_client_ids = ["test-client-id"]
     settings.billing_database_path = str(tmp_path / "billing.sqlite3")
+    settings.billing_backup_dir = str(tmp_path / "backups")
+    settings.billing_backup_interval = "1h"
+    settings.billing_backup_retention = "30d"
     settings.data_dir = str(tmp_path / "data")
     settings.max_video_length_minutes = 20
+    settings.source_url_allowed_hosts = list(Settings.model_fields["source_url_allowed_hosts"].default)
 
     redis = fakeredis.FakeRedis(decode_responses=True)
     billing = Billing(settings.billing_database_path)
@@ -66,10 +70,12 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
         )
 
     monkeypatch.setattr(auth.requests, "get", fake_google_request)
+    auth._token_cache.clear()
 
     monkeypatch.setattr(main, "fail_active_jobs", lambda reason: None)
     monkeypatch.setattr(main, "reconcile_billing", lambda: None)
     monkeypatch.setattr(main, "sync_products", lambda: None)
+    monkeypatch.setattr(main, "backup_billing_database", lambda: None)
     monkeypatch.setattr(main, "enable_transcription_submissions", lambda: transcription_routes.enable_transcription_submissions())
     transcription_routes.transcription_submissions_enabled = False
     google_play.synced_products = None
