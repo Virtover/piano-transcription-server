@@ -63,8 +63,8 @@ def gpu_capacity() -> tuple[int, int, str] | None:
         return None
 
     summary = ", ".join(
-        f"GPU {index}: {capacity} job(s)"
-        for index, capacity in enumerate(device_capacities)
+        f"GPU {index}: {capacity} job(s), {free_memory / 1024**3:.2f} GiB free"
+        for index, capacity, free_memory, _ in capacities
     )
     return len(device_capacities), total_capacity, summary
 

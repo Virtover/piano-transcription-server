@@ -152,23 +152,34 @@ def load_model(device: str):
     return model
 
 
+_usable_cuda_devices: list[int] | None = None
+
+
 def select_device() -> str:
-    capacities = cuda_job_capacities()
-    if not capacities:
+    global _usable_cuda_devices
+
+    # Decide once which GPUs have capacity, before this process loads a model.
+    # Checking capacity again later would count the loaded model and running
+    # jobs against it and send new jobs to the CPU whenever the GPU is busy.
+    # Concurrency is already limited by the worker thread count.
+    if _usable_cuda_devices is None:
+        _usable_cuda_devices = [
+            device_index
+            for device_index, capacity, _, _ in cuda_job_capacities() or []
+            if capacity > 0
+        ]
+
+    if not _usable_cuda_devices:
         return "cpu"
+    if len(_usable_cuda_devices) == 1:
+        return f"cuda:{_usable_cuda_devices[0]}"
 
     # Jobs share a worker process, so choose a device for each job instead of
     # relying on CUDA's default device 0.
-    candidates = [
-        (free_memory, device_index)
-        for device_index, capacity, free_memory, _ in capacities
-        if capacity > 0
-    ]
-
-    if not candidates:
-        return "cpu"
-
-    _, device_index = max(candidates)
+    device_index = max(
+        _usable_cuda_devices,
+        key=lambda index: torch.cuda.mem_get_info(index)[0],
+    )
     return f"cuda:{device_index}"
 
 
@@ -436,7 +447,9 @@ def _transcribe_audio_batch(
     states = []
     for request in requests:
         try:
-            x = torch.from_numpy(request.audio).to(device)
+            # The full audio stays in CPU memory; only the current segment is
+            # moved to the device, so VRAM per job does not grow with length.
+            x = torch.from_numpy(request.audio)
             x = x.transpose(-1, -2)
             x = F.pad(
                 x,
@@ -484,7 +497,7 @@ def _transcribe_audio_batch(
 
             i = state["segment_index"] * step_size
             j = min(i + segment_size, state["n_sample"])
-            cur_slice = state["x"][:, i:j]
+            cur_slice = state["x"][:, i:j].to(device)
             if cur_slice.shape[-1] < segment_size:
                 cur_slice = F.pad(
                     cur_slice,

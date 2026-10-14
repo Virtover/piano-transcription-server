@@ -36,7 +36,7 @@ docker run --rm --gpus all nvidia/cuda:12.6.0-cudnn-runtime-ubuntu22.04 nvidia-s
 
 The worker automatically uses CUDA when PyTorch detects a usable NVIDIA GPU. Otherwise it falls back to CPU. CPU execution is significantly slower; on machines without GPU support, remove `gpus: all` from the worker service in `docker-compose.yml`.
 
-By default, one worker process shares one model and batches requests. GPU capacity is estimated from currently free VRAM using `WORKER_MODEL_MEMORY_GIB` (`3.0` GiB reserved for the model) and `WORKER_MEMORY_PER_JOB_GIB` (`0.65` GiB estimated for each job). See [Configuration](configuration.md) for tuning details.
+By default, one worker process shares one model and batches requests. GPU capacity is estimated from VRAM free at startup using `WORKER_MODEL_MEMORY_GIB` (`1.0` GiB reserved for the model and GPU libraries) and `WORKER_MEMORY_PER_JOB_GIB` (`1.1` GiB for each job). See [GPU memory and batching](configuration.md#-gpu-memory-and-batching) for measurements and tuning.
 
 ## 📈 Worker scaling
 

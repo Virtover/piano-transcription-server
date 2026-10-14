@@ -10,8 +10,8 @@ Settings are read from `.env`. Start from [.env.example](../.env.example). Docke
 | `BILLING_BACKUP_INTERVAL`          | `1h`                       | How often the billing database is backed up. Uses `s`, `m`, `h`, `d`, or `w`. |
 | `BILLING_BACKUP_RETENTION`         | `30d`                      | Age after which automatic backups are deleted. Uses `s`, `m`, `h`, `d`, or `w`. |
 | `WORKER_THREADS`                   | `auto`                     | CPU thread limit; auto uses physical CPU cores minus two, capped at capacity. |
-| `WORKER_MODEL_MEMORY_GIB`          | `3.0`                      | VRAM reserved for the transcription model on each GPU.                      |
-| `WORKER_MEMORY_PER_JOB_GIB`        | `0.65`                     | Estimated VRAM budget for each concurrent GPU transcription job.            |
+| `WORKER_MODEL_MEMORY_GIB`          | `1.0`                      | VRAM reserved for the CUDA context and model on each GPU.                   |
+| `WORKER_MEMORY_PER_JOB_GIB`        | `1.1`                      | VRAM budget for each concurrent GPU transcription job.                      |
 | `WORKER_BATCH_SIZE`                | `6`                        | Maximum requests combined into one model batch; also CPU worker thread count. |
 | `WORKER_BATCH_TIMEOUT_SECONDS`     | `2`                        | Maximum CPU or GPU batch wait before running a partial batch.               |
 | `WORKER_MAX_CONCURRENCY`           | `auto`                     | Optional cap for automatically calculated GPU job concurrency.               |
@@ -36,7 +36,93 @@ Write it on a single line. Subdomains match too, so `youtube.com` also covers `m
 
 The API, worker, and cleanup service must use the same `DATA_DIR`. Billing is stored separately in the host directory `./billing-data`, mounted at `/billing` only in the API and worker. The cleanup service cannot access the billing database. Compose mounts `./secrets` read-only at `/run/secrets` for the API and worker.
 
-`WORKER_BATCH_SIZE` and `WORKER_MEMORY_PER_JOB_GIB` control different limits. The batch size controls how many queued requests are combined for one model inference call. The per-job VRAM setting estimates how many GPU jobs fit alongside the loaded model. A larger batch size does not increase the calculated GPU capacity.
+`WORKER_BATCH_SIZE` and `WORKER_MEMORY_PER_JOB_GIB` control different limits. The batch size controls how many queued requests are combined for one model inference call. The per-job VRAM setting estimates how many GPU jobs fit alongside the loaded model. A larger batch size does not increase the calculated GPU capacity. See [GPU memory and batching](#-gpu-memory-and-batching).
+
+## 🎛️ GPU memory and batching
+
+### How capacity is calculated
+
+When the worker starts, it reads the free VRAM of each GPU and calculates:
+
+```text
+jobs per GPU = floor((free VRAM - WORKER_MODEL_MEMORY_GIB) / WORKER_MEMORY_PER_JOB_GIB)
+```
+
+The total, optionally capped by `WORKER_MAX_CONCURRENCY`, becomes the number of worker threads, which is the number of jobs transcribed at the same time. If no GPU has room for one job, the worker runs on the CPU. The worker log prints the result, for example `up to 4 job(s) by VRAM (GPU 0: 4 job(s), 5.68 GiB free)`.
+
+Free VRAM is the lower of two readings: CUDA's (`cudaMemGetInfo`) and `nvidia-smi`'s. They normally agree. Under Windows with Docker Desktop or WSL, CUDA does not count memory used by Windows programs, such as the desktop, browsers, or games, and reported 1.3 GiB too much free memory on an 8 GB card. `nvidia-smi` sees that usage. If `nvidia-smi` is unavailable, CUDA's reading is used.
+
+Free VRAM is read once at startup, so memory used by other programs at that moment is taken into account. Programs that start using the GPU later are not. On a machine with a desktop, leave headroom with `WORKER_MODEL_MEMORY_GIB` or `WORKER_MAX_CONCURRENCY`.
+
+The CUDA context, about 0.13 GiB, is created before free memory is read, so it is already excluded. `WORKER_MODEL_MEMORY_GIB` covers only what the worker loads after that.
+
+### Measured usage
+
+Measured on an RTX 3060 Ti (8 GB) with the worker image, Transkun 2.0, and 44.1 kHz audio. Allocated memory is what PyTorch tensors use; reserved memory is what PyTorch holds from the driver, which is what counts toward running out of memory.
+
+| What | VRAM |
+| --- | --- |
+| Transkun 2.0 model: 13.6 M parameters, fp32 | 0.06 GiB |
+| CUDA context (already excluded from free VRAM) | ~0.13 GiB |
+| Model, GPU kernels, and library handles after the context | ~0.14 GiB |
+| One job, allocated | ~0.75 GiB |
+| One job, reserved | ~1.0 GiB |
+
+The model itself is small. Most of the memory is the per-segment work for each job, mostly the interval scores computed for every pitch.
+
+GPU kernels are loaded on first use (CUDA lazy loading, the default since CUDA 12.3). With `CUDA_MODULE_LOADING=EAGER`, all kernels are loaded at startup. The context then grows to ~0.74 GiB and the memory after the context to ~0.63 GiB. The default `WORKER_MODEL_MEMORY_GIB=1.0` covers both modes.
+
+Per-job usage does not depend on video length or content. A job keeps its audio in system RAM and moves only the current 16-second segment to the GPU. Dense piano chords and white noise use the same memory.
+
+| Video length | Jobs in batch | Reserved VRAM (incl. model) | Per job | Time per job |
+| --- | --- | --- | --- | --- |
+| 5 min | 1 | 1.08 GiB | 1.03 GiB | 14 s |
+| 5 min | 2 | 2.04 GiB | 1.00 GiB | 11.5 s |
+| 5 min | 4 | 3.96 GiB | 0.98 GiB | 10.3 s |
+| 5 min | 6 | 5.88 GiB | 0.97 GiB | 9.8 s |
+| 60 min | 1 | 1.08 GiB | 1.03 GiB | 147 s |
+
+Times were measured without download and conversion, which usually take longer than transcription. Other GPUs give different times, but memory use should be similar.
+
+The worker also uses system RAM for audio: about 20 MiB per minute of video for each running job, so about 1.2 GiB for a 60-minute video.
+
+Example capacities with the default values:
+
+| GPU memory free at startup | Jobs at the same time |
+| --- | --- |
+| 4 GiB | 2 |
+| 6 GiB | 4 |
+| 8 GiB | 6 |
+| 12 GiB | 10 |
+| 24 GiB | 20 |
+
+### Choosing other values
+
+**`WORKER_MEMORY_PER_JOB_GIB`** (default `1.1`, measured ~1.0)
+
+* Lower, for example `0.8`: more jobs run at once. The capacity is then larger than the GPU can hold. When the GPU runs out of memory, every job in the batch fails, not just one. On Windows and WSL the driver may instead move memory to system RAM, which avoids the error but makes transcription much slower.
+* Higher, for example `1.5`: more headroom for other programs on the GPU and for different driver or PyTorch versions, but fewer jobs at once, so more jobs wait in the queue. Free VRAM is wasted.
+
+**`WORKER_MODEL_MEMORY_GIB`** (default `1.0`, measured ~0.14 with lazy loading, ~0.63 with eager loading)
+
+* Lower, down to about `0.3`: room for one more job on small GPUs. Only safe with lazy loading. Eager loading, or a different CUDA, cuDNN, or driver version that loads more, can then cause out-of-memory errors.
+* Higher: headroom for programs that start using the GPU after the worker, such as a browser or game on a desktop machine. Each extra 1.1 GiB removes one job.
+
+**`WORKER_BATCH_SIZE`** (default `6`)
+
+* On GPU, the batch can never hold more jobs than the worker has threads, so values above the calculated capacity have no effect. Values below it leave capacity unused: jobs that arrive while a batch runs wait until the whole batch finishes.
+* Larger batches give more total throughput, but with diminishing returns. In the table above, going from 4 to 6 jobs saves only about 5% time per job. Each job also progresses more slowly, because every step processes one segment for every job in the batch.
+* A batch starts early only when it is full, so with a large value each batch waits the full `WORKER_BATCH_TIMEOUT_SECONDS`.
+* On CPU, the batch size is also the number of worker threads, so a large value means many simultaneous downloads and much more RAM. Keep it small, around 2 to 6.
+
+**`WORKER_BATCH_TIMEOUT_SECONDS`** (default `2`)
+
+* Longer: more jobs can join a batch when requests arrive close together, which helps throughput, but every batch starts later.
+* Shorter: lower latency for single jobs, but jobs arriving a moment later wait for the next batch.
+
+**`WORKER_MAX_CONCURRENCY`** (default `auto`)
+
+* Set a number to leave GPU memory for other programs or to limit load on a shared machine. It can only lower the calculated capacity, never raise it.
 
 For billing configuration, use [.env.google-play.example](../.env.google-play.example) and follow the [Google Play billing guide](google-play-billing.md).
 

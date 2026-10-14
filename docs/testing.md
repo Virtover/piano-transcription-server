@@ -40,6 +40,14 @@ python -m pytest -q -k cancellation
 | `test_auth.py` | Google token checks: audience, expiry, verified email, userinfo fallback, caching, and outages. |
 | `test_url_safety.py` | Source URL validation: allowed hosts, schemes, ports, credentials, and private addresses. |
 | `test_server_api.py` | Health and readiness, server info offers, and `yt-dlp` duration handling. |
+| `test_device_capacity.py` | GPU capacity calculation, including the `nvidia-smi` free memory check used under WSL. |
+| `test_device_selection.py` | GPU and CPU device selection for transcription jobs. Needs the worker dependencies, so it is skipped in the API test environment. |
+
+Run the device selection tests in the worker image, which has PyTorch and Transkun:
+
+```powershell
+docker compose run --rm --no-deps -v "${PWD}	ests:/app/tests:ro" worker sh -c "pip install -q pytest && python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_device_selection.py"
+```
 
 The tests replace Google, Google Play, `yt-dlp`, DNS, and the transcription pipeline with fakes, so they never use the network or a model.
 
