@@ -14,7 +14,47 @@ $job = Invoke-RestMethod `
   -Body '{"source_url":"https://example.com/video"}'
 ```
 
-The endpoint returns `202 Accepted`, a `job_id`, and `queued` status. Poll the job:
+The endpoint returns `202 Accepted`, a `job_id`, and `queued` status.
+
+### 📁 Uploading a file
+
+Send an audio or video file as the raw request body, and its original name as `filename`:
+
+```powershell
+$job = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://localhost:8000/api/transcriptions/upload?filename=Nocturne.mp3" `
+  -ContentType 'application/octet-stream' `
+  -InFile .\Nocturne.mp3
+```
+
+```bash
+curl -X POST "http://localhost:8000/api/transcriptions/upload?filename=Nocturne.mp3" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @Nocturne.mp3
+```
+
+The body is the file itself, not a multipart form. This lets the server stop reading as soon as the size limit is exceeded. When billing is enabled, add the `Authorization` header as for other requests.
+
+* Accepted formats: MP3, WAV, FLAC, Ogg/Opus, AAC, M4A, AIFF, WMA, MP4, MOV, MKV, and WebM. Video files are fine; only their audio is used. The server checks the content, not the file name.
+* `filename` is only used as the title (without the extension). It never decides where the file is stored.
+* The size limit is `MAX_UPLOAD_SIZE_MB` (default 200 MB), and the length limit is `MAX_VIDEO_LENGTH_MINUTES`, the same as for links. `GET /api/server-info` returns both.
+* The response is the same as for a link, and the job is polled, cancelled, and downloaded the same way. Its metadata contains only the title and duration.
+* The uploaded file is deleted as soon as it is converted for transcription, or with the job if it fails or is cancelled.
+
+Upload errors:
+
+| Status | Meaning |
+| --- | --- |
+| `413` | The file exceeds the size limit or the maximum length. |
+| `422` | The file is empty, is not a supported audio or video file, has no audio, or `filename` is missing. |
+| `402` | Not enough transcription minutes (billing enabled). |
+
+To show the cost before uploading, read the duration on the device and call `GET /api/billing/cost?duration_seconds=...`.
+
+### 🔄 Following a job
+
+Poll the job:
 
 ```powershell
 $status = Invoke-RestMethod `
@@ -44,8 +84,8 @@ The MIDI can contain piano notes, velocities, onset and offset information, sust
 
 ## 💳 Billing endpoints
 
-* `GET /api/server-info` returns billing provider, available offers, cleanup interval, free-minute policy, and maximum video length.
-* `GET /api/billing/cost?source_url=...` reads video duration and returns the transcription cost before submission.
+* `GET /api/server-info` returns billing provider, available offers, cleanup interval, free-minute policy, maximum video length, and the upload size limit (`max_upload_size_mb`).
+* `GET /api/billing/cost?source_url=...` reads video duration and returns the transcription cost before submission. For a file, use `?duration_seconds=...` instead. Pass exactly one of the two.
 * `GET /api/billing/balance` returns the authenticated user's balance and free-minute timing.
 * `POST /api/billing/google-play/verify` verifies and credits a completed Google Play purchase.
 * `DELETE /api/account` deletes the authenticated user's account and data (see below).

@@ -213,7 +213,7 @@ def test_unavailable_worker_releases_reservation(api_context, monkeypatch):
     settings.billing_products = {"starter": 5}
     billing.credit_purchase("user", "starter", "token", "order")
 
-    def broken_send(*args):
+    def broken_send(*args, **kwargs):
         raise ConnectionError("broker is down")
 
     monkeypatch.setattr(transcriptions.transcribe_job, "send", broken_send)

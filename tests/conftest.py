@@ -30,6 +30,7 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     settings.billing_backup_retention = "30d"
     settings.data_dir = str(tmp_path / "data")
     settings.max_video_length_minutes = 20
+    settings.max_upload_size_mb = 200
     settings.source_url_allowed_hosts = list(Settings.model_fields["source_url_allowed_hosts"].default)
 
     redis = fakeredis.FakeRedis(decode_responses=True)
@@ -41,7 +42,7 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     monkeypatch.setattr(transcription_routes, "billing", billing)
     monkeypatch.setattr(tasks, "billing", billing)
     monkeypatch.setattr(transcription_routes, "video_duration", lambda source_url: 130.0)
-    monkeypatch.setattr(transcription_routes.transcribe_job, "send", lambda *args: None)
+    monkeypatch.setattr(transcription_routes.transcribe_job, "send", lambda *args, **kwargs: None)
     class FakeResponse:
         def __init__(self, status_code, payload):
             self.status_code = status_code

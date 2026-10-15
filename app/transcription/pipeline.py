@@ -12,6 +12,7 @@ from app.transcription.device import automatic_cpu_threads
 from app.transcription.piano_transcription import (
     transcribe_piano,
 )
+from app.media import probe_audio
 from app.url_safety import ensure_safe_source_url
 
 
@@ -128,26 +129,10 @@ def download_audio(
             "yt-dlp did not produce a WAV file"
         )
 
-    wav_path = output_dir / "audio.wav"
-
-    ffmpeg_threads = ffmpeg_thread_count()
-    ffmpeg_command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(downloaded_path),
-        "-ar",
-        "44100",
-        "-ac",
-        "1",
-    ]
-    if ffmpeg_threads is not None:
-        ffmpeg_command.extend(["-threads", str(ffmpeg_threads)])
-    ffmpeg_command.append(str(wav_path))
-
-    run_process(
-        ffmpeg_command,
-        cancellation_callback=cancellation_callback,
+    wav_path = convert_to_wav(
+        downloaded_path,
+        output_dir,
+        cancellation_callback,
     )
 
     downloaded_path.unlink()
@@ -170,6 +155,63 @@ def download_audio(
     )
 
 
+def convert_to_wav(
+    input_path: Path,
+    output_dir: Path,
+    cancellation_callback: CancellationCallback | None = None,
+) -> Path:
+    wav_path = output_dir / "audio.wav"
+
+    ffmpeg_threads = ffmpeg_thread_count()
+    ffmpeg_command = [
+        "ffmpeg",
+        "-y",
+        "-nostdin",
+        # Uploaded files are untrusted: never let ffmpeg open URLs.
+        "-protocol_whitelist",
+        "file",
+        "-i",
+        str(input_path),
+        "-vn",
+        "-ar",
+        "44100",
+        "-ac",
+        "1",
+    ]
+    if ffmpeg_threads is not None:
+        ffmpeg_command.extend(["-threads", str(ffmpeg_threads)])
+    ffmpeg_command.append(str(wav_path))
+
+    run_process(
+        ffmpeg_command,
+        cancellation_callback=cancellation_callback,
+    )
+    return wav_path
+
+
+def prepare_upload(
+    upload_path: Path,
+    title: str | None,
+    output_dir: Path,
+    cancellation_callback: CancellationCallback | None = None,
+) -> DownloadedAudio:
+    # Checked again here because the worker runs ffmpeg on the file.
+    duration = probe_audio(upload_path)
+    wav_path = convert_to_wav(
+        upload_path,
+        output_dir,
+        cancellation_callback,
+    )
+    upload_path.unlink()
+    return DownloadedAudio(
+        path=wav_path,
+        metadata={
+            "title": title or "Uploaded file",
+            "duration": duration,
+        },
+    )
+
+
 def format_upload_date(value: str | None) -> str | None:
     if not value or len(value) != 8 or not value.isdigit():
         return None
@@ -182,7 +224,7 @@ def remove_audio_files(output_dir: Path) -> None:
         if (
             path.is_file()
             and (
-                path.name.startswith("download.")
+                path.name.startswith(("download.", "upload."))
                 or path.suffix.lower() in AUDIO_FILE_SUFFIXES
             )
         ):
@@ -240,12 +282,15 @@ def run_process(
 
 
 def transcribe_source(
-    source_url: str,
+    source_url: str | None,
     output_dir: Path,
     progress_callback: ProgressCallback | None = None,
     metadata_callback: MetadataCallback | None = None,
     cancellation_callback: CancellationCallback | None = None,
+    upload_path: Path | None = None,
+    upload_title: str | None = None,
 ) -> Path:
+    """Transcribe source_url, or upload_path when it is given."""
     output_dir.mkdir(
         parents=True,
         exist_ok=True,
@@ -260,11 +305,19 @@ def transcribe_source(
         progress_callback(0.05)
 
     try:
-        downloaded = download_audio(
-            source_url,
-            output_dir,
-            cancellation_callback=cancellation_callback,
-        )
+        if upload_path is not None:
+            downloaded = prepare_upload(
+                upload_path,
+                upload_title,
+                output_dir,
+                cancellation_callback=cancellation_callback,
+            )
+        else:
+            downloaded = download_audio(
+                source_url,
+                output_dir,
+                cancellation_callback=cancellation_callback,
+            )
 
         if metadata_callback:
             metadata_callback(downloaded.metadata)

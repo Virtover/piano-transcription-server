@@ -21,7 +21,8 @@ Settings are read from `.env`. Start from [.env.example](../.env.example). Docke
 | `BILLING_PRODUCTS`                 | `{}`                       | JSON mapping of Play product IDs to transcription minutes.                 |
 | `FREE_MINUTES_PERIOD`              | unset                      | Free-credit interval using `s`, `m`, `h`, `d`, or `w`.                     |
 | `FREE_MINUTES`                     | unset                      | Free minutes granted per interval; omit to disable.                        |
-| `MAX_VIDEO_LENGTH_MINUTES`         | unset                      | Maximum accepted video length; unset means no limit.                       |
+| `MAX_VIDEO_LENGTH_MINUTES`         | unset                      | Maximum accepted video or uploaded file length; unset means no limit.      |
+| `MAX_UPLOAD_SIZE_MB`               | `200`                      | Maximum size of an uploaded file.                                          |
 | `GOOGLE_OAUTH_CLIENT_IDS`          | `[]`                       | Public OAuth client IDs required for billing.                              |
 | `GOOGLE_PLAY_PACKAGE_NAME`         | unset                      | Android package name used for Play verification.                           |
 | `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` | unset                      | Service-account JSON filename in the mounted `secrets` directory.          |
@@ -35,6 +36,8 @@ SOURCE_URL_ALLOWED_HOSTS=["youtube.com","youtu.be","youtube-nocookie.com","vimeo
 Write it on a single line. Subdomains match too, so `youtube.com` also covers `music.youtube.com`.
 
 The API, worker, and cleanup service must use the same `DATA_DIR`. Billing is stored separately in the host directory `./billing-data`, mounted at `/billing` only in the API and worker. The cleanup service cannot access the billing database. Compose mounts `./secrets` read-only at `/run/secrets` for the API and worker.
+
+`MAX_UPLOAD_SIZE_MB` limits disk use per upload. Uploads are written to the shared `DATA_DIR` and removed after conversion. Compressed files are small: an hour of MP3 at 192 kbit/s is about 85 MB. Uncompressed WAV is large: an hour of 16-bit 44.1 kHz stereo is about 635 MB. Raise the limit only if users need to upload long lossless recordings and the disk has room for several at once.
 
 `WORKER_BATCH_SIZE` and `WORKER_MEMORY_PER_JOB_GIB` control different limits. The batch size controls how many queued requests are combined for one model inference call. The per-job VRAM setting estimates how many GPU jobs fit alongside the loaded model. A larger batch size does not increase the calculated GPU capacity. See [GPU memory and batching](#-gpu-memory-and-batching).
 

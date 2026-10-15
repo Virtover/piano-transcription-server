@@ -3,7 +3,7 @@ import logging
 import subprocess
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
 
@@ -47,6 +47,7 @@ class ServerInfoResponse(BaseModel):
     offers: list[Offer]
     cleanup_interval_seconds: int
     max_video_length_minutes: int | None = None
+    max_upload_size_mb: float
     # only present when billing is enabled
     free_minutes: int | None = None
     free_minutes_period: str | None = None
@@ -90,9 +91,13 @@ def video_duration(source_url: HttpUrl) -> float:
         raise HTTPException(status_code=422, detail="Unable to read video metadata") from error
     if not isinstance(duration, (int, float)) or duration <= 0:
         raise HTTPException(status_code=422, detail="Video duration is unavailable")
+    return ensure_allowed_length(float(duration))
+
+
+def ensure_allowed_length(duration: float) -> float:
     if settings.max_video_length_minutes and duration > settings.max_video_length_minutes * 60:
         raise HTTPException(status_code=413, detail="Video exceeds the configured maximum length")
-    return float(duration)
+    return duration
 
 
 @router.get(
@@ -113,6 +118,7 @@ def server_info() -> ServerInfoResponse:
         ],
         cleanup_interval_seconds=settings.cleanup_interval_seconds,
         max_video_length_minutes=settings.max_video_length_minutes,
+        max_upload_size_mb=settings.max_upload_size_mb,
     )
     if settings.billing_provider != "none":
         info.free_minutes = settings.free_minutes
@@ -135,8 +141,17 @@ def balance(user: AuthenticatedUser | None = Depends(current_user)) -> BalanceRe
 
 
 @router.get("/cost", response_model=CostResponse)
-def cost(source_url: HttpUrl) -> CostResponse:
-    duration = video_duration(source_url)
+def cost(
+    source_url: HttpUrl | None = None,
+    duration_seconds: float | None = Query(default=None, gt=0),
+) -> CostResponse:
+    """Cost of a video URL, or of a file of the given duration before it is uploaded."""
+    if (source_url is None) == (duration_seconds is None):
+        raise HTTPException(status_code=422, detail="Provide either source_url or duration_seconds")
+    if source_url is not None:
+        duration = video_duration(source_url)
+    else:
+        duration = ensure_allowed_length(duration_seconds)
     return CostResponse(duration_seconds=duration, cost_minutes=transcription_cost(duration))
 
 

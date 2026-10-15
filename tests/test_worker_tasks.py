@@ -40,7 +40,7 @@ def test_successful_job_completes_and_charges(worker, monkeypatch):
     settings, billing = worker
     queue_job(billing)
 
-    def transcribe_source(source_url, output_dir, progress_callback, metadata_callback, cancellation_callback):
+    def transcribe_source(source_url, output_dir, progress_callback, metadata_callback, cancellation_callback, **kwargs):
         assert job()["status"] == "processing"
         metadata_callback({"title": "Nocturne"})
         progress_callback(0.5)
@@ -186,3 +186,25 @@ def test_delete_user_jobs_keeps_other_users_jobs(worker):
     assert not tasks.redis.exists(tasks.job_key("mine"))
     assert tasks.redis.exists(tasks.job_key("theirs"))
     assert not (Path(settings.data_dir) / "jobs" / "mine").exists()
+
+
+def test_uploaded_file_is_transcribed_from_job_directory(worker, monkeypatch):
+    settings, billing = worker
+    queue_job(billing, source="upload", title="My Song")
+    calls = []
+
+    def transcribe_source(source_url, output_dir, upload_path, upload_title, metadata_callback, **kwargs):
+        calls.append((source_url, upload_path, upload_title))
+        metadata_callback({"title": upload_title, "duration": 130.0})
+        midi = output_dir / "transcription.mid"
+        midi.write_bytes(b"MThd")
+        return midi
+
+    install_pipeline(monkeypatch, transcribe_source)
+    tasks.transcribe_job.fn("job", upload_title="My Song")
+
+    job_dir = Path(settings.data_dir) / "jobs" / "job"
+    assert calls == [(None, job_dir / tasks.UPLOAD_FILE_NAME, "My Song")]
+    assert job()["status"] == "completed"
+    assert job()["title"] == "My Song"
+    assert billing.get_balance("user") == 6

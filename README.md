@@ -2,7 +2,7 @@
 
 > Download a piano performance, transcribe it to MIDI, and retrieve the result through a simple asynchronous API.
 
-Piano Transcription Server accepts a public video URL, downloads its audio, runs [Transkun](https://github.com/Yujia-Yan/Transkun), and exposes the resulting MIDI file through FastAPI. Redis stores job state and Docker Compose runs the API, worker, cleanup service, and Redis together. The worker uses NVIDIA CUDA when available and falls back to CPU.
+Piano Transcription Server accepts a public video URL or an uploaded audio or video file, runs [Transkun](https://github.com/Yujia-Yan/Transkun), and exposes the resulting MIDI file through FastAPI. Redis stores job state and Docker Compose runs the API, worker, cleanup service, and Redis together. The worker uses NVIDIA CUDA when available and falls back to CPU.
 
 ## 🚀 Start here
 
@@ -49,9 +49,6 @@ If the project is useful to you, you can support its development:
 <p align="center">
   <a href="https://ko-fi.com/Y3G527Q9PN">
     <img src="https://img.shields.io/badge/Ko--fi-29ABE0?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi" />
-  </a>
-  <a href="https://www.patreon.com/cw/ChristopherOlszak/membership">
-    <img src="https://img.shields.io/badge/Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white" alt="Become a patron on Patreon" />
   </a>
 </p>
 

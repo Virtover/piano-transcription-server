@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     free_minutes_period: str | None = None
     free_minutes: int | None = Field(default=None, ge=0)
     max_video_length_minutes: float | None = Field(default=None, gt=0)
+    max_upload_size_mb: float = Field(default=200, gt=0)
     google_play_package_name: str | None = None
     google_play_service_account_file: str | None = None
 

@@ -1,8 +1,11 @@
 import json
+import shutil
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
@@ -10,10 +13,12 @@ from redis.exceptions import WatchError
 
 from app.config import settings
 from app.billing import Billing, cancelled_cost, transcription_cost, InsufficientMinutes
-from app.api.routes.billing import video_duration
+from app.api.routes.billing import ensure_allowed_length, video_duration
 from app.auth import AuthenticatedUser, current_user
+from app.media import UnsupportedMedia, probe_audio
 from app.worker.tasks import (
     JOB_TTL,
+    UPLOAD_FILE_NAME,
     job_key,
     transcribe_job,
 )
@@ -83,26 +88,25 @@ def require_job_owner(job: dict[str, str], authenticated_user_id: str | None) ->
         raise HTTPException(status_code=404, detail="Transcription job not found")
 
 
-@router.post(
-    "",
-    response_model=CreateTranscriptionResponse,
-    status_code=202,
-)
-def create_transcription(
-    request: CreateTranscriptionRequest,
-    user: AuthenticatedUser | None = Depends(current_user),
-):
+def ensure_submissions_enabled() -> None:
     if not transcription_submissions_enabled:
         raise HTTPException(
             status_code=503,
             detail="The transcription server is still starting",
         )
 
+
+def queue_job(
+    job_id: str,
+    user: AuthenticatedUser | None,
+    duration: float,
+    fields: dict[str, str],
+    send: Callable[[], object],
+) -> CreateTranscriptionResponse:
+    """Reserve the job's cost, store it as queued, and hand it to the worker."""
     current_user = user.user_id if user else "anonymous"
     email = user.email if user else None
-    duration = video_duration(request.source_url)
     cost = transcription_cost(duration)
-    job_id = str(uuid.uuid4())
     if email:
         billing.grant_free_minutes(current_user, email)
     current_user_balance(current_user)
@@ -119,18 +123,17 @@ def create_transcription(
         mapping={
             "status": "queued",
             "progress": "0.0",
-            "source_url": str(request.source_url),
             "user_id": current_user,
             "duration": str(duration),
             "full_cost": str(cost),
+            **fields,
         },
     )
+    # Queued jobs do not expire; an upload placeholder had a TTL.
+    redis.persist(job_key(job_id))
 
     try:
-        transcribe_job.send(
-            job_id,
-            str(request.source_url),
-        )
+        send()
     except Exception as error:
         redis.delete(job_key(job_id))
         billing.release(job_id)
@@ -144,6 +147,103 @@ def create_transcription(
         status="queued",
         minutes=current_balance,
     )
+
+
+@router.post(
+    "",
+    response_model=CreateTranscriptionResponse,
+    status_code=202,
+)
+def create_transcription(
+    request: CreateTranscriptionRequest,
+    user: AuthenticatedUser | None = Depends(current_user),
+):
+    ensure_submissions_enabled()
+    duration = video_duration(request.source_url)
+    job_id = str(uuid.uuid4())
+    source_url = str(request.source_url)
+    return queue_job(
+        job_id,
+        user,
+        duration,
+        {"source_url": source_url},
+        lambda: transcribe_job.send(job_id, source_url),
+    )
+
+
+def title_from_filename(filename: str) -> str:
+    name = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    name = "".join(character for character in name if character.isprintable()).strip()
+    title = name.rsplit(".", 1)[0].strip() if "." in name[1:] else name
+    return title[:200] or "Uploaded file"
+
+
+@router.post(
+    "/upload",
+    response_model=CreateTranscriptionResponse,
+    status_code=202,
+)
+async def upload_transcription(
+    request: Request,
+    filename: str = Query(
+        min_length=1,
+        max_length=255,
+        description="Original file name; used as the transcription title.",
+    ),
+    user: AuthenticatedUser | None = Depends(current_user),
+):
+    """Transcribe an audio or video file sent as the raw request body."""
+    ensure_submissions_enabled()
+
+    size_limit = int(settings.max_upload_size_mb * 1024**2)
+    too_large = HTTPException(
+        status_code=413,
+        detail=f"The file exceeds the {settings.max_upload_size_mb:g} MB upload limit",
+    )
+    content_length = request.headers.get("content-length", "")
+    if content_length.isdigit() and int(content_length) > size_limit:
+        raise too_large
+
+    job_id = str(uuid.uuid4())
+    key = job_key(job_id)
+    job_dir = Path(settings.data_dir) / "jobs" / job_id
+    upload_path = job_dir / UPLOAD_FILE_NAME
+    title = title_from_filename(filename)
+
+    # The placeholder keeps the cleanup service from removing the directory
+    # during the upload, and expires if the API stops before the job is queued.
+    redis.hset(key, mapping={"status": "uploading", "user_id": user.user_id if user else "anonymous"})
+    redis.expire(key, JOB_TTL)
+    try:
+        job_dir.mkdir(parents=True, exist_ok=True)
+        size = 0
+        with upload_path.open("wb") as file:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > size_limit:
+                    raise too_large
+                file.write(chunk)
+        if size == 0:
+            raise HTTPException(status_code=422, detail="The uploaded file is empty")
+
+        try:
+            duration = await run_in_threadpool(probe_audio, upload_path)
+        except UnsupportedMedia as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        ensure_allowed_length(duration)
+
+        return await run_in_threadpool(
+            queue_job,
+            job_id,
+            user,
+            duration,
+            {"source": "upload", "title": title},
+            lambda: transcribe_job.send(job_id, upload_title=title),
+        )
+    except BaseException:
+        redis.delete(key)
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise
 
 
 @router.get(

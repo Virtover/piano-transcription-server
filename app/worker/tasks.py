@@ -13,6 +13,8 @@ from app.transcription.cancellation import TranscriptionCancelled
 
 
 JOB_TTL = 60 * 60  # 1 hour
+# Uploaded files are stored in the job directory under this name.
+UPLOAD_FILE_NAME = "upload.input"
 
 
 broker = RedisBroker(
@@ -199,7 +201,13 @@ def fail_active_jobs(reason: str) -> None:
 
 
 @dramatiq.actor
-def transcribe_job(job_id: str, source_url: str):
+def transcribe_job(
+    job_id: str,
+    source_url: str | None = None,
+    upload_title: str | None = None,
+):
+    """Transcribe a video URL, or the uploaded file in the job directory
+    when source_url is None."""
     output_dir = (
         Path(settings.data_dir)
         / "jobs"
@@ -240,6 +248,8 @@ def transcribe_job(job_id: str, source_url: str):
 
         midi_path = transcribe_source(
             source_url=source_url,
+            upload_path=None if source_url else output_dir / UPLOAD_FILE_NAME,
+            upload_title=upload_title,
             output_dir=output_dir,
             progress_callback=progress,
             metadata_callback=metadata,
