@@ -16,14 +16,15 @@ The API is available at `http://localhost:8000`; interactive documentation is at
 
 See [Local setup](docs/setup.md) for requirements, GPU checks, health checks, and worker scaling.
 
-The billing database is stored in the host-side `billing-data` directory and backed up hourly by default; backups are deleted after 30 days by default. When upgrading an existing deployment, follow the SQLite migration steps in [configuration](docs/configuration.md) while the stack is stopped.
+> [!NOTE]
+> Billing data lives in the host directory `billing-data` and is backed up every hour, with backups kept for 30 days (both configurable). The API updates the database schema on startup, so copy `billing-data` before upgrading. See [Billing database backups](docs/configuration.md#-billing-database-backups).
 
 ## 📚 Documentation
 
 ### 🛠️ Getting started
 
 * [Local setup](docs/setup.md) - run the Docker stack, check services, and tune CPU/GPU workers.
-* [Configuration and environment](docs/configuration.md) - environment variables, shared volumes, secrets, and database backups.
+* [Configuration and environment](docs/configuration.md) - environment variables, GPU memory and batching, secrets, and database backups.
 * [Testing](docs/testing.md) - install development dependencies and run checks.
 
 ### 🎵 Using the service
@@ -38,6 +39,21 @@ The billing database is stored in the host-side `billing-data` directory and bac
 ## 🎼 Piano Weave
 
 The server is independent of any client that can make HTTP requests and download MIDI files. One client is [Piano Weave](https://github.com/Virtover/pianoweave), an Android application for learning piano songs from online videos.
+
+## 💬 Community & Support
+
+Found a bug or have a question? [Open an issue](https://github.com/Virtover/piano-transcription-server/issues).
+
+If the project is useful to you, you can support its development:
+
+<p align="center">
+  <a href="https://ko-fi.com/Y3G527Q9PN">
+    <img src="https://img.shields.io/badge/Ko--fi-29ABE0?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi" />
+  </a>
+  <a href="https://www.patreon.com/cw/ChristopherOlszak/membership">
+    <img src="https://img.shields.io/badge/Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white" alt="Become a patron on Patreon" />
+  </a>
+</p>
 
 ## 📄 License
 
