@@ -9,8 +9,8 @@ from app.billing import InsufficientMinutes, cancelled_cost, period_seconds, tra
 @pytest.fixture
 def billed(api_context):
     _, settings, billing = api_context
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 10}
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 10}
     return settings, billing
 
 
@@ -82,8 +82,8 @@ def test_cancellation_charge_is_capped_by_reservation(billed):
 
 def test_free_minutes_top_up_once_per_period(billed):
     settings, billing = billed
-    settings.free_minutes = 5
-    settings.free_minutes_period = "1d"
+    settings.billing.free_minutes = 5
+    settings.billing.free_minutes_period = "1d"
     billing.credit_purchase("user", "starter", "token", "order")
     billing.reserve("user", "job", 8)
     billing.settle_success("job")
@@ -97,7 +97,7 @@ def test_free_minutes_top_up_once_per_period(billed):
 
 def test_free_minutes_never_exceed_the_configured_amount(billed):
     settings, billing = billed
-    settings.free_minutes = 5
+    settings.billing.free_minutes = 5
     billing.credit_purchase("user", "starter", "token", "order")
 
     assert billing.grant_free_minutes("user") == 0
@@ -106,7 +106,7 @@ def test_free_minutes_never_exceed_the_configured_amount(billed):
 
 def test_free_minutes_period_defaults_to_30_days(api_context):
     _, settings, _ = api_context
-    settings.free_minutes_period = None
+    settings.billing.free_minutes_period = None
 
     assert period_seconds() == 30 * 24 * 60 * 60
 

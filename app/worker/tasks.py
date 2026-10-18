@@ -18,14 +18,14 @@ UPLOAD_FILE_NAME = "upload.input"
 
 
 broker = RedisBroker(
-    url=settings.redis_url,
+    url=settings.service.redis_url,
 )
 
 dramatiq.set_broker(broker)
 
 
 redis = Redis.from_url(
-    settings.redis_url,
+    settings.service.redis_url,
     decode_responses=True,
 )
 billing = Billing()
@@ -104,7 +104,7 @@ def complete_job(job_id: str, result: Path) -> bool:
 
 
 def cleanup_expired_jobs():
-    jobs_dir = Path(settings.data_dir) / "jobs"
+    jobs_dir = Path(settings.service.data_dir) / "jobs"
 
     if not jobs_dir.exists():
         return
@@ -128,7 +128,7 @@ def delete_user_jobs(user_id: str) -> None:
             continue
         redis.delete(key)
         shutil.rmtree(
-            Path(settings.data_dir)
+            Path(settings.service.data_dir)
             / "jobs"
             / key.removeprefix("transcription:"),
             ignore_errors=True,
@@ -190,7 +190,7 @@ def fail_active_jobs(reason: str) -> None:
                     if job.get("user_id"):
                         billing.release(key.removeprefix("transcription:"))
                     shutil.rmtree(
-                        Path(settings.data_dir)
+                        Path(settings.service.data_dir)
                         / "jobs"
                         / key.removeprefix("transcription:"),
                         ignore_errors=True,
@@ -209,7 +209,7 @@ def transcribe_job(
     """Transcribe a video URL, or the uploaded file in the job directory
     when source_url is None."""
     output_dir = (
-        Path(settings.data_dir)
+        Path(settings.service.data_dir)
         / "jobs"
         / job_id
     )

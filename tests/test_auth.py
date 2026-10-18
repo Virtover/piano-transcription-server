@@ -127,7 +127,7 @@ def test_google_outage_returns_503(google, response):
 
 def test_authentication_requires_configured_client_ids(google, api_context):
     _, settings, _ = api_context
-    settings.google_oauth_client_ids = [" "]
+    settings.auth.client_ids = [" "]
 
     assert verify_status() == (503, "Google authentication is not configured")
 
@@ -135,22 +135,22 @@ def test_authentication_requires_configured_client_ids(google, api_context):
 def test_current_user_normalizes_email(google, api_context):
     client, settings, _ = api_context
     responses, _ = google
-    settings.billing_provider = "google_play"
-    settings.free_minutes = 1
+    settings.billing.provider = "google_play"
+    settings.billing.free_minutes = 1
     responses[auth.TOKENINFO_URL] = FakeResponse(200, token_info(email=" User@Example.COM "))
 
     response = client.get("/api/billing/balance", headers={"Authorization": "Bearer token"})
 
     assert response.status_code == 200
     assert response.json()["user_id"] == "user-1"
-    with sqlite3.connect(settings.billing_database_path) as connection:
+    with sqlite3.connect(settings.billing.database_path) as connection:
         assert connection.execute("SELECT email FROM users").fetchall() == [("user@example.com",)]
 
 
 def test_token_without_email_is_rejected(google, api_context):
     client, settings, _ = api_context
     responses, _ = google
-    settings.billing_provider = "google_play"
+    settings.billing.provider = "google_play"
     responses[auth.TOKENINFO_URL] = FakeResponse(200, token_info(email=None))
     responses[auth.USERINFO_URL] = FakeResponse(200, {})
 

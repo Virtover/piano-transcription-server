@@ -1,31 +1,76 @@
 # ⚙️ Configuration and environment
 
-Settings are read from `.env`. Start from [.env.example](../.env.example). Docker Compose overrides the Redis URL and shared data directory for its services.
+## 🧭 How configuration works
 
-| Variable                           | Default                    | Description                                                                |
-| ---------------------------------- | -------------------------- | -------------------------------------------------------------------------- |
-| `REDIS_URL`                        | `redis://localhost:6379/0` | Redis connection URL. Compose uses `redis://redis:6379/0`.                 |
-| `DATA_DIR`                         | `/data`                    | Shared directory for job output files.                                     |
-| `BILLING_DATABASE_PATH`            | `/billing/billing.sqlite3` | SQLite database for balances, purchases, and reservations.                 |
-| `BILLING_BACKUP_INTERVAL`          | `1h`                       | How often the billing database is backed up. Uses `s`, `m`, `h`, `d`, or `w`. |
-| `BILLING_BACKUP_RETENTION`         | `30d`                      | Age after which automatic backups are deleted. Uses `s`, `m`, `h`, `d`, or `w`. |
-| `WORKER_THREADS`                   | `auto`                     | CPU thread limit; auto uses physical CPU cores minus two, capped at capacity. |
-| `WORKER_MODEL_MEMORY_GIB`          | `1.0`                      | VRAM reserved for the CUDA context and model on each GPU.                   |
-| `WORKER_MEMORY_PER_JOB_GIB`        | `1.1`                      | VRAM budget for each concurrent GPU transcription job.                      |
-| `WORKER_BATCH_SIZE`                | `6`                        | Maximum requests combined into one model batch; also CPU worker thread count. |
-| `WORKER_BATCH_TIMEOUT_SECONDS`     | `2`                        | Maximum CPU or GPU batch wait before running a partial batch.               |
-| `WORKER_MAX_CONCURRENCY`           | `auto`                     | Optional cap for automatically calculated GPU job concurrency.               |
-| `CLEANUP_INTERVAL_SECONDS`         | `600`                      | Cleanup scan interval.                                                     |
-| `SOURCE_URL_ALLOWED_HOSTS`         | see below                  | JSON list of hosts accepted as transcription sources. Subdomains match too.   |
-| `BILLING_PROVIDER`                 | `none`                     | `none` or `google_play`.                                                   |
-| `BILLING_PRODUCTS`                 | `{}`                       | JSON mapping of Play product IDs to transcription minutes.                 |
-| `FREE_MINUTES_PERIOD`              | unset                      | Free-credit interval using `s`, `m`, `h`, `d`, or `w`.                     |
-| `FREE_MINUTES`                     | unset                      | Free minutes granted per interval; omit to disable.                        |
-| `MAX_VIDEO_LENGTH_MINUTES`         | unset                      | Maximum accepted video or uploaded file length; unset means no limit.      |
-| `MAX_UPLOAD_SIZE_MB`               | `200`                      | Maximum size of an uploaded file.                                          |
-| `GOOGLE_OAUTH_CLIENT_IDS`          | `[]`                       | Public OAuth client IDs required for billing.                              |
-| `GOOGLE_PLAY_PACKAGE_NAME`         | unset                      | Android package name used for Play verification.                           |
-| `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` | unset                      | Service-account JSON filename in the mounted `secrets` directory.          |
+* **Choices go in `.env`.** Start from [.env.example](../.env.example), which lists the values operators usually change. Every setting is described below.
+* **Wiring goes in `docker-compose.yml`.** Container paths and service addresses (`REDIS_URL`, `DATA_DIR`, `BILLING_DATABASE_PATH`, `BILLING_BACKUP_DIR`) are fixed in the Compose `environment:` sections. The code defaults suit local development outside Docker.
+* **Secrets are files in `./secrets`.** Compose mounts the folder read-only at `/run/secrets`. The file name is the setting name. Secrets are never read from `.env` or the environment, and never appear in logs or error messages. See [Secrets](#-secrets).
+* **The process environment overrides `.env`.** Empty values count as unset.
+
+All settings are validated when a service starts. An invalid value stops the service with a message that names the variable. A variable that starts with `WORKER_`, `BILLING_`, `OUTSOURCE_`, `RUNPOD_`, or `GOOGLE_PLAY_` but is not a known setting is reported as a warning with the closest known name, for example `Unknown setting WORKER_BATCHSIZE; did you mean WORKER_BATCH_SIZE?`.
+
+### ✅ Checking the configuration
+
+```powershell
+docker compose run --rm api python -m app.config check
+```
+
+The command validates everything, prints the resolved configuration with secrets masked, and exits with code `1` on errors. Outside Docker, run `python -m app.config check --env-file .env --secrets-dir secrets`.
+
+### ⏱️ Value formats
+
+* **Durations** use a number and a unit: `s`, `m`, `h`, `d`, or `w`, for example `2s`, `10m`, `1.5h`, `30d`. A plain number is rejected, so `600` cannot be mistaken for minutes.
+* **`auto` or a number:** `WORKER_THREADS`, `WORKER_BATCH_SIZE`, and `WORKER_MAX_CONCURRENCY` accept `auto` or a positive integer.
+* **Lists and mappings** are JSON on one line, for example `GOOGLE_OAUTH_CLIENT_IDS=["id-1","id-2"]`.
+* Comments go on their own lines in `.env`.
+
+## 📋 Settings
+
+### Limits
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MAX_VIDEO_LENGTH_MINUTES` | unset | Maximum video or uploaded file length; unset means no limit. |
+| `MAX_UPLOAD_SIZE_MB` | `200` | Maximum size of an uploaded file. |
+| `SOURCE_URL_ALLOWED_HOSTS` | see below | JSON list of hosts accepted as transcription sources. Subdomains match too. |
+| `CLEANUP_INTERVAL` | `10m` | How often the cleanup service deletes expired job files. |
+
+### Worker
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `WORKER_THREADS` | `auto` | CPU threads for PyTorch and ffmpeg. `auto` uses physical cores minus two; a number is capped at the physical core count. |
+| `WORKER_MODEL_MEMORY_GIB` | `1.0` | VRAM reserved on each GPU for the model and GPU libraries. See [GPU memory and batching](#-gpu-memory-and-batching). |
+| `WORKER_MEMORY_PER_JOB_GIB` | `1.1` | VRAM budget for each concurrent GPU job. |
+| `WORKER_BATCH_SIZE` | `6` | Maximum jobs combined into one model batch. In CPU mode, also the number of worker threads. `auto` means `6`. |
+| `WORKER_BATCH_TIMEOUT` | `2s` | Maximum wait for more jobs before running a partial batch. |
+| `WORKER_MAX_CONCURRENCY` | `auto` | Optional cap on concurrent GPU jobs. It can only lower the capacity calculated from VRAM. |
+
+### Billing
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BILLING_PROVIDER` | `none` | `none` or `google_play`. |
+| `BILLING_PRODUCTS` | `{}` | JSON mapping of Google Play product IDs to transcription minutes. |
+| `FREE_MINUTES` | unset | Free minutes granted per period; omit to disable. |
+| `FREE_MINUTES_PERIOD` | `30d` | How often free minutes are topped up. |
+| `BILLING_BACKUP_INTERVAL` | `1h` | How often the billing database is backed up. |
+| `BILLING_BACKUP_RETENTION` | `30d` | Age after which automatic backups are deleted. |
+| `GOOGLE_OAUTH_CLIENT_IDS` | `[]` | Public OAuth client IDs whose Google ID tokens are accepted. Required for billing. |
+| `GOOGLE_PLAY_PACKAGE_NAME` | unset | Android package name used for Google Play verification. Required for billing. |
+
+`BILLING_PROVIDER=google_play` also requires the secret `google_play_service_account.json`. The API refuses to start if the package name, the OAuth client IDs, or the secret is missing. See the [Google Play billing guide](google-play-billing.md).
+
+### Container wiring
+
+Set by `docker-compose.yml`. Change them only when running the services outside Docker.
+
+| Variable | Default | Compose value | Description |
+| --- | --- | --- | --- |
+| `REDIS_URL` | `redis://localhost:6379/0` | `redis://redis:6379/0` | Redis connection URL. |
+| `DATA_DIR` | `/data` | `/data` | Shared directory for job files. |
+| `BILLING_DATABASE_PATH` | `/billing/billing.sqlite3` | same | SQLite database for balances, purchases, and reservations. |
+| `BILLING_BACKUP_DIR` | `/billing/backups` | same | Directory for billing database backups. |
 
 Default for `SOURCE_URL_ALLOWED_HOSTS`:
 
@@ -35,7 +80,37 @@ SOURCE_URL_ALLOWED_HOSTS=["youtube.com","youtu.be","youtube-nocookie.com","vimeo
 
 Write it on a single line. Subdomains match too, so `youtube.com` also covers `music.youtube.com`.
 
-The API, worker, and cleanup service must use the same `DATA_DIR`. Billing is stored separately in the host directory `./billing-data`, mounted at `/billing` only in the API and worker. The cleanup service cannot access the billing database. Compose mounts `./secrets` read-only at `/run/secrets` for the API and worker.
+The API, worker, and cleanup service share the `data` volume at `/data`. Billing is stored separately in the host directory `./billing-data`, mounted at `/billing` only in the API and worker. The cleanup service has no access to the billing database. It runs on the API image, because it only deletes files and needs neither CUDA nor the model.
+
+## 🔐 Secrets
+
+Put each secret in `./secrets` as a file named after the setting. Compose mounts the folder read-only at `/run/secrets` for the API and worker.
+
+| File | Used for |
+| --- | --- |
+| `google_play_service_account.json` | Google Play service-account JSON key, used to verify purchases and read the product catalog. |
+
+Secrets are only read from these files: a variable with the same name in `.env` or the environment is ignored. Never commit the `secrets` folder.
+
+## 🕰️ Deprecated names
+
+Old names keep working. Each logs one deprecation warning when a service starts. Setting both the old and the new name is an error.
+
+| Old name | Replacement | Notes |
+| --- | --- | --- |
+| `CLEANUP_INTERVAL_SECONDS` | `CLEANUP_INTERVAL` | A plain number is read as seconds. |
+| `WORKER_BATCH_TIMEOUT_SECONDS` | `WORKER_BATCH_TIMEOUT` | A plain number is read as seconds. |
+| `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` | the secret file `google_play_service_account.json` | Still read if set: a file name in `secrets`, or an absolute path. It takes priority over the secret file. |
+
+### Migrating an existing deployment
+
+An existing `.env` keeps working without changes; you only see deprecation warnings. To move to the new format:
+
+1. Rename `CLEANUP_INTERVAL_SECONDS=86400` to `CLEANUP_INTERVAL=1d`, and `WORKER_BATCH_TIMEOUT_SECONDS=2` to `WORKER_BATCH_TIMEOUT=2s`.
+2. Rename the service-account key in `secrets` to `google_play_service_account.json` and remove `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE`.
+3. Remove `REDIS_URL`, `DATA_DIR`, and `BILLING_DATABASE_PATH` from `.env`. Compose sets them now; values left in `.env` are overridden by Compose.
+4. Remove any inline comments after values.
+5. Run `docker compose run --rm api python -m app.config check`, then `docker compose up -d --build`.
 
 `MAX_UPLOAD_SIZE_MB` limits disk use per upload. Uploads are written to the shared `DATA_DIR` and removed after conversion. Compressed files are small: an hour of MP3 at 192 kbit/s is about 85 MB. Uncompressed WAV is large: an hour of 16-bit 44.1 kHz stereo is about 635 MB. Raise the limit only if users need to upload long lossless recordings and the disk has room for several at once.
 
@@ -115,10 +190,10 @@ Example capacities with the default values:
 
 * On GPU, the batch can never hold more jobs than the worker has threads, so values above the calculated capacity have no effect. Values below it leave capacity unused: jobs that arrive while a batch runs wait until the whole batch finishes.
 * Larger batches give more total throughput, but with diminishing returns. In the table above, going from 4 to 6 jobs saves only about 5% time per job. Each job also progresses more slowly, because every step processes one segment for every job in the batch.
-* A batch starts early only when it is full, so with a large value each batch waits the full `WORKER_BATCH_TIMEOUT_SECONDS`.
+* A batch starts early only when it is full, so with a large value each batch waits the full `WORKER_BATCH_TIMEOUT`.
 * On CPU, the batch size is also the number of worker threads, so a large value means many simultaneous downloads and much more RAM. Keep it small, around 2 to 6.
 
-**`WORKER_BATCH_TIMEOUT_SECONDS`** (default `2`)
+**`WORKER_BATCH_TIMEOUT`** (default `2s`)
 
 * Longer: more jobs can join a batch when requests arrive close together, which helps throughput, but every batch starts later.
 * Shorter: lower latency for single jobs, but jobs arriving a moment later wait for the next batch.
@@ -127,7 +202,7 @@ Example capacities with the default values:
 
 * Set a number to leave GPU memory for other programs or to limit load on a shared machine. It can only lower the calculated capacity, never raise it.
 
-For billing configuration, use [.env.google-play.example](../.env.google-play.example) and follow the [Google Play billing guide](google-play-billing.md).
+For billing configuration, uncomment the billing section of [.env.example](../.env.example) and follow the [Google Play billing guide](google-play-billing.md).
 
 To manually add transcription minutes to an existing billed user, run the command in the API container:
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.transcription.cancellation import TranscriptionCancelled
-from app.transcription.device import automatic_cpu_threads
+from app.transcription.device import cpu_thread_count
 from app.transcription.piano_transcription import (
     transcribe_piano,
 )
@@ -39,17 +39,8 @@ class DownloadedAudio:
     metadata: dict[str, Any]
 
 
-def ffmpeg_thread_count() -> int | None:
-    value = os.environ.get("WORKER_THREADS", "auto").strip().lower()
-    if value == "auto":
-        return automatic_cpu_threads()
-    try:
-        thread_count = int(value)
-    except ValueError as error:
-        raise ValueError("WORKER_THREADS must be an integer or 'auto'") from error
-    if thread_count < 1:
-        raise ValueError("WORKER_THREADS must be at least 1")
-    return thread_count
+def ffmpeg_thread_count() -> int:
+    return cpu_thread_count()
 
 
 def download_audio(

@@ -70,6 +70,6 @@ def test_hosts_resolving_to_private_addresses_are_rejected(resolve, address):
 def test_empty_allow_list_allows_any_public_host(resolve, api_context):
     _, settings, _ = api_context
     resolve["example.org"] = "93.184.216.34"
-    settings.source_url_allowed_hosts = []
+    settings.limits.source_url_allowed_hosts = []
 
     assert ensure_safe_source_url("https://example.org/video") == "https://example.org/video"

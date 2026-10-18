@@ -49,7 +49,7 @@ def ensure_safe_source_url(url: str) -> str:
     if host == "localhost" or host.endswith(BLOCKED_SUFFIXES):
         raise UnsafeSourceUrl("URL points to a non-public address")
 
-    allowed = [h.strip().lower().lstrip(".") for h in settings.source_url_allowed_hosts if h.strip()]
+    allowed = [h.strip().lower().lstrip(".") for h in settings.limits.source_url_allowed_hosts if h.strip()]
     if allowed and not any(host == h or host.endswith("." + h) for h in allowed):
         raise UnsafeSourceUrl("This site is not supported")
 

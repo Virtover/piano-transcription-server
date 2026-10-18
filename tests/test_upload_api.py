@@ -39,7 +39,7 @@ def upload(api_context, monkeypatch):
 
 
 def job_dirs(settings):
-    jobs = Path(settings.data_dir) / "jobs"
+    jobs = Path(settings.service.data_dir) / "jobs"
     return sorted(path.name for path in jobs.iterdir()) if jobs.exists() else []
 
 
@@ -55,7 +55,7 @@ def test_upload_queues_job_with_file(api_context, upload):
 
     assert response.status_code == 202
     job_id = response.json()["job_id"]
-    stored = Path(settings.data_dir) / "jobs" / job_id / tasks.UPLOAD_FILE_NAME
+    stored = Path(settings.service.data_dir) / "jobs" / job_id / tasks.UPLOAD_FILE_NAME
     assert stored.read_bytes() == b"ID3-audio"
     assert upload["sent"] == [((job_id,), {"upload_title": "My Song"})]
 
@@ -78,7 +78,7 @@ def test_large_streamed_upload_is_stored_completely(api_context, upload):
     response = upload["post"](iter(chunks))
 
     assert response.status_code == 202
-    stored = Path(settings.data_dir) / "jobs" / response.json()["job_id"] / tasks.UPLOAD_FILE_NAME
+    stored = Path(settings.service.data_dir) / "jobs" / response.json()["job_id"] / tasks.UPLOAD_FILE_NAME
     assert stored.read_bytes() == b"".join(chunks)
 
 
@@ -106,12 +106,12 @@ def test_file_name_cannot_choose_storage_path(api_context, upload):
 
     assert response.status_code == 202
     assert job_dirs(settings) == [response.json()["job_id"]]
-    assert not (Path(settings.data_dir) / "escape.mp3").exists()
+    assert not (Path(settings.service.data_dir) / "escape.mp3").exists()
 
 
 def test_declared_size_over_limit_is_rejected_before_reading(api_context, upload):
     _, settings, _ = api_context
-    settings.max_upload_size_mb = 1
+    settings.limits.max_upload_size_mb = 1
 
     response = upload["post"](b"x", headers={"Content-Length": str(2 * 1024**2)})
 
@@ -123,7 +123,7 @@ def test_declared_size_over_limit_is_rejected_before_reading(api_context, upload
 
 def test_streamed_size_over_limit_is_rejected(api_context, upload):
     _, settings, _ = api_context
-    settings.max_upload_size_mb = 1
+    settings.limits.max_upload_size_mb = 1
 
     # A generator body is sent without Content-Length.
     response = upload["post"](iter([b"x" * 600_000, b"x" * 600_000]))
@@ -174,7 +174,7 @@ def test_too_long_file_is_rejected(api_context, upload):
 
 def test_upload_requires_authentication_when_billing(api_context, upload):
     _, settings, _ = api_context
-    settings.billing_provider = "google_play"
+    settings.billing.provider = "google_play"
 
     assert upload["post"]().status_code == 401
     assert upload["post"](headers={"Authorization": "Bearer invalid"}).status_code == 401
@@ -183,8 +183,8 @@ def test_upload_requires_authentication_when_billing(api_context, upload):
 
 def test_upload_reserves_minutes(api_context, upload):
     client, settings, billing = api_context
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 10}
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 10}
     billing.credit_purchase("user", "starter", "token", "order")
     upload["duration"] = 300
 
@@ -205,9 +205,9 @@ def test_upload_reserves_minutes(api_context, upload):
 
 def test_upload_with_insufficient_minutes_is_removed(api_context, upload):
     _, settings, billing = api_context
-    settings.billing_provider = "google_play"
-    settings.free_minutes = 1
-    settings.free_minutes_period = "1d"
+    settings.billing.provider = "google_play"
+    settings.billing.free_minutes = 1
+    settings.billing.free_minutes_period = "1d"
 
     response = upload["post"](headers={"Authorization": "Bearer user"})
 
@@ -219,8 +219,8 @@ def test_upload_with_insufficient_minutes_is_removed(api_context, upload):
 
 def test_upload_with_unavailable_worker_is_removed(api_context, upload, monkeypatch):
     _, settings, billing = api_context
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 10}
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 10}
     billing.credit_purchase("user", "starter", "token", "order")
 
     def broken_send(*args, **kwargs):
@@ -292,6 +292,6 @@ def test_cost_for_file_duration_is_validated(api_context, params, status):
 
 def test_server_info_exposes_upload_limit(api_context):
     client, settings, _ = api_context
-    settings.max_upload_size_mb = 150
+    settings.limits.max_upload_size_mb = 150
 
     assert client.get("/api/server-info").json()["max_upload_size_mb"] == 150

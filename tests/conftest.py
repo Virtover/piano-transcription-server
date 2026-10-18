@@ -6,6 +6,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def default_settings(tmp_path):
+    """Every test starts from the code defaults, not the developer's .env."""
+    from app import config
+
+    saved = {name: getattr(config.settings, name) for name in config.GROUPS}
+    fresh = config.load_settings(env_file=None, secrets_dir=None)
+    for name in config.GROUPS:
+        setattr(config.settings, name, getattr(fresh, name))
+    config.settings.secrets_dir = str(tmp_path / "secrets")
+    yield config.settings
+    for name, group in saved.items():
+        setattr(config.settings, name, group)
+    config.settings.secrets_dir = config.SECRETS_DIR
+
+
 @pytest.fixture
 def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, object]]:
     from app import google_play
@@ -14,27 +30,17 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     from app.api.routes import billing as billing_routes
     from app.api.routes import transcriptions as transcription_routes
     from app.billing import Billing
-    from app.config import Settings, settings
+    from app.config import settings
     from app.worker import tasks
 
-    settings.billing_provider = "none"
-    settings.billing_products = {}
-    settings.free_minutes = None
-    settings.free_minutes_period = None
-    settings.google_play_package_name = None
-    settings.google_play_service_account_file = None
-    settings.google_oauth_client_ids = ["test-client-id"]
-    settings.billing_database_path = str(tmp_path / "billing.sqlite3")
-    settings.billing_backup_dir = str(tmp_path / "backups")
-    settings.billing_backup_interval = "1h"
-    settings.billing_backup_retention = "30d"
-    settings.data_dir = str(tmp_path / "data")
-    settings.max_video_length_minutes = 20
-    settings.max_upload_size_mb = 200
-    settings.source_url_allowed_hosts = list(Settings.model_fields["source_url_allowed_hosts"].default)
+    settings.auth.client_ids = ["test-client-id"]
+    settings.billing.database_path = str(tmp_path / "billing.sqlite3")
+    settings.billing.backup_dir = str(tmp_path / "backups")
+    settings.service.data_dir = str(tmp_path / "data")
+    settings.limits.max_video_length_minutes = 20
 
     redis = fakeredis.FakeRedis(decode_responses=True)
-    billing = Billing(settings.billing_database_path)
+    billing = Billing(settings.billing.database_path)
     monkeypatch.setattr(billing_routes, "redis", redis)
     monkeypatch.setattr(transcription_routes, "redis", redis)
     monkeypatch.setattr(tasks, "redis", redis)

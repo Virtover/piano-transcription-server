@@ -33,10 +33,10 @@ def test_ready_reports_redis_state(api_context, monkeypatch):
 
 def test_server_info_lists_only_synced_offers(api_context):
     client, settings, _ = api_context
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 10, "pro": 60, "retired": 5}
-    settings.free_minutes = 3
-    settings.free_minutes_period = "7d"
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 10, "pro": 60, "retired": 5}
+    settings.billing.free_minutes = 3
+    settings.billing.free_minutes_period = "7d"
     google_play.synced_products = {"starter", "pro", "unknown"}
 
     info = client.get("/api/server-info").json()
@@ -53,7 +53,7 @@ def test_server_info_lists_only_synced_offers(api_context):
 
 def test_server_info_without_billing_lists_configured_offers(api_context):
     client, settings, _ = api_context
-    settings.billing_products = {"starter": 10}
+    settings.billing.products = {"starter": 10}
 
     info = client.get("/api/server-info").json()
 
@@ -104,7 +104,7 @@ def test_video_duration_enforces_maximum_length(yt_dlp, api_context):
     yt_dlp["stdout"] = '{"duration": 1201}'
 
     assert duration_error() == 413
-    settings.max_video_length_minutes = None
+    settings.limits.max_video_length_minutes = None
     assert billing_routes.video_duration("https://youtube.com/watch?v=1") == 1201.0
 
 

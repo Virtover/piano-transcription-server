@@ -1,3 +1,11 @@
+# Container wiring (fixed paths and service addresses) is set here.
+# Operator choices (limits, worker tuning, billing) go in .env.
+x-wiring: &wiring
+  REDIS_URL: redis://redis:6379/0
+  DATA_DIR: /data
+  BILLING_DATABASE_PATH: /billing/billing.sqlite3
+  BILLING_BACKUP_DIR: /billing/backups
+
 services:
 
   api:
@@ -8,8 +16,9 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment: *wiring
     volumes:
-      - data:${DATA_DIR}
+      - data:/data
       - ./billing-data:/billing
       - ./secrets:/run/secrets:ro
     depends_on:
@@ -23,8 +32,9 @@ services:
       dockerfile: Dockerfile.worker
     env_file:
       - .env
+    environment: *wiring
     volumes:
-      - data:${DATA_DIR}
+      - data:/data
       - ./billing-data:/billing
       - ./secrets:/run/secrets:ro
     depends_on:
@@ -33,18 +43,20 @@ services:
     gpus: all
     restart: unless-stopped
 
+  # Only deletes expired job files, so it runs on the small API image.
   cleanup:
     build:
       context: .
-      dockerfile: Dockerfile.worker
+      dockerfile: Dockerfile.api
     env_file:
       - .env
+    environment: *wiring
     volumes:
-      - data:${DATA_DIR}
+      - data:/data
     depends_on:
       redis:
         condition: service_healthy
-    command: ["python3", "-m", "app.worker.cleanup"]
+    command: ["python", "-m", "app.worker.cleanup"]
     restart: unless-stopped
 
   redis:

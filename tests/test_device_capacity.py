@@ -31,8 +31,6 @@ def gpus(monkeypatch):
         return subprocess.CompletedProcess(command, 0, stdout=state["smi"])
 
     monkeypatch.setattr(device.subprocess, "run", fake_run)
-    monkeypatch.delenv("WORKER_MODEL_MEMORY_GIB", raising=False)
-    monkeypatch.delenv("WORKER_MEMORY_PER_JOB_GIB", raising=False)
     return state
 
 
@@ -94,14 +92,12 @@ def test_no_cuda(gpus):
 def test_launcher_summary_shows_free_memory(gpus, monkeypatch):
     gpus["devices"] = [("aaaa-1", 7126 * MiB, 8 * GiB)]
     gpus["smi"] = "GPU-aaaa-1, 5812\n"
-    monkeypatch.setattr(launcher, "cuda_job_capacities", device.cuda_job_capacities)
 
-    assert launcher.gpu_capacity() == (1, 4, "GPU 0: 4 job(s), 5.68 GiB free")
+    assert launcher.gpu_capacity(device.cuda_job_capacities()) == (1, 4, "GPU 0: 4 job(s), 5.68 GiB free")
 
 
 def test_launcher_uses_cpu_when_no_job_fits(gpus, monkeypatch):
     gpus["devices"] = [("aaaa-1", 2 * GiB, 4 * GiB)]
     gpus["smi"] = "GPU-aaaa-1, 1500\n"
-    monkeypatch.setattr(launcher, "cuda_job_capacities", device.cuda_job_capacities)
 
-    assert launcher.gpu_capacity() is None
+    assert launcher.gpu_capacity(device.cuda_job_capacities()) is None

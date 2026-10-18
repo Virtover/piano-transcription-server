@@ -27,12 +27,12 @@ def test_server_info_exposes_oauth_client_ids_only_when_billing_is_enabled(api_c
     assert disabled.status_code == 200
     assert "google_oauth_client_ids" not in disabled.json()
 
-    settings.billing_provider = "google_play"
+    settings.billing.provider = "google_play"
     enabled = client.get("/api/billing/server-info")
     assert enabled.status_code == 200
     assert enabled.json()["google_oauth_client_ids"] == ["test-client-id"]
 
-    settings.billing_provider = "google_play"
+    settings.billing.provider = "google_play"
     response = client.get("/api/billing/balance")
     assert response.status_code == 401
 
@@ -52,10 +52,10 @@ def test_google_play_purchase_is_idempotent(api_context, monkeypatch):
     client, settings, _ = api_context
     from app import google_play
 
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 5}
-    settings.google_play_package_name = "com.example.piano"
-    settings.google_play_service_account_file = "service-account.json"
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 5}
+    settings.google_play.package_name = "com.example.piano"
+    settings.secrets.google_play_service_account = '{"type": "service_account"}'
     google_play.synced_products = {"starter"}
 
     class FakeRequest:
@@ -78,7 +78,7 @@ def test_google_play_purchase_is_idempotent(api_context, monkeypatch):
             return FakePurchases()
 
     monkeypatch.setattr(
-        "google.oauth2.service_account.Credentials.from_service_account_file",
+        "google.oauth2.service_account.Credentials.from_service_account_info",
         lambda *args, **kwargs: object(),
     )
     monkeypatch.setattr("googleapiclient.discovery.build", lambda *args, **kwargs: FakeService())
@@ -104,8 +104,8 @@ def test_google_play_purchase_is_idempotent(api_context, monkeypatch):
 
 def test_manual_credit_uses_authenticated_email(api_context):
     _, settings, billing = api_context
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 1}
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 1}
     billing.credit_purchase("user-1", "starter", "purchase-token", "order-1", "user@example.com")
 
     assert billing.credit_minutes_by_email("USER@EXAMPLE.COM", 4) == 4
@@ -114,9 +114,9 @@ def test_manual_credit_uses_authenticated_email(api_context):
 
 def test_google_play_free_grant_is_thread_safe(api_context):
     client, settings, _ = api_context
-    settings.billing_provider = "google_play"
-    settings.free_minutes = 7
-    settings.free_minutes_period = "1d"
+    settings.billing.provider = "google_play"
+    settings.billing.free_minutes = 7
+    settings.billing.free_minutes_period = "1d"
 
     def read_balance():
         return client.get("/api/billing/balance", headers={"Authorization": "Bearer racer"})
@@ -130,7 +130,7 @@ def test_google_play_free_grant_is_thread_safe(api_context):
 
 def test_billed_balance_requires_verified_bearer_token(api_context):
     client, settings, _ = api_context
-    settings.billing_provider = "google_play"
+    settings.billing.provider = "google_play"
 
     missing = client.get("/api/billing/balance")
     assert missing.status_code == 401
@@ -145,7 +145,7 @@ def test_billed_balance_requires_verified_bearer_token(api_context):
 def test_invalid_google_token_is_rejected(api_context):
     client, settings, _ = api_context
 
-    settings.billing_provider = "google_play"
+    settings.billing.provider = "google_play"
     response = client.get(
         "/api/billing/balance",
         headers={"Authorization": "Bearer invalid"},
@@ -158,9 +158,9 @@ def test_google_oauth_client_ids_use_configured_values(api_context):
     _, settings, _ = api_context
     from app import auth
 
-    settings.google_oauth_client_ids = [
+    settings.auth.client_ids = [
         "direct-client-id.apps.googleusercontent.com",
         "another-client-id.apps.googleusercontent.com",
     ]
 
-    assert auth.google_oauth_client_ids() == settings.google_oauth_client_ids
+    assert auth.google_oauth_client_ids() == settings.auth.client_ids

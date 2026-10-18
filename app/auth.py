@@ -31,11 +31,11 @@ class AuthenticatedUser:
 
 
 def google_allowed_client_ids() -> set[str]:
-    return {client_id.strip() for client_id in settings.google_oauth_client_ids if client_id.strip()}
+    return {client_id.strip() for client_id in settings.auth.client_ids if client_id.strip()}
 
 
 def google_oauth_client_ids() -> list[str]:
-    return list(settings.google_oauth_client_ids)
+    return list(settings.auth.client_ids)
 
 
 def _unavailable(error: Exception) -> HTTPException:
@@ -153,7 +153,7 @@ def _fetch_token_info(token: str, allowed_client_ids: set[str]) -> dict[str, Any
 def current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> AuthenticatedUser | None:
-    if settings.billing_provider == "none":
+    if settings.billing.provider == "none":
         return None
 
     if credentials is None or credentials.scheme.lower() != "bearer":

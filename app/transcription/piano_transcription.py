@@ -1,6 +1,5 @@
 import gc
 import math
-import os
 import queue
 import threading
 import time
@@ -25,8 +24,9 @@ from transkun.ModelTransformer import (
     resolveOverlapping,
 )
 
+from app.config import settings
 from app.transcription.device import (
-    automatic_cpu_threads,
+    cpu_thread_count,
     cuda_job_capacities,
 )
 
@@ -36,14 +36,7 @@ CancellationCallback = Callable[[], bool]
 
 
 def configure_cpu_threads() -> None:
-    value = os.environ.get("WORKER_THREADS", "auto").strip().lower()
-    if value == "auto":
-        thread_count = automatic_cpu_threads()
-    else:
-        thread_count = int(value)
-    if thread_count < 1:
-        raise ValueError("WORKER_THREADS must be at least 1")
-    torch.set_num_threads(thread_count)
+    torch.set_num_threads(cpu_thread_count())
 
 
 @dataclass
@@ -52,34 +45,6 @@ class _BatchRequest:
     progress_callback: ProgressCallback | None
     cancellation_callback: CancellationCallback | None
     result: Future
-
-
-def _positive_int(name: str, default: int) -> int:
-    value = os.environ.get(name, str(default)).strip().lower()
-    if value == "auto":
-        return default
-    try:
-        parsed = int(value)
-    except ValueError as error:
-        raise ValueError(f"{name} must be an integer or 'auto'") from error
-    if parsed < 1:
-        raise ValueError(f"{name} must be at least 1")
-    return parsed
-
-
-def _batch_timeout_seconds() -> float:
-    value = os.environ.get("WORKER_BATCH_TIMEOUT_SECONDS", "2").strip()
-    try:
-        parsed = float(value)
-    except ValueError as error:
-        raise ValueError(
-            "WORKER_BATCH_TIMEOUT_SECONDS must be a positive number"
-        ) from error
-    if not math.isfinite(parsed) or parsed <= 0:
-        raise ValueError(
-            "WORKER_BATCH_TIMEOUT_SECONDS must be a positive number"
-        )
-    return parsed
 
 
 def read_audio(
@@ -594,8 +559,8 @@ class _GpuBatcher:
         self.device = device
         self.model = load_model(device)
         self.requests: queue.Queue[_BatchRequest] = queue.Queue()
-        self.batch_size = _positive_int("WORKER_BATCH_SIZE", 6)
-        self.timeout = _batch_timeout_seconds()
+        self.batch_size = settings.worker.batch_size or 6
+        self.timeout = settings.worker.batch_timeout
         self.thread = threading.Thread(
             target=self._run,
             name=f"transcription-batcher-{device}",

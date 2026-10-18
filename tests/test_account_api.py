@@ -9,10 +9,10 @@ from app.worker import tasks
 
 
 def enable_billing(settings, free_minutes=5):
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 10}
-    settings.free_minutes = free_minutes
-    settings.free_minutes_period = "1d"
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 10}
+    settings.billing.free_minutes = free_minutes
+    settings.billing.free_minutes_period = "1d"
 
 
 def auth(token):
@@ -20,7 +20,7 @@ def auth(token):
 
 
 def rows(settings, query, *params):
-    with sqlite3.connect(settings.billing_database_path) as connection:
+    with sqlite3.connect(settings.billing.database_path) as connection:
         return connection.execute(query, params).fetchall()
 
 
@@ -52,7 +52,7 @@ def test_delete_account_removes_user_data_jobs_and_files(api_context):
     )
     assert created.status_code == 202
     job_id = created.json()["job_id"]
-    job_dir = Path(settings.data_dir) / "jobs" / job_id
+    job_dir = Path(settings.service.data_dir) / "jobs" / job_id
     job_dir.mkdir(parents=True)
     (job_dir / "transcription.mid").write_bytes(b"MThd")
 
@@ -104,7 +104,7 @@ def test_deleted_account_gets_free_minutes_after_period(api_context):
     client, settings, billing = api_context
     enable_billing(settings, free_minutes=5)
     client.get("/api/billing/balance", headers=auth("owner"))
-    with sqlite3.connect(settings.billing_database_path) as connection:
+    with sqlite3.connect(settings.billing.database_path) as connection:
         connection.execute(
             "UPDATE users SET free_grant_at = ? WHERE user_id = 'owner'",
             (int(time.time()) - 2 * 24 * 60 * 60,),

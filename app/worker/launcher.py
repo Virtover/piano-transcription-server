@@ -1,59 +1,30 @@
 import os
 import shutil
+from dataclasses import dataclass
 
+from app.config import ensure_valid, settings
 from app.transcription.device import (
-    automatic_cpu_threads,
+    cpu_thread_count,
     cuda_job_capacities,
     physical_cpu_count,
 )
 
 
-DEFAULT_CPU_CONCURRENCY = 1
+DEFAULT_CPU_BATCH_SIZE = 6
 
 
-def configured_value(name: str) -> int | None:
-    value = os.environ.get(name, "").strip().lower()
+@dataclass(frozen=True)
+class WorkerPlan:
+    """Resolved worker resources, computed once at startup."""
 
-    if not value or value == "auto":
-        return None
-
-    try:
-        parsed = int(value)
-    except ValueError as error:
-        raise ValueError(f"{name} must be an integer or 'auto'") from error
-
-    if parsed < 1:
-        raise ValueError(f"{name} must be at least 1")
-
-    return parsed
+    processes: int
+    threads: int
+    # Set in CPU mode: threads for PyTorch, ffmpeg, OpenMP, and MKL.
+    cpu_threads: int | None
+    summary: str
 
 
-def cpu_count() -> int:
-    return physical_cpu_count()
-
-
-def cpu_thread_count() -> int:
-    configured = configured_value("WORKER_THREADS")
-    automatic = automatic_cpu_threads()
-    return min(configured, cpu_count()) if configured else automatic
-
-
-def batch_size() -> int:
-    return configured_value("WORKER_BATCH_SIZE") or 6
-
-
-def configure_cpu_environment(gpu: tuple[int, int, str] | None) -> None:
-    if gpu:
-        return
-
-    thread_count = str(cpu_thread_count())
-    os.environ["WORKER_THREADS"] = thread_count
-    os.environ["OMP_NUM_THREADS"] = thread_count
-    os.environ["MKL_NUM_THREADS"] = thread_count
-
-
-def gpu_capacity() -> tuple[int, int, str] | None:
-    capacities = cuda_job_capacities()
+def gpu_capacity(capacities: list[tuple[int, int, int, int]] | None) -> tuple[int, int, str] | None:
     if not capacities:
         return None
 
@@ -69,43 +40,38 @@ def gpu_capacity() -> tuple[int, int, str] | None:
     return len(device_capacities), total_capacity, summary
 
 
-def worker_capacity() -> tuple[int, int, str]:
-    configured_max = configured_value("WORKER_MAX_CONCURRENCY")
-    gpu = gpu_capacity()
+def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPlan:
+    gpu = gpu_capacity(capacities)
     if gpu:
-        device_count, gpu_capacity_value, gpu_summary = gpu
-        automatic_capacity = min(cpu_count(), gpu_capacity_value)
-        automatic_processes = 1
-        resource_summary = (
-            f"{device_count} GPU(s), up to {gpu_capacity_value} job(s) by VRAM "
-            f"({gpu_summary})"
-        )
-    else:
-        automatic_capacity = DEFAULT_CPU_CONCURRENCY
-        automatic_processes = 1
-        resource_summary = (
-            f"{cpu_count()} CPU(s), no CUDA GPU detected, "
-            "one batched CPU job"
+        device_count, gpu_jobs, gpu_summary = gpu
+        threads = min(physical_cpu_count(), gpu_jobs)
+        if settings.worker.max_concurrency:
+            threads = min(threads, settings.worker.max_concurrency)
+        return WorkerPlan(
+            processes=1,
+            threads=threads,
+            cpu_threads=None,
+            summary=f"{device_count} GPU(s), up to {gpu_jobs} job(s) by VRAM ({gpu_summary})",
         )
 
-    if configured_max:
-        automatic_capacity = min(automatic_capacity, configured_max)
-
-    processes = automatic_processes
-    if gpu:
-        threads = automatic_capacity
-    else:
-        threads = batch_size()
-
-    return processes, threads, resource_summary
+    return WorkerPlan(
+        processes=1,
+        threads=settings.worker.batch_size or DEFAULT_CPU_BATCH_SIZE,
+        cpu_threads=cpu_thread_count(),
+        summary=f"{physical_cpu_count()} CPU(s), no CUDA GPU detected, one batched CPU job",
+    )
 
 
 def main() -> None:
-    processes, threads, resource_summary = worker_capacity()
-    configure_cpu_environment(gpu_capacity())
+    ensure_valid("worker")
+    plan = plan_worker(cuda_job_capacities())
+    if plan.cpu_threads:
+        # Read by the OpenMP and MKL libraries themselves.
+        os.environ["OMP_NUM_THREADS"] = str(plan.cpu_threads)
+        os.environ["MKL_NUM_THREADS"] = str(plan.cpu_threads)
     print(
-        f"Starting Dramatiq with {processes} process(es) and "
-        f"{threads} thread(s) per process ({resource_summary})",
+        f"Starting Dramatiq with {plan.processes} process(es) and "
+        f"{plan.threads} thread(s) per process ({plan.summary})",
         flush=True,
     )
 
@@ -119,9 +85,9 @@ def main() -> None:
             dramatiq,
             "app.worker.tasks",
             "--processes",
-            str(processes),
+            str(plan.processes),
             "--threads",
-            str(threads),
+            str(plan.threads),
         ],
     )
 

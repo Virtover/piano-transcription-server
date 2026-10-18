@@ -30,7 +30,7 @@ router = APIRouter(
 )
 
 redis = Redis.from_url(
-    settings.redis_url,
+    settings.service.redis_url,
     decode_responses=True,
 )
 billing = Billing()
@@ -77,14 +77,14 @@ class TranscriptionStatusResponse(BaseModel):
 
 
 def current_user_balance(user_id: str | None) -> int | None:
-    if settings.billing_provider == "none" or not user_id:
+    if settings.billing.provider == "none" or not user_id:
         return None
     billing.grant_free_minutes(user_id)
     return billing.get_balance(user_id)
 
 
 def require_job_owner(job: dict[str, str], authenticated_user_id: str | None) -> None:
-    if settings.billing_provider != "none" and job.get("user_id") != authenticated_user_id:
+    if settings.billing.provider != "none" and job.get("user_id") != authenticated_user_id:
         raise HTTPException(status_code=404, detail="Transcription job not found")
 
 
@@ -195,10 +195,10 @@ async def upload_transcription(
     """Transcribe an audio or video file sent as the raw request body."""
     ensure_submissions_enabled()
 
-    size_limit = int(settings.max_upload_size_mb * 1024**2)
+    size_limit = int(settings.limits.max_upload_size_mb * 1024**2)
     too_large = HTTPException(
         status_code=413,
-        detail=f"The file exceeds the {settings.max_upload_size_mb:g} MB upload limit",
+        detail=f"The file exceeds the {settings.limits.max_upload_size_mb:g} MB upload limit",
     )
     content_length = request.headers.get("content-length", "")
     if content_length.isdigit() and int(content_length) > size_limit:
@@ -206,7 +206,7 @@ async def upload_transcription(
 
     job_id = str(uuid.uuid4())
     key = job_key(job_id)
-    job_dir = Path(settings.data_dir) / "jobs" / job_id
+    job_dir = Path(settings.service.data_dir) / "jobs" / job_id
     upload_path = job_dir / UPLOAD_FILE_NAME
     title = title_from_filename(filename)
 
@@ -379,7 +379,7 @@ def get_midi(
         )
 
     result_path = Path(path)
-    data_root = Path(settings.data_dir).resolve()
+    data_root = Path(settings.service.data_dir).resolve()
 
     try:
         result_path.resolve().relative_to(data_root)

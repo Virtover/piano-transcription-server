@@ -12,8 +12,8 @@ from app.worker import tasks
 @pytest.fixture
 def worker(api_context):
     _, settings, billing = api_context
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 10}
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 10}
     billing.credit_purchase("user", "starter", "token", "order")
     return settings, billing
 
@@ -55,7 +55,7 @@ def test_successful_job_completes_and_charges(worker, monkeypatch):
     assert result["status"] == "completed"
     assert result["progress"] == "1.0"
     assert result["title"] == "Nocturne"
-    assert Path(result["result"]) == Path(settings.data_dir) / "jobs" / "job" / "transcription.mid"
+    assert Path(result["result"]) == Path(settings.service.data_dir) / "jobs" / "job" / "transcription.mid"
     assert 0 < tasks.redis.ttl(tasks.job_key("job")) <= tasks.JOB_TTL
     assert billing.get_balance("user") == 6
 
@@ -78,7 +78,7 @@ def test_failed_job_releases_reservation(worker, monkeypatch):
 def test_cancelled_job_is_partially_charged_and_cleaned_up(worker, monkeypatch):
     settings, billing = worker
     queue_job(billing, cost=10)
-    output_dir = Path(settings.data_dir) / "jobs" / "job"
+    output_dir = Path(settings.service.data_dir) / "jobs" / "job"
 
     def transcribe_source(output_dir, progress_callback, **kwargs):
         (output_dir / "audio.wav").write_bytes(b"audio")
@@ -145,7 +145,7 @@ def test_fail_active_jobs_marks_jobs_failed_and_releases(worker):
     queue_job(billing, "processing")
     tasks.redis.hset(tasks.job_key("processing"), "status", "processing")
     tasks.redis.hset(tasks.job_key("done"), mapping={"status": "completed", "user_id": "user"})
-    job_dir = Path(settings.data_dir) / "jobs" / "processing"
+    job_dir = Path(settings.service.data_dir) / "jobs" / "processing"
     job_dir.mkdir(parents=True)
 
     tasks.fail_active_jobs("restarted")
@@ -160,7 +160,7 @@ def test_fail_active_jobs_marks_jobs_failed_and_releases(worker):
 
 def test_cleanup_removes_only_expired_job_directories(worker):
     settings, _ = worker
-    jobs_dir = Path(settings.data_dir) / "jobs"
+    jobs_dir = Path(settings.service.data_dir) / "jobs"
     (jobs_dir / "expired").mkdir(parents=True)
     (jobs_dir / "active").mkdir()
     (jobs_dir / "stray-file").write_text("")
@@ -179,13 +179,13 @@ def test_delete_user_jobs_keeps_other_users_jobs(worker):
     settings, _ = worker
     tasks.redis.hset(tasks.job_key("mine"), "user_id", "user")
     tasks.redis.hset(tasks.job_key("theirs"), "user_id", "someone-else")
-    (Path(settings.data_dir) / "jobs" / "mine").mkdir(parents=True)
+    (Path(settings.service.data_dir) / "jobs" / "mine").mkdir(parents=True)
 
     tasks.delete_user_jobs("user")
 
     assert not tasks.redis.exists(tasks.job_key("mine"))
     assert tasks.redis.exists(tasks.job_key("theirs"))
-    assert not (Path(settings.data_dir) / "jobs" / "mine").exists()
+    assert not (Path(settings.service.data_dir) / "jobs" / "mine").exists()
 
 
 def test_uploaded_file_is_transcribed_from_job_directory(worker, monkeypatch):
@@ -203,7 +203,7 @@ def test_uploaded_file_is_transcribed_from_job_directory(worker, monkeypatch):
     install_pipeline(monkeypatch, transcribe_source)
     tasks.transcribe_job.fn("job", upload_title="My Song")
 
-    job_dir = Path(settings.data_dir) / "jobs" / "job"
+    job_dir = Path(settings.service.data_dir) / "jobs" / "job"
     assert calls == [(None, job_dir / tasks.UPLOAD_FILE_NAME, "My Song")]
     assert job()["status"] == "completed"
     assert job()["title"] == "My Song"

@@ -6,12 +6,8 @@ import pytest
 
 from app import main
 from app.main import backup_billing_database
-from app.billing import (
-    backup_interval_seconds,
-    backup_retention_seconds,
-    duration_seconds,
-    prune_backups,
-)
+from app.billing import prune_backups
+from app.config import ConfigError, load_settings
 
 
 class StopLoop(BaseException):
@@ -19,13 +15,13 @@ class StopLoop(BaseException):
 
 
 def backup_files(settings):
-    return sorted(Path(settings.billing_backup_dir).glob("billing-*.sqlite3"))
+    return sorted(Path(settings.billing.backup_dir).glob("billing-*.sqlite3"))
 
 
 def test_backup_is_a_readable_copy_of_the_database(api_context):
     _, settings, billing = api_context
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 5}
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 5}
     billing.credit_purchase("user-1", "starter", "token", "order-1", "user@example.com")
 
     main.run_billing_backup()
@@ -41,8 +37,8 @@ def test_backup_is_a_readable_copy_of_the_database(api_context):
 
 def test_backup_removes_backups_older_than_retention(api_context):
     _, settings, _ = api_context
-    settings.billing_backup_retention = "2d"
-    backup_dir = Path(settings.billing_backup_dir)
+    settings.billing.backup_retention = "2d"
+    backup_dir = Path(settings.billing.backup_dir)
     backup_dir.mkdir(parents=True)
     now = int(time.time())
     expired = backup_dir / f"billing-{now - 3 * 24 * 60 * 60}.sqlite3"
@@ -81,7 +77,7 @@ def test_prune_handles_missing_directory(tmp_path):
 
 def test_backup_loop_uses_configured_interval(api_context, monkeypatch):
     _, settings, _ = api_context
-    settings.billing_backup_interval = "15m"
+    settings.billing.backup_interval = "15m"
     sleeps = []
 
     def fake_sleep(seconds):
@@ -111,30 +107,14 @@ def test_backup_loop_survives_backup_errors(api_context, monkeypatch):
 
 def test_backup_defaults(api_context):
     _, settings, _ = api_context
-    settings.billing_backup_interval = None
-    settings.billing_backup_retention = None
 
-    assert backup_interval_seconds() == 60 * 60
-    assert backup_retention_seconds() == 30 * 24 * 60 * 60
+    assert settings.billing.backup_interval == 60 * 60
+    assert settings.billing.backup_retention == 30 * 24 * 60 * 60
 
 
-@pytest.mark.parametrize(
-    ("value", "seconds"),
-    [("30s", 30), ("15m", 900), ("1h", 3600), (" 2D ", 172800), ("1w", 604800)],
-)
-def test_duration_parsing(value, seconds):
-    assert duration_seconds(value, "SETTING") == seconds
+def test_invalid_backup_setting_fails_at_load(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("BILLING_BACKUP_RETENTION=forever\n")
 
-
-@pytest.mark.parametrize("value", ["", "h", "10", "1y", "0h", "-1d", "1.5h"])
-def test_invalid_duration_is_rejected(value):
-    with pytest.raises(ValueError, match="SETTING"):
-        duration_seconds(value, "SETTING")
-
-
-def test_invalid_backup_setting_fails_startup(api_context):
-    client, settings, _ = api_context
-    settings.billing_backup_retention = "forever"
-
-    with pytest.raises(ValueError, match="BILLING_BACKUP_RETENTION"):
-        main.sync_billing_catalog()
+    with pytest.raises(ConfigError, match="BILLING_BACKUP_RETENTION"):
+        load_settings(str(env_file), None)

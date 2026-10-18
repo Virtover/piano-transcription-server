@@ -1,17 +1,13 @@
 import logging
-import math
 import os
 import subprocess
-from typing import Final
+
+from app.config import settings
 
 try:
     import psutil
 except ImportError:
     psutil = None
-
-
-DEFAULT_MODEL_MEMORY_GIB: Final = 1.0
-DEFAULT_MEMORY_PER_JOB_GIB: Final = 1.1
 
 
 logger = logging.getLogger(__name__)
@@ -26,32 +22,11 @@ def automatic_cpu_threads() -> int:
     return max(1, physical_cpu_count() - 2)
 
 
-def memory_setting_gib(name: str, default: float) -> float:
-    value = os.environ.get(name, str(default)).strip()
-
-    try:
-        parsed = float(value)
-    except ValueError as error:
-        raise ValueError(f"{name} must be a positive number") from error
-
-    if not math.isfinite(parsed) or parsed <= 0:
-        raise ValueError(f"{name} must be a positive number")
-
-    return parsed
-
-
-def model_memory_gib() -> float:
-    return memory_setting_gib(
-        "WORKER_MODEL_MEMORY_GIB",
-        DEFAULT_MODEL_MEMORY_GIB,
-    )
-
-
-def memory_per_job_gib() -> float:
-    return memory_setting_gib(
-        "WORKER_MEMORY_PER_JOB_GIB",
-        DEFAULT_MEMORY_PER_JOB_GIB,
-    )
+def cpu_thread_count() -> int:
+    """CPU threads for PyTorch and ffmpeg: WORKER_THREADS, at most the
+    physical core count, or physical cores minus two for `auto`."""
+    configured = settings.worker.threads
+    return min(configured, physical_cpu_count()) if configured else automatic_cpu_threads()
 
 
 def nvidia_smi_free_memory() -> dict[str, int]:
@@ -113,8 +88,8 @@ def cuda_job_capacities() -> list[tuple[int, int, int, int]] | None:
         if not torch.cuda.is_available():
             return None
 
-        model_budget = model_memory_gib() * 1024**3
-        job_budget = memory_per_job_gib() * 1024**3
+        model_budget = settings.worker.model_memory_gib * 1024**3
+        job_budget = settings.worker.memory_per_job_gib * 1024**3
         capacities = []
         smi_free_memory = nvidia_smi_free_memory()
         for device_index in range(torch.cuda.device_count()):

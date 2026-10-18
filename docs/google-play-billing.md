@@ -1,6 +1,6 @@
 # 💳 Google Play billing
 
-This guide covers the additional setup required when `BILLING_PROVIDER=google_play`. For the environment variables, start from [.env.google-play.example](../.env.google-play.example) and see [Configuration](configuration.md).
+This guide covers the additional setup required when `BILLING_PROVIDER=google_play`. Uncomment the billing section of [.env.example](../.env.example) in your `.env`, and see [Configuration](configuration.md#billing) for every setting.
 
 ## 🔐 Google Cloud and OAuth
 
@@ -20,15 +20,20 @@ The client IDs are public configuration. Never commit OAuth client secrets or se
 1. Create or select a Google Cloud service account.
 2. Enable the Android Publisher API for its project.
 3. Grant the service account access to the Android application in Google Play Console with permission to view and manage orders and subscriptions, as required by the Publisher API.
-4. Download its JSON key and place it in the local `secrets` directory. Do not commit it.
-5. Set the package name and filename in `.env`:
+4. Download its JSON key and save it as `secrets/google_play_service_account.json`. Do not commit it.
+5. Set the package name in `.env`:
 
 ```env
 GOOGLE_PLAY_PACKAGE_NAME=com.example.pianoweave
-GOOGLE_PLAY_SERVICE_ACCOUNT_FILE=google-play-service-account.json
 ```
 
-Compose mounts `./secrets` at `/run/secrets`, so the service account is read from `/run/secrets/google-play-service-account.json` inside the containers.
+Compose mounts `./secrets` at `/run/secrets`, so the key is read from `/run/secrets/google_play_service_account.json` inside the containers. Secrets are only read from files, never from `.env`. Older setups that use `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` keep working, with a deprecation warning.
+
+6. Check the configuration. The API refuses to start if the package name, the OAuth client IDs, or the key is missing:
+
+```powershell
+docker compose run --rm api python -m app.config check
+```
 
 ## 🛍️ Products and free minutes
 

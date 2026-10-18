@@ -6,7 +6,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 
-from app.config import settings
+from app.config import duration_seconds as parse_duration, settings
 
 DELETED_USER_ID = "deleted"
 BACKUP_FILE_PATTERN = re.compile(r"^billing-(\d+)\.sqlite3$")
@@ -25,7 +25,7 @@ def cancelled_cost(full_cost: int, progress: float) -> int:
 
 class Billing:
     def __init__(self, database_path: str | None = None):
-        self.database_path = database_path or settings.billing_database_path
+        self.database_path = database_path or settings.billing.database_path
         database_parent = Path(self.database_path).parent
         database_parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
@@ -101,8 +101,8 @@ class Billing:
             )
 
     def grant_free_minutes(self, user_id: str, email: str | None = None) -> int:
-        free_minutes = settings.free_minutes or 0
-        if settings.billing_provider == "none" or free_minutes <= 0:
+        free_minutes = settings.billing.free_minutes or 0
+        if settings.billing.provider == "none" or free_minutes <= 0:
             return 0
 
         now = int(time.time())
@@ -123,7 +123,7 @@ class Billing:
             return grant
 
     def get_balance(self, user_id: str) -> int:
-        if settings.billing_provider == "none":
+        if settings.billing.provider == "none":
             return 0
         with self._connect() as connection:
             user = connection.execute(
@@ -140,7 +140,7 @@ class Billing:
             return max(0, int(user["available_minutes"])) if user else 0
 
     def free_minutes_status(self, user_id: str) -> dict[str, int | None]:
-        if settings.billing_provider == "none" or (settings.free_minutes or 0) <= 0:
+        if settings.billing.provider == "none" or (settings.billing.free_minutes or 0) <= 0:
             return {
                 "free_minutes_seconds_until_next_grant": None,
                 "free_minutes_next_grant_at": None,
@@ -158,7 +158,7 @@ class Billing:
         }
 
     def reserve(self, user_id: str, job_id: str, cost: int, email: str | None = None) -> int | None:
-        if settings.billing_provider == "none" or cost <= 0:
+        if settings.billing.provider == "none" or cost <= 0:
             return None
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -232,7 +232,7 @@ class Billing:
         order_id: str,
         email: str | None = None,
     ) -> int:
-        minutes = settings.billing_products[product_id]
+        minutes = settings.billing.products[product_id]
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
@@ -310,32 +310,11 @@ class InsufficientMinutes(Exception):
     pass
 
 
-def duration_seconds(value: str, name: str) -> int:
-    value = value.strip().lower()
-    units = {"s": 1, "m": 60, "h": 60 * 60, "d": 24 * 60 * 60, "w": 7 * 24 * 60 * 60}
-    try:
-        amount = int(value[:-1])
-        multiplier = units[value[-1]]
-    except (KeyError, ValueError, IndexError) as error:
-        raise ValueError(f"{name} must use a format such as 12h, 7d, or 1w") from error
-    if amount < 1:
-        raise ValueError(f"{name} must be positive")
-    return amount * multiplier
-
-
 def period_seconds() -> int:
-    return duration_seconds(settings.free_minutes_period or "30d", "FREE_MINUTES_PERIOD")
+    return int(parse_duration(settings.billing.free_minutes_period or "30d", "FREE_MINUTES_PERIOD"))
 
 
-def backup_interval_seconds() -> int:
-    return duration_seconds(settings.billing_backup_interval or "1h", "BILLING_BACKUP_INTERVAL")
-
-
-def backup_retention_seconds() -> int:
-    return duration_seconds(settings.billing_backup_retention or "30d", "BILLING_BACKUP_RETENTION")
-
-
-def prune_backups(directory: str, max_age_seconds: int, now: float | None = None) -> list[Path]:
+def prune_backups(directory: str, max_age_seconds: float, now: float | None = None) -> list[Path]:
     """Delete backups older than max_age_seconds. Only files named like the
     automatic backups are touched; the age comes from the name's timestamp."""
     backup_dir = Path(directory)
@@ -352,7 +331,7 @@ def prune_backups(directory: str, max_age_seconds: int, now: float | None = None
 
 
 def _free_minutes_enabled() -> bool:
-    return settings.billing_provider != "none" and (settings.free_minutes or 0) > 0
+    return settings.billing.provider != "none" and (settings.billing.free_minutes or 0) > 0
 
 
 def _user_hash(user_id: str) -> str:

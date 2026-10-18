@@ -12,8 +12,11 @@ The worker image includes `ffmpeg`, Transkun, and the Python dependencies. Redis
 
 ```powershell
 Copy-Item .env.example .env
+docker compose run --rm api python -m app.config check
 docker compose up --build
 ```
+
+The `check` command validates `.env` and the secrets and prints the resolved configuration with secrets masked. Container paths and service addresses are set in `docker-compose.yml`, so `.env` only holds your choices. See [Configuration](configuration.md).
 
 The API is available at `http://localhost:8000` and its interactive OpenAPI documentation is at `http://localhost:8000/docs`.
 
@@ -24,7 +27,7 @@ Invoke-RestMethod http://localhost:8000/health
 Invoke-RestMethod http://localhost:8000/ready
 ```
 
-Do not commit `.env` or any machine-specific values.
+Do not commit `.env`, the `secrets` folder, or any machine-specific values.
 
 ## 🎮 GPU and CPU execution
 
@@ -45,7 +48,7 @@ Configure the shared worker with explicit CPU compute threads and request batchi
 ```env
 WORKER_THREADS=4
 WORKER_BATCH_SIZE=6
-WORKER_BATCH_TIMEOUT_SECONDS=2
+WORKER_BATCH_TIMEOUT=2s
 ```
 
 Increase the batch size only after checking RAM or VRAM usage. The API accepts jobs immediately and Redis queues work beyond available worker capacity. `WORKER_BATCH_SIZE` controls model batching; it does not replace the per-job VRAM estimate used for GPU capacity.

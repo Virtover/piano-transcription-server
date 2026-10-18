@@ -38,9 +38,9 @@ def test_transcription_lifecycle_and_invalid_jobs(api_context):
 
 def test_transcription_validation_and_insufficient_balance(api_context):
     client, settings, _ = api_context
-    settings.billing_provider = "google_play"
-    settings.free_minutes = 1
-    settings.free_minutes_period = "1d"
+    settings.billing.provider = "google_play"
+    settings.billing.free_minutes = 1
+    settings.billing.free_minutes_period = "1d"
 
     invalid = client.post(
         "/api/transcriptions",
@@ -63,9 +63,9 @@ def test_transcription_validation_and_insufficient_balance(api_context):
 
 def test_concurrent_transcriptions_cannot_over_reserve_balance(api_context):
     client, settings, billing = api_context
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 3}
-    settings.free_minutes = 0
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 3}
+    settings.billing.free_minutes = 0
     billing.credit_purchase("racer", "starter", "unique-token", "order-1")
 
     def submit():
@@ -87,9 +87,9 @@ def test_concurrent_transcriptions_cannot_over_reserve_balance(api_context):
 
 def test_billed_job_is_only_visible_to_authenticated_owner(api_context):
     client, settings, _ = api_context
-    settings.billing_provider = "google_play"
-    settings.free_minutes = 5
-    settings.free_minutes_period = "1d"
+    settings.billing.provider = "google_play"
+    settings.billing.free_minutes = 5
+    settings.billing.free_minutes_period = "1d"
 
     created = client.post(
         "/api/transcriptions",
@@ -124,7 +124,7 @@ def create_job(client, headers=None):
 def test_completed_midi_can_be_downloaded(api_context):
     client, settings, _ = api_context
     job_id = create_job(client)
-    result = Path(settings.data_dir) / "jobs" / job_id / "transcription.mid"
+    result = Path(settings.service.data_dir) / "jobs" / job_id / "transcription.mid"
     result.parent.mkdir(parents=True)
     result.write_bytes(b"MThd-data")
     complete_job(job_id, result)
@@ -153,7 +153,7 @@ def test_midi_outside_data_dir_is_refused(api_context, tmp_path):
 def test_missing_midi_result(api_context):
     client, settings, _ = api_context
     job_id = create_job(client)
-    complete_job(job_id, Path(settings.data_dir) / "jobs" / job_id / "transcription.mid")
+    complete_job(job_id, Path(settings.service.data_dir) / "jobs" / job_id / "transcription.mid")
 
     assert client.get(f"/api/transcriptions/{job_id}/midi").status_code == 404
     assert client.get("/api/transcriptions/unknown/midi").status_code == 404
@@ -162,7 +162,7 @@ def test_missing_midi_result(api_context):
 def test_completed_job_cannot_be_cancelled(api_context):
     client, settings, _ = api_context
     job_id = create_job(client)
-    complete_job(job_id, Path(settings.data_dir) / "result.mid")
+    complete_job(job_id, Path(settings.service.data_dir) / "result.mid")
 
     assert client.delete(f"/api/transcriptions/{job_id}").status_code == 409
     assert client.delete("/api/transcriptions/unknown").status_code == 404
@@ -209,8 +209,8 @@ def test_submissions_are_rejected_until_startup_finishes(api_context):
 
 def test_unavailable_worker_releases_reservation(api_context, monkeypatch):
     client, settings, billing = api_context
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 5}
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 5}
     billing.credit_purchase("user", "starter", "token", "order")
 
     def broken_send(*args, **kwargs):
@@ -230,8 +230,8 @@ def test_unavailable_worker_releases_reservation(api_context, monkeypatch):
 
 def test_billed_cancellation_charges_partial_cost(api_context):
     client, settings, billing = api_context
-    settings.billing_provider = "google_play"
-    settings.billing_products = {"starter": 10}
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 10}
     billing.credit_purchase("user", "starter", "token", "order")
     headers = {"Authorization": "Bearer user"}
 
@@ -254,9 +254,9 @@ def test_billed_cancellation_charges_partial_cost(api_context):
 
 def test_billed_job_actions_are_hidden_from_other_users(api_context):
     client, settings, _ = api_context
-    settings.billing_provider = "google_play"
-    settings.free_minutes = 5
-    settings.free_minutes_period = "1d"
+    settings.billing.provider = "google_play"
+    settings.billing.free_minutes = 5
+    settings.billing.free_minutes_period = "1d"
     job_id = create_job(client, {"Authorization": "Bearer owner"})
     other = {"Authorization": "Bearer other-user"}
 

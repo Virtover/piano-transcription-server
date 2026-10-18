@@ -16,7 +16,7 @@ from app.url_safety import ensure_safe_source_url, UnsafeSourceUrl
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/billing", tags=["billing"])
-redis = Redis.from_url(settings.redis_url, decode_responses=True)
+redis = Redis.from_url(settings.service.redis_url, decode_responses=True)
 billing = Billing()
 
 
@@ -95,7 +95,7 @@ def video_duration(source_url: HttpUrl) -> float:
 
 
 def ensure_allowed_length(duration: float) -> float:
-    if settings.max_video_length_minutes and duration > settings.max_video_length_minutes * 60:
+    if settings.limits.max_video_length_minutes and duration > settings.limits.max_video_length_minutes * 60:
         raise HTTPException(status_code=413, detail="Video exceeds the configured maximum length")
     return duration
 
@@ -106,23 +106,23 @@ def ensure_allowed_length(duration: float) -> float:
     response_model_exclude_unset=True,
 )
 def server_info() -> ServerInfoResponse:
-    product_ids = set(settings.billing_products)
-    if settings.billing_provider == "google_play":
+    product_ids = set(settings.billing.products)
+    if settings.billing.provider == "google_play":
         product_ids &= google_play.synced_products or set()
     info = ServerInfoResponse(
-        billing_provider=settings.billing_provider,
+        billing_provider=settings.billing.provider,
         offers=[
             Offer(product_id=product_id, transcription_minutes=minutes)
-            for product_id, minutes in settings.billing_products.items()
+            for product_id, minutes in settings.billing.products.items()
             if product_id in product_ids
         ],
-        cleanup_interval_seconds=settings.cleanup_interval_seconds,
-        max_video_length_minutes=settings.max_video_length_minutes,
-        max_upload_size_mb=settings.max_upload_size_mb,
+        cleanup_interval_seconds=int(settings.cleanup.interval),
+        max_video_length_minutes=settings.limits.max_video_length_minutes,
+        max_upload_size_mb=settings.limits.max_upload_size_mb,
     )
-    if settings.billing_provider != "none":
-        info.free_minutes = settings.free_minutes
-        info.free_minutes_period = settings.free_minutes_period
+    if settings.billing.provider != "none":
+        info.free_minutes = settings.billing.free_minutes
+        info.free_minutes_period = settings.billing.free_minutes_period
         info.google_oauth_client_ids = google_oauth_client_ids()
     return info
 
@@ -131,7 +131,7 @@ def server_info() -> ServerInfoResponse:
 def balance(user: AuthenticatedUser | None = Depends(current_user)) -> BalanceResponse:
     user_id = user.user_id if user else "anonymous"
     email = user.email if user else None
-    if settings.billing_provider != "none":
+    if settings.billing.provider != "none":
         billing.grant_free_minutes(user_id, email)
     return BalanceResponse(
         user_id=user_id,
@@ -160,27 +160,20 @@ def verify_google_purchase(
     request: GooglePurchaseRequest,
     user: AuthenticatedUser | None = Depends(current_user),
 ) -> VerifyPurchaseResponse:
-    if settings.billing_provider != "google_play":
+    if settings.billing.provider != "google_play":
         raise HTTPException(status_code=409, detail="Google Play billing is disabled")
     if user is None:
         raise HTTPException(status_code=409, detail="Google Play billing is disabled")
-    if request.product_id not in settings.billing_products:
+    if request.product_id not in settings.billing.products:
         raise HTTPException(status_code=400, detail="Unknown product")
-    if not settings.google_play_package_name or not settings.google_play_service_account_file:
+    if not google_play.is_configured():
         raise HTTPException(status_code=503, detail="Google Play verification is not configured")
 
     service: Any = None
     try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-
-        credentials = service_account.Credentials.from_service_account_file(
-            google_play.service_account_file_path(),
-            scopes=["https://www.googleapis.com/auth/androidpublisher"],
-        )
-        service = build("androidpublisher", "v3", credentials=credentials)
+        service = google_play.android_publisher()
         response = service.purchases().products().get(
-            packageName=settings.google_play_package_name,
+            packageName=settings.google_play.package_name,
             productId=request.product_id,
             token=request.purchase_token,
         ).execute()
@@ -202,7 +195,7 @@ def verify_google_purchase(
     consumed = True
     try:
         service.purchases().products().consume(
-            packageName=settings.google_play_package_name,
+            packageName=settings.google_play.package_name,
             productId=request.product_id,
             token=request.purchase_token,
         ).execute()
