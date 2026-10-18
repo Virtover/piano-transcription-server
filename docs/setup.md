@@ -92,13 +92,20 @@ docker push <registry>/piano-transcription-runpod:1
 
 In the RunPod console, create a **Serverless endpoint** from that image:
 
-* **GPUs:** 16 GB first, with 24 GB as fallback. One job needs about 1.3 GiB of VRAM, so the smallest GPUs are enough.
+* **GPUs:** 16 GB first, with 24 GB as fallback. One job needs about 1.1 GiB of VRAM, so a 16 GB GPU transcribes about 12 jobs at once.
 * **Active workers:** 0, so you pay only while jobs run.
-* **Max workers:** the same as `OUTSOURCE_MAX_CONCURRENCY`.
+* **Max workers:** enough for `OUTSOURCE_MAX_CONCURRENCY` jobs at about 12 per worker, so 1 for up to 12 jobs and 2 for up to 24. One more gives headroom when a worker is starting.
+* **Scaling:** by request count, with about 12 requests per worker, so RunPod adds a worker only when the running ones are full instead of one per request.
 * **Idle timeout:** short, for example 5 seconds.
 * **FlashBoot:** on, to shorten cold starts.
 * **Data centers:** EU locations only, if your users are in the EU.
-* **Environment variables:** `OUTSOURCE_STORAGE_ENDPOINT`, set to the same value as on the server. The handler only downloads from that host. Optionally `OUTSOURCE_MAX_AUDIO_MB`.
+* **Environment variables:** `OUTSOURCE_STORAGE_ENDPOINT`, set to the same value as on the server. The handler only downloads from that host. Optionally `OUTSOURCE_MAX_AUDIO_MB`, and `WORKER_MAX_CONCURRENCY` to take fewer requests per worker than fit in VRAM.
+
+#### Batching on RunPod
+
+A worker takes several requests at once and transcribes them together, in the same batcher as the local worker. How many is its GPU's job capacity, calculated from free VRAM with `WORKER_MEMORY_PER_JOB_GIB` like on the server, capped by `WORKER_MAX_CONCURRENCY` if set there; the worker log shows it at startup, for example `cuda:0: up to 12 requests at once`. Requests that arrive within `WORKER_BATCH_TIMEOUT` (2 s) of each other share a batch. If a batch runs out of GPU memory, it is split and retried, and the worker takes fewer requests from then on.
+
+Batching makes busy periods cheaper: four 5-minute songs take about 10 s of GPU time each in one batch instead of 14 s each, and they share one cold start and idle timeout instead of paying for four. At low traffic, requests rarely overlap and each runs alone.
 
 Then create an API key under **Settings → API Keys** with **Restricted** permissions, giving access only to this endpoint, and configure the server:
 
@@ -175,7 +182,7 @@ With `OUTSOURCE_MAX_WAIT=0s`, a job is outsourced as soon as every local slot is
 
 The local test server differs from RunPod in two ways:
 
-* It runs one job at a time and blocks all other requests meanwhile, so keep `OUTSOURCE_MAX_CONCURRENCY=1`. With more, the next submission times out and that job falls back to the local queue.
+* It runs one job at a time and blocks all other requests meanwhile, so keep `OUTSOURCE_MAX_CONCURRENCY=1`. With more, the next submission times out and that job falls back to the local queue. Batching across requests only happens on RunPod; `tests/test_runpod_handler.py` checks it locally.
 * It runs the handler while the job's status is first requested. Progress therefore jumps from 10% to 96%, and a cancellation takes effect only when the handler returns.
 
 Afterwards, remove the test setup and the outsourcing lines from `.env`:

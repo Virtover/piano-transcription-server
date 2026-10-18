@@ -71,7 +71,7 @@ A local job that does not fit in GPU memory even on its own is also sent remote,
 1. `remote-worker` claims the job like a local worker would, and downloads and converts the audio with `yt-dlp` and `ffmpeg`. Downloads stay on this server because video sites often block datacenter IPs.
 2. It compresses the WAV to FLAC, uploads it to the bucket under a random key, and creates a presigned GET URL valid for `OUTSOURCE_TIMEOUT` plus five minutes.
 3. It submits `{"audio_url": ..., "job_id": ...}` to RunPod `/run`, then polls `/status` every 2 seconds. RunPod progress (0 to 1) is shown as 0.15 to 0.95, the same range as model progress for local jobs.
-4. The handler downloads only from the storage host, runs the same inference code as the local worker, and returns the MIDI as base64.
+4. The handler downloads only from the storage host and transcribes the audio in the same batcher as the local worker: one RunPod worker takes several requests at once and runs them as one batch, up to its GPU's job capacity. It returns the MIDI as base64.
 5. The dispatcher writes the MIDI to the job directory and completes the job. The storage object is deleted in every case.
 
 When the user cancels, the dispatcher calls RunPod `/cancel` and stops. When a remote job fails or exceeds `OUTSOURCE_TIMEOUT`, it is cancelled on RunPod; with `OUTSOURCE_FALLBACK_LOCAL=true` it is put back on the local queue with a flag that stops it from being sent remote again. Otherwise it fails. Short network errors while polling are retried up to five times. Download and conversion errors are not retried locally, because they would fail the same way.

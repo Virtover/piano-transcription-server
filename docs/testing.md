@@ -50,6 +50,7 @@ python -m pytest -q -k cancellation
 | `test_outsource_routing.py` | Routing: wait estimate, threshold, remote concurrency cap, missing heartbeat, provider `none`, and the API's backend choice. |
 | `test_remote_jobs.py` | Remote jobs with a fake RunPod and storage: success, progress mapping, cancellation, fallback to local, timeouts, failures, single billing, and storage cleanup on every path. |
 | `test_outsource_clients.py` | The RunPod client, S3 storage, and the handler's input checks and download limits. |
+| `test_runpod_handler.py` | The RunPod handler with the real model: concurrent requests share one batch, and bad requests fail alone. Needs the RunPod image (see below). |
 | `test_device_capacity.py` | GPU capacity calculation, including the `nvidia-smi` free memory check used under WSL. |
 | `test_device_selection.py` | GPU and CPU device selection for transcription jobs. Needs the worker dependencies, so it is skipped in the API test environment. |
 
@@ -57,6 +58,13 @@ Some tests need PyTorch, Transkun, or `ffmpeg`, which are only in the worker ima
 
 ```powershell
 docker compose run --rm --no-deps -v "${PWD}\tests:/app/tests:ro" worker sh -c "pip install -q pytest && python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_media.py tests/test_pipeline_upload.py tests/test_gpu_batcher.py tests/test_device_selection.py tests/test_device_capacity.py"
+```
+
+Run the handler tests in the RunPod image, on the CPU (`CUDA_VISIBLE_DEVICES=`) or with `--gpus all`:
+
+```powershell
+docker build -f Dockerfile.runpod -t piano-transcription-runpod:local .
+docker run --rm -e CUDA_VISIBLE_DEVICES= -v "${PWD}\tests:/app/tests:ro" -v "${PWD}\runpod:/app/runpod:ro" piano-transcription-runpod:local sh -c "pip install -q pytest && cd /app && PYTHONPATH=/app python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_runpod_handler.py"
 ```
 
 The tests replace Google, Google Play, `yt-dlp`, DNS, and the transcription pipeline with fakes, so they never use the network or a model.

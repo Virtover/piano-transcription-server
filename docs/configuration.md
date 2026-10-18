@@ -69,7 +69,7 @@ When local GPUs are overloaded, jobs can run on RunPod Serverless. Only the mode
 | --- | --- | --- |
 | `OUTSOURCE_PROVIDER` | `none` | `none` or `runpod`. With `none`, nothing is outsourced and the `remote-worker` service is not needed. |
 | `OUTSOURCE_MAX_WAIT` | `2m` | Outsource a job when its estimated local wait is longer than this. `0s` outsources whenever every local slot is busy. |
-| `OUTSOURCE_MAX_CONCURRENCY` | `4` | Maximum remote jobs at once (cost cap). Also the `remote-worker` thread count. Set the RunPod endpoint's maximum workers to the same value. |
+| `OUTSOURCE_MAX_CONCURRENCY` | `4` | Maximum jobs assigned to the remote backend at once, queued or running (cost cap). Also the `remote-worker` thread count, because each remote job holds a thread while it downloads, converts, and waits for RunPod. |
 | `OUTSOURCE_TIMEOUT` | `15m` | How long a remote job may take, including RunPod's queue and cold start. It is then cancelled. |
 | `OUTSOURCE_FALLBACK_LOCAL` | `true` | When a remote job fails or times out, put it back on the local queue instead of failing it. |
 | `OUTSOURCE_STORAGE_ENDPOINT` | unset | S3-compatible endpoint used to hand audio to RunPod, for example `https://<account-id>.eu.r2.cloudflarestorage.com`. |

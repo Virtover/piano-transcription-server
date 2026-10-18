@@ -181,31 +181,6 @@ def is_cuda_out_of_memory(error: BaseException) -> bool:
     return isinstance(error, torch.cuda.OutOfMemoryError)
 
 
-def transcribe_audio(
-    model,
-    audio: np.ndarray,
-    progress_callback: ProgressCallback | None = None,
-    cancellation_callback: CancellationCallback | None = None,
-) -> list:
-    """Transcribe one audio array (samples x channels, at model.fs) to note
-    events, outside the shared batcher. Used by the remote handler; local jobs
-    go through _GpuBatcher, which runs the same batch loop."""
-    request = _BatchRequest(
-        audio=audio,
-        progress_callback=progress_callback,
-        cancellation_callback=cancellation_callback,
-        result=Future(),
-    )
-    run_splitting_on_out_of_memory(
-        [request],
-        lambda requests: _transcribe_audio_batch(model, requests),
-        is_cuda_out_of_memory,
-        lambda: None,
-        lambda size: None,
-    )
-    return request.result.result()
-
-
 def audio_for_model(model, sample_rate: int, audio: np.ndarray) -> np.ndarray:
     """Resample audio (samples x channels, float32) to the model's rate."""
     if sample_rate != model.fs:
@@ -425,6 +400,7 @@ class _GpuBatcher:
                     batch.append(self.requests.get(timeout=remaining))
                 except queue.Empty:
                     break
+            logger.info("%s: running a batch of %d", self.device, len(batch))
             try:
                 run_splitting_on_out_of_memory(
                     batch,
@@ -460,7 +436,9 @@ _gpu_batchers: dict[str, _GpuBatcher] = {}
 _gpu_batchers_lock = threading.Lock()
 
 
-def _get_gpu_batcher(device: str) -> _GpuBatcher:
+def get_batcher(device: str) -> _GpuBatcher:
+    """The process-wide batcher for a device; it loads the model on first use.
+    Local jobs and the remote handler both submit their requests here."""
     with _gpu_batchers_lock:
         batcher = _gpu_batchers.get(device)
         if batcher is None:
@@ -497,7 +475,7 @@ def transcribe_piano(
     if device == "cpu":
         configure_cpu_threads()
 
-    batcher = _get_gpu_batcher(device)
+    batcher = get_batcher(device)
     model = batcher.model
 
     if cancellation_callback and cancellation_callback():
