@@ -107,7 +107,7 @@ A worker takes several requests at once and transcribes them together, in the sa
 
 Batching makes busy periods cheaper: four 5-minute songs take about 10 s of GPU time each in one batch instead of 14 s each, and they share one cold start and idle timeout instead of paying for four. At low traffic, requests rarely overlap and each runs alone.
 
-Then create an API key under **Settings → API Keys** with **Restricted** permissions, giving access only to this endpoint, and configure the server:
+Then create an API key under **Settings → API Keys** with **Restricted** permissions, giving access only to this endpoint, and configure the server. With `OUTSOURCE_MAX_CONCURRENCY=auto`, the key also needs read access to the endpoint's settings, so the server can read its max workers:
 
 ```powershell
 Set-Content -NoNewline secrets\runpod_api_key '<API key>'

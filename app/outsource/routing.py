@@ -76,13 +76,16 @@ def outsourcing_enabled() -> bool:
 
 
 def reserve_remote_slot(redis: Redis, job_id: str) -> bool:
-    """Count the job as remote if fewer than OUTSOURCE_MAX_CONCURRENCY are."""
+    """Count the job as remote if fewer than the remote job limit are
+    (OUTSOURCE_MAX_CONCURRENCY, or its `auto` value)."""
+    from app.outsource.capacity import remote_job_limit
+
     key = ACTIVE_KEYS["remote"]
     with redis.pipeline() as pipe:
         pipe.sadd(key, job_id)
         pipe.scard(key)
         _, count = pipe.execute()
-    if count > settings.outsource.max_concurrency:
+    if count > remote_job_limit(redis):
         redis.srem(key, job_id)
         return False
     return True

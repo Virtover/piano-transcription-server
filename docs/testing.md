@@ -49,6 +49,7 @@ python -m pytest -q -k cancellation
 | `test_gpu_batcher.py` | The real batcher and batch loop with a fake model that runs out of memory. Needs the worker image. |
 | `test_outsource_routing.py` | Routing: wait estimate, threshold, remote concurrency cap, missing heartbeat, provider `none`, and the API's backend choice. |
 | `test_remote_jobs.py` | Remote jobs with a fake RunPod and storage: success, progress mapping, cancellation, fallback to local, timeouts, failures, single billing, and storage cleanup on every path. |
+| `test_outsource_capacity.py` | `OUTSOURCE_MAX_CONCURRENCY`: the default, fixed values, and `auto` from RunPod's max workers and the reported requests per worker. |
 | `test_outsource_clients.py` | The RunPod client, S3 storage, and the handler's input checks and download limits. |
 | `test_runpod_handler.py` | The RunPod handler with the real model: concurrent requests share one batch, and bad requests fail alone. Needs the RunPod image (see below). |
 | `test_device_capacity.py` | GPU capacity calculation, including the `nvidia-smi` free memory check used under WSL. |

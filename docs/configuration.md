@@ -69,7 +69,7 @@ When local GPUs are overloaded, jobs can run on RunPod Serverless. Only the mode
 | --- | --- | --- |
 | `OUTSOURCE_PROVIDER` | `none` | `none` or `runpod`. With `none`, nothing is outsourced and the `remote-worker` service is not needed. |
 | `OUTSOURCE_MAX_WAIT` | `2m` | Outsource a job when its estimated local wait is longer than this. `0s` outsources whenever every local slot is busy. |
-| `OUTSOURCE_MAX_CONCURRENCY` | `4` | Maximum jobs assigned to the remote backend at once, queued or running (cost cap). Also the `remote-worker` thread count, because each remote job holds a thread while it downloads, converts, and waits for RunPod. |
+| `OUTSOURCE_MAX_CONCURRENCY` | `4` | Maximum jobs assigned to the remote backend at once, queued or running. Also the `remote-worker` thread count, because each remote job holds a thread while it downloads, converts, and waits for RunPod. `auto`: the RunPod endpoint's max workers times the requests one worker takes. See [below](#outsource_max_concurrencyauto). |
 | `OUTSOURCE_TIMEOUT` | `15m` | How long a remote job may take, including RunPod's queue and cold start. It is then cancelled. |
 | `OUTSOURCE_FALLBACK_LOCAL` | `true` | When a remote job fails or times out, put it back on the local queue instead of failing it. |
 | `OUTSOURCE_STORAGE_ENDPOINT` | unset | S3-compatible endpoint used to hand audio to RunPod, for example `https://<account-id>.eu.r2.cloudflarestorage.com`. |
@@ -80,6 +80,17 @@ When local GPUs are overloaded, jobs can run on RunPod Serverless. Only the mode
 | `RUNPOD_API_BASE` | `https://api.runpod.ai/v2` | RunPod API URL. Change it only for local testing with the SDK's test server; the endpoint ID is then not added to the path. |
 
 `OUTSOURCE_PROVIDER=runpod` requires the endpoint ID, both storage settings, and the three secret files below. The API and `remote-worker` refuse to start without them.
+
+#### `OUTSOURCE_MAX_CONCURRENCY=auto`
+
+`auto` sets the limit from RunPod: **max workers × requests per worker**.
+
+* **Max workers** is the endpoint's setting in the RunPod console. The `remote-worker` reads it from RunPod's REST API when it starts and every 10 minutes, so console changes apply without a restart. The API key needs read access to the endpoint's settings.
+* **Requests per worker** is how many jobs one RunPod worker transcribes at once: its GPU's job capacity, about 12 on 16 GB. Each worker reports it with every result. Until the first result, 12 is assumed.
+* If max workers cannot be read, the limit is 4, and the `remote-worker` logs a warning. The last known value is kept when a later read fails.
+* The `remote-worker` starts with enough threads for larger GPUs (24 per worker, at most 64). After raising max workers a lot, restart it so it has threads for the new limit.
+
+A number is easier to reason about, because it limits what your server does: every remote job downloads and converts audio here, from your IP. `auto` suits deployments where the RunPod console should be the one place that sets capacity. Either way, RunPod's max workers is the ceiling on the bill.
 
 ### Container wiring
 

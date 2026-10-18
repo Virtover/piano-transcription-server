@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
+from app.outsource.capacity import record_jobs_per_worker
 from app.outsource.provider import RemoteFailed, RemoteProvider, get_provider
 from app.outsource.storage import AudioStorage, S3Storage
 from app.transcription.audio import check_midi, convert_to_flac, fetch_audio
@@ -29,6 +30,12 @@ PROGRESS_START = 0.15
 PROGRESS_END = 0.95
 # Presigned URLs stay valid a little longer than the remote job may run.
 URL_GRACE_SECONDS = 5 * 60
+
+
+def redis_client():
+    from app.worker.tasks import redis
+
+    return redis
 
 
 def map_progress(remote_progress: float) -> float:
@@ -133,6 +140,7 @@ def transcribe_remotely(
         midi_path = output_dir / "transcription.mid"
         midi_path.write_bytes(midi)
         check_midi(midi_path)
+        record_jobs_per_worker(redis_client(), output.get("worker_capacity"))
         timing = output.get("timing")
         if isinstance(timing, dict):
             logger.info("Remote job %s timing: %s", remote_id, timing)

@@ -35,6 +35,10 @@ class RemoteProvider(Protocol):
     def cancel(self, remote_id: str) -> None:
         """Ask the provider to stop a remote job. Must not raise."""
 
+    def max_workers(self) -> int | None:
+        """The most workers the provider runs at once, or None if unknown.
+        Used by OUTSOURCE_MAX_CONCURRENCY=auto. Must not raise."""
+
 
 def get_provider() -> RemoteProvider:
     if settings.outsource.provider == "runpod":

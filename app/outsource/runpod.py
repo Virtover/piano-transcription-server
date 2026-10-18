@@ -12,6 +12,8 @@ from app.outsource.provider import RemoteFailed, RemoteStatus
 logger = logging.getLogger(__name__)
 
 DEFAULT_API_BASE = "https://api.runpod.ai/v2"
+# Endpoint settings (max workers) come from RunPod's management API.
+REST_API_BASE = "https://rest.runpod.io/v1"
 REQUEST_TIMEOUT = 30
 
 STATES = {
@@ -29,10 +31,12 @@ class RunPodProvider:
         api_base = api_base.rstrip("/")
         # The SDK's local API server (`--rp_serve_api`) serves /run and
         # /status at its root, without the endpoint ID.
-        if api_base == DEFAULT_API_BASE:
-            self.base_url = f"{api_base}/{endpoint_id}"
-        else:
+        self.endpoint_id = endpoint_id
+        self.local = api_base != DEFAULT_API_BASE
+        if self.local:
             self.base_url = api_base
+        else:
+            self.base_url = f"{api_base}/{endpoint_id}"
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self.session = session or requests.Session()
 
@@ -95,6 +99,36 @@ class RunPodProvider:
         if state == "failed":
             return RemoteStatus(state, error=str(data.get("error") or data.get("status")))
         return RemoteStatus(state)
+
+    def max_workers(self) -> int | None:
+        """The endpoint's max workers setting, read from RunPod's REST API.
+        The API key needs read access to the endpoint's settings."""
+        if self.local:
+            # The SDK's local test server runs a single worker.
+            return 1
+        try:
+            response = self.session.request(
+                "GET",
+                f"{REST_API_BASE}/endpoints/{self.endpoint_id}",
+                headers=self._headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as error:
+            logger.warning("Could not read the RunPod endpoint settings (%s)", type(error).__name__)
+            return None
+        if not response.ok:
+            logger.warning(
+                "Could not read the RunPod endpoint settings (HTTP %s); "
+                "give the API key read access to the endpoint, or set OUTSOURCE_MAX_CONCURRENCY",
+                response.status_code,
+            )
+            return None
+        try:
+            workers = int(response.json()["workersMax"])
+        except (ValueError, KeyError, TypeError):
+            logger.warning("The RunPod endpoint settings have no workersMax")
+            return None
+        return workers if workers > 0 else None
 
     def cancel(self, remote_id: str) -> None:
         try:

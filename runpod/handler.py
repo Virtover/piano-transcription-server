@@ -103,6 +103,8 @@ def transcribe_job(job: dict) -> dict:
         logger.info("Job %s: %d notes from %.0f s of audio", job_id, len(events), audio_seconds)
         return {
             "midi_base64": encoded,
+            # Requests this worker takes at once, for OUTSOURCE_MAX_CONCURRENCY=auto.
+            "worker_capacity": BATCHER.batch_size,
             "timing": {
                 "audio_seconds": round(audio_seconds, 2),
                 "download_seconds": round(downloaded - started, 2),

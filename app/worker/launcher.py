@@ -77,12 +77,22 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPla
 
 
 def remote_plan() -> WorkerPlan:
-    threads = settings.outsource.max_concurrency
+    from redis import Redis
+
+    from app.outsource import capacity
+    from app.outsource.provider import get_provider
+
+    redis = Redis.from_url(settings.service.redis_url, decode_responses=True)
+    if settings.outsource.max_concurrency is None:
+        capacity.refresh_max_workers(redis, get_provider())
+    threads = capacity.remote_worker_threads(redis)
+    limit = capacity.remote_job_limit(redis)
+    mode = "auto: max workers x requests per worker" if settings.outsource.max_concurrency is None else "OUTSOURCE_MAX_CONCURRENCY"
     return WorkerPlan(
         processes=1,
         threads=threads,
         cpu_threads=None,
-        summary=f"remote dispatcher for {settings.outsource.provider}, up to {threads} remote job(s)",
+        summary=f"remote dispatcher for {settings.outsource.provider}, up to {limit} remote job(s) ({mode})",
     )
 
 

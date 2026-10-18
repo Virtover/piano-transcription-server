@@ -403,3 +403,15 @@ def test_local_out_of_memory_without_outsourcing_fails(remote_env, monkeypatch):
 
     assert job()["status"] == "failed"
     assert remote_env["remote_sent"] == []
+
+
+def test_successful_job_records_worker_capacity(remote_env):
+    from app.outsource import capacity
+
+    output = completed().output | {"worker_capacity": 12}
+    remote_env["provider"] = FakeProvider([RemoteStatus("completed", output=output)])
+    queue(remote_env["billing"])
+
+    run_remote()
+
+    assert tasks.redis.hget(capacity.CAPACITY_KEY, "jobs_per_worker") == "12"

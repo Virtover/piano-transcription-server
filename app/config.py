@@ -218,8 +218,9 @@ class OutsourceSettings(BaseSettings):
     provider: Literal["none", "runpod"] = "none"
     # Outsource a job when its estimated local wait is longer than this.
     max_wait: DurationOrZero = 120.0
-    # Maximum remote jobs at once (cost cap). Also the remote-worker thread count.
-    max_concurrency: int = Field(default=4, ge=1)
+    # Maximum remote jobs at once. `auto`: the RunPod endpoint's max workers
+    # times the requests one worker takes (see app/outsource/capacity.py).
+    max_concurrency: AutoInt = 4
     timeout: Duration = 15 * 60.0
     # On remote failure, put the job back on the local queue instead of failing it.
     fallback_local: bool = True

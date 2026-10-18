@@ -499,4 +499,28 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
                 logger.exception("Could not clear the worker heartbeat")
 
 
+class RemoteCapacityRefresh(dramatiq.Middleware):
+    """With OUTSOURCE_MAX_CONCURRENCY=auto, rereads the provider's max
+    workers while the remote queue is consumed, so console changes apply."""
+
+    def after_worker_boot(self, broker, worker):
+        queues = getattr(worker, "queues", None)
+        if queues is None or REMOTE_QUEUE not in queues or settings.outsource.max_concurrency is not None:
+            return
+
+        def refresh():
+            from app.outsource import capacity
+            from app.outsource.provider import get_provider
+
+            while True:
+                time.sleep(capacity.REFRESH_INTERVAL)
+                try:
+                    capacity.refresh_max_workers(redis, get_provider())
+                except Exception:
+                    logger.exception("Could not refresh the remote capacity")
+
+        threading.Thread(target=refresh, name="remote-capacity", daemon=True).start()
+
+
 broker.add_middleware(LocalWorkerHeartbeat())
+broker.add_middleware(RemoteCapacityRefresh())
