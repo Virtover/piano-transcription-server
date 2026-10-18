@@ -12,6 +12,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# WORKER_BATCH_SIZE=auto in CPU mode. CPU mode also runs this many worker threads.
+DEFAULT_CPU_BATCH_SIZE = 6
+
 
 def physical_cpu_count() -> int:
     detected = psutil.cpu_count(logical=False) if psutil else None
@@ -27,6 +30,31 @@ def cpu_thread_count() -> int:
     physical core count, or physical cores minus two for `auto`."""
     configured = settings.worker.threads
     return min(configured, physical_cpu_count()) if configured else automatic_cpu_threads()
+
+
+def cpu_batch_size() -> int:
+    return settings.worker.batch_size or DEFAULT_CPU_BATCH_SIZE
+
+
+def gpu_batch_size(capacity: int) -> tuple[int, str | None]:
+    """Batch size for a GPU that fits `capacity` concurrent jobs.
+
+    `auto` uses the capacity, capped by WORKER_MAX_CONCURRENCY. A fixed
+    WORKER_BATCH_SIZE is used as given, but never above the capacity; the
+    second value is a warning when it was lowered.
+    """
+    configured = settings.worker.batch_size
+    if configured is None:
+        size = capacity
+        if settings.worker.max_concurrency:
+            size = min(size, settings.worker.max_concurrency)
+        return max(1, size), None
+    if configured > capacity >= 1:
+        return capacity, (
+            f"WORKER_BATCH_SIZE={configured} is more than this GPU's capacity of "
+            f"{capacity} job(s); using {capacity}"
+        )
+    return configured, None
 
 
 def nvidia_smi_free_memory() -> dict[str, int]:

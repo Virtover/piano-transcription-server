@@ -4,13 +4,12 @@ from dataclasses import dataclass
 
 from app.config import ensure_valid, settings
 from app.transcription.device import (
+    cpu_batch_size,
     cpu_thread_count,
     cuda_job_capacities,
+    gpu_batch_size,
     physical_cpu_count,
 )
-
-
-DEFAULT_CPU_BATCH_SIZE = 6
 
 
 @dataclass(frozen=True)
@@ -22,6 +21,7 @@ class WorkerPlan:
     # Set in CPU mode: threads for PyTorch, ffmpeg, OpenMP, and MKL.
     cpu_threads: int | None
     summary: str
+    warnings: tuple[str, ...] = ()
 
 
 def gpu_capacity(capacities: list[tuple[int, int, int, int]] | None) -> tuple[int, int, str] | None:
@@ -33,10 +33,11 @@ def gpu_capacity(capacities: list[tuple[int, int, int, int]] | None) -> tuple[in
     if total_capacity < 1:
         return None
 
-    summary = ", ".join(
-        f"GPU {index}: {capacity} job(s), {free_memory / 1024**3:.2f} GiB free"
-        for index, capacity, free_memory, _ in capacities
-    )
+    parts = []
+    for index, capacity, free_memory, _ in capacities:
+        batch = f"batch {gpu_batch_size(capacity)[0]}, " if capacity > 0 else ""
+        parts.append(f"GPU {index}: {capacity} job(s), {batch}{free_memory / 1024**3:.2f} GiB free")
+    summary = ", ".join(parts)
     return len(device_capacities), total_capacity, summary
 
 
@@ -44,6 +45,11 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPla
     gpu = gpu_capacity(capacities)
     if gpu:
         device_count, gpu_jobs, gpu_summary = gpu
+        warnings = tuple(
+            f"GPU {index}: {warning}"
+            for index, capacity, _, _ in capacities
+            if capacity > 0 and (warning := gpu_batch_size(capacity)[1])
+        )
         threads = min(physical_cpu_count(), gpu_jobs)
         if settings.worker.max_concurrency:
             threads = min(threads, settings.worker.max_concurrency)
@@ -52,13 +58,14 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPla
             threads=threads,
             cpu_threads=None,
             summary=f"{device_count} GPU(s), up to {gpu_jobs} job(s) by VRAM ({gpu_summary})",
+            warnings=warnings,
         )
 
     return WorkerPlan(
         processes=1,
-        threads=settings.worker.batch_size or DEFAULT_CPU_BATCH_SIZE,
+        threads=cpu_batch_size(),
         cpu_threads=cpu_thread_count(),
-        summary=f"{physical_cpu_count()} CPU(s), no CUDA GPU detected, one batched CPU job",
+        summary=f"{physical_cpu_count()} CPU(s), no CUDA GPU detected, batch {cpu_batch_size()}",
     )
 
 
@@ -69,6 +76,8 @@ def main() -> None:
         # Read by the OpenMP and MKL libraries themselves.
         os.environ["OMP_NUM_THREADS"] = str(plan.cpu_threads)
         os.environ["MKL_NUM_THREADS"] = str(plan.cpu_threads)
+    for warning in plan.warnings:
+        print(f"Warning: {warning}", flush=True)
     print(
         f"Starting Dramatiq with {plan.processes} process(es) and "
         f"{plan.threads} thread(s) per process ({plan.summary})",

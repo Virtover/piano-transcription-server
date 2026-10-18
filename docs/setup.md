@@ -47,8 +47,8 @@ Configure the shared worker with explicit CPU compute threads and request batchi
 
 ```env
 WORKER_THREADS=4
-WORKER_BATCH_SIZE=6
+WORKER_BATCH_SIZE=auto
 WORKER_BATCH_TIMEOUT=2s
 ```
 
-Increase the batch size only after checking RAM or VRAM usage. The API accepts jobs immediately and Redis queues work beyond available worker capacity. `WORKER_BATCH_SIZE` controls model batching; it does not replace the per-job VRAM estimate used for GPU capacity.
+With `WORKER_BATCH_SIZE=auto`, each GPU batches as many jobs as fit in its VRAM, and the CPU batches 6. The API accepts jobs immediately and Redis queues work beyond available worker capacity. If a batch runs out of GPU memory, the worker splits it and retries. See [WORKER_BATCH_SIZE](configuration.md#choosing-other-values).

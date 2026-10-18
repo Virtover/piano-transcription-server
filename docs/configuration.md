@@ -42,7 +42,7 @@ The command validates everything, prints the resolved configuration with secrets
 | `WORKER_THREADS` | `auto` | CPU threads for PyTorch and ffmpeg. `auto` uses physical cores minus two; a number is capped at the physical core count. |
 | `WORKER_MODEL_MEMORY_GIB` | `1.0` | VRAM reserved on each GPU for the model and GPU libraries. See [GPU memory and batching](#-gpu-memory-and-batching). |
 | `WORKER_MEMORY_PER_JOB_GIB` | `1.1` | VRAM budget for each concurrent GPU job. |
-| `WORKER_BATCH_SIZE` | `6` | Maximum jobs combined into one model batch. In CPU mode, also the number of worker threads. `auto` means `6`. |
+| `WORKER_BATCH_SIZE` | `auto` | Maximum jobs combined into one model batch. `auto` uses each GPU's job capacity, or `6` on CPU. A number is lowered to a GPU's capacity. In CPU mode, also the number of worker threads. See [below](#choosing-other-values). |
 | `WORKER_BATCH_TIMEOUT` | `2s` | Maximum wait for more jobs before running a partial batch. |
 | `WORKER_MAX_CONCURRENCY` | `auto` | Optional cap on concurrent GPU jobs. It can only lower the capacity calculated from VRAM. |
 
@@ -114,7 +114,7 @@ An existing `.env` keeps working without changes; you only see deprecation warni
 
 `MAX_UPLOAD_SIZE_MB` limits disk use per upload. Uploads are written to the shared `DATA_DIR` and removed after conversion. Compressed files are small: an hour of MP3 at 192 kbit/s is about 85 MB. Uncompressed WAV is large: an hour of 16-bit 44.1 kHz stereo is about 635 MB. Raise the limit only if users need to upload long lossless recordings and the disk has room for several at once.
 
-`WORKER_BATCH_SIZE` and `WORKER_MEMORY_PER_JOB_GIB` control different limits. The batch size controls how many queued requests are combined for one model inference call. The per-job VRAM setting estimates how many GPU jobs fit alongside the loaded model. A larger batch size does not increase the calculated GPU capacity. See [GPU memory and batching](#-gpu-memory-and-batching).
+`WORKER_BATCH_SIZE` and `WORKER_MEMORY_PER_JOB_GIB` control different limits. The batch size controls how many queued requests are combined for one model inference call. The per-job VRAM setting estimates how many GPU jobs fit alongside the loaded model. A larger batch size never increases the calculated GPU capacity: on a GPU, the batch size is at most that GPU's capacity. See [GPU memory and batching](#-gpu-memory-and-batching).
 
 ## 🎛️ GPU memory and batching
 
@@ -186,12 +186,18 @@ Example capacities with the default values:
 * Lower, down to about `0.3`: room for one more job on small GPUs. Only safe with lazy loading. Eager loading, or a different CUDA, cuDNN, or driver version that loads more, can then cause out-of-memory errors.
 * Higher: headroom for programs that start using the GPU after the worker, such as a browser or game on a desktop machine. Each extra 1.1 GiB removes one job.
 
-**`WORKER_BATCH_SIZE`** (default `6`)
+**`WORKER_BATCH_SIZE`** (default `auto`)
 
-* On GPU, the batch can never hold more jobs than the worker has threads, so values above the calculated capacity have no effect. Values below it leave capacity unused: jobs that arrive while a batch runs wait until the whole batch finishes.
-* Larger batches give more total throughput, but with diminishing returns. In the table above, going from 4 to 6 jobs saves only about 5% time per job. Each job also progresses more slowly, because every step processes one segment for every job in the batch.
+* `auto` on GPU: each GPU's batch size is its job capacity from the startup calculation, capped by `WORKER_MAX_CONCURRENCY` if set, and at least 1. A GPU that fits 4 jobs batches up to 4; a GPU that fits 20 batches up to 20.
+* A number on GPU is used as given, but never above that GPU's capacity. When it is lowered, the worker logs a warning at startup, for example `GPU 0: WORKER_BATCH_SIZE=6 is more than this GPU's capacity of 4 job(s); using 4`.
+* On CPU, `auto` means `6`, and the batch size is also the number of worker threads. A large value means many simultaneous downloads and much more RAM. Keep it small, around 2 to 6.
+* The worker log shows the result at startup, for example `GPU 0: 4 job(s), batch 4, 5.84 GiB free`. `python -m app.config check` shows `auto` because the capacity is only known on the worker.
+* Values below the capacity leave capacity unused: jobs that arrive while a batch runs wait until the whole batch finishes.
+* Larger batches give more total throughput, with diminishing returns. In the table above, going from 4 to 6 jobs saves only about 5% time per job. Each job also progresses more slowly, because every step processes one segment for every job in the batch.
 * A batch starts early only when it is full, so with a large value each batch waits the full `WORKER_BATCH_TIMEOUT`.
-* On CPU, the batch size is also the number of worker threads, so a large value means many simultaneous downloads and much more RAM. Keep it small, around 2 to 6.
+* `WORKER_BATCH_SIZE=6` gives the behavior of earlier versions.
+
+**Running out of GPU memory.** Free VRAM is measured once at startup, so another program can take memory later, which is common under WSL. When a batch runs out of GPU memory, the worker frees memory, splits the unfinished jobs in half, and retries each half from the start. Progress shown to users does not go backwards during a retry. The GPU's batch size is then lowered to the size that was retried, and the worker logs `cuda:0 ran out of memory; batch size lowered from 4 to 2`. A single job that still does not fit fails with `The GPU ran out of memory for this transcription`. Restart the worker to measure the capacity again.
 
 **`WORKER_BATCH_TIMEOUT`** (default `2s`)
 

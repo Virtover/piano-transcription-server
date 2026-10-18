@@ -93,7 +93,7 @@ def test_launcher_summary_shows_free_memory(gpus, monkeypatch):
     gpus["devices"] = [("aaaa-1", 7126 * MiB, 8 * GiB)]
     gpus["smi"] = "GPU-aaaa-1, 5812\n"
 
-    assert launcher.gpu_capacity(device.cuda_job_capacities()) == (1, 4, "GPU 0: 4 job(s), 5.68 GiB free")
+    assert launcher.gpu_capacity(device.cuda_job_capacities()) == (1, 4, "GPU 0: 4 job(s), batch 4, 5.68 GiB free")
 
 
 def test_launcher_uses_cpu_when_no_job_fits(gpus, monkeypatch):

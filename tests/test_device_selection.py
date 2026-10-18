@@ -12,7 +12,7 @@ def gpus(monkeypatch):
         state["capacity_calls"] += 1
         return state["capacities"]
 
-    monkeypatch.setattr(piano_transcription, "_usable_cuda_devices", None)
+    monkeypatch.setattr(piano_transcription, "_cuda_capacities", None)
     monkeypatch.setattr(piano_transcription, "cuda_job_capacities", capacities)
     monkeypatch.setattr(
         piano_transcription.torch.cuda,

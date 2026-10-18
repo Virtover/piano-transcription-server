@@ -146,7 +146,8 @@ class WorkerSettings(BaseSettings):
     threads: AutoInt = None
     model_memory_gib: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     memory_per_job_gib: float = Field(default=1.1, gt=0, allow_inf_nan=False)
-    batch_size: AutoInt = 6
+    # auto: each GPU's job capacity; 6 on CPU.
+    batch_size: AutoInt = None
     batch_timeout: Duration = 2.0
     max_concurrency: AutoInt = None
 
@@ -442,8 +443,10 @@ def describe(config: Settings) -> list[str]:
             value = getattr(group, field)
             if isinstance(value, SecretStr):
                 shown = "********"
+            elif value is None and type(group) is WorkerSettings and field == "batch_size":
+                shown = "auto (each GPU's job capacity, 6 on CPU; resolved at worker start)"
             elif value is None:
-                shown = "auto" if field in ("threads", "batch_size", "max_concurrency") else "(unset)"
+                shown = "auto" if field in ("threads", "max_concurrency") else "(unset)"
             elif is_duration(type(group), field):
                 shown = format_duration(value)
             else:
