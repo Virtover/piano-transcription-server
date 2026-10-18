@@ -61,6 +61,26 @@ The command validates everything, prints the resolved configuration with secrets
 
 `BILLING_PROVIDER=google_play` also requires the secret `google_play_service_account.json`. The API refuses to start if the package name, the OAuth client IDs, or the secret is missing. See the [Google Play billing guide](google-play-billing.md).
 
+### Outsourcing
+
+When local GPUs are overloaded, jobs can run on RunPod Serverless. Only the model runs remotely; downloading and converting stay on this server. See [Outsourcing to RunPod](setup.md#-outsourcing-to-runpod) and [how routing works](architecture.md#-outsourcing).
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OUTSOURCE_PROVIDER` | `none` | `none` or `runpod`. With `none`, nothing is outsourced and the `remote-worker` service is not needed. |
+| `OUTSOURCE_MAX_WAIT` | `2m` | Outsource a job when its estimated local wait is longer than this. `0s` outsources whenever every local slot is busy. |
+| `OUTSOURCE_MAX_CONCURRENCY` | `4` | Maximum remote jobs at once (cost cap). Also the `remote-worker` thread count. Set the RunPod endpoint's maximum workers to the same value. |
+| `OUTSOURCE_TIMEOUT` | `15m` | How long a remote job may take, including RunPod's queue and cold start. It is then cancelled. |
+| `OUTSOURCE_FALLBACK_LOCAL` | `true` | When a remote job fails or times out, put it back on the local queue instead of failing it. |
+| `OUTSOURCE_STORAGE_ENDPOINT` | unset | S3-compatible endpoint used to hand audio to RunPod, for example `https://<account-id>.eu.r2.cloudflarestorage.com`. |
+| `OUTSOURCE_STORAGE_BUCKET` | unset | Bucket for the audio files. |
+| `OUTSOURCE_STORAGE_REGION` | `auto` | Storage region. `auto` for Cloudflare R2. |
+| `OUTSOURCE_MAX_AUDIO_MB` | `512` | Read by the RunPod handler: largest audio file it downloads. |
+| `RUNPOD_ENDPOINT_ID` | unset | ID of the RunPod Serverless endpoint. |
+| `RUNPOD_API_BASE` | `https://api.runpod.ai/v2` | RunPod API URL. Change it only for local testing with the SDK's test server; the endpoint ID is then not added to the path. |
+
+`OUTSOURCE_PROVIDER=runpod` requires the endpoint ID, both storage settings, and the three secret files below. The API and `remote-worker` refuse to start without them.
+
 ### Container wiring
 
 Set by `docker-compose.yml`. Change them only when running the services outside Docker.
@@ -89,6 +109,9 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | File | Used for |
 | --- | --- |
 | `google_play_service_account.json` | Google Play service-account JSON key, used to verify purchases and read the product catalog. |
+| `runpod_api_key` | RunPod API key, restricted to the transcription endpoint. |
+| `outsource_storage_access_key` | Access key ID of the storage token. |
+| `outsource_storage_secret_key` | Secret access key of the storage token. |
 
 Secrets are only read from these files: a variable with the same name in `.env` or the environment is ignored. Never commit the `secrets` folder.
 

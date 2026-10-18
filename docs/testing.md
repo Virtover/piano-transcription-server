@@ -47,6 +47,9 @@ python -m pytest -q -k cancellation
 | `test_launcher.py` | Worker resources resolved at startup: threads, CPU threads, and the values passed to Dramatiq. |
 | `test_batching.py` | Batch size rules (`auto` per GPU, clamping, CPU default) and splitting a batch in half on GPU out-of-memory. |
 | `test_gpu_batcher.py` | The real batcher and batch loop with a fake model that runs out of memory. Needs the worker image. |
+| `test_outsource_routing.py` | Routing: wait estimate, threshold, remote concurrency cap, missing heartbeat, provider `none`, and the API's backend choice. |
+| `test_remote_jobs.py` | Remote jobs with a fake RunPod and storage: success, progress mapping, cancellation, fallback to local, timeouts, failures, single billing, and storage cleanup on every path. |
+| `test_outsource_clients.py` | The RunPod client, S3 storage, and the handler's input checks and download limits. |
 | `test_device_capacity.py` | GPU capacity calculation, including the `nvidia-smi` free memory check used under WSL. |
 | `test_device_selection.py` | GPU and CPU device selection for transcription jobs. Needs the worker dependencies, so it is skipped in the API test environment. |
 

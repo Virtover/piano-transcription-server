@@ -43,6 +43,28 @@ services:
     gpus: all
     restart: unless-stopped
 
+  # Sends jobs to the outsourcing provider when local GPUs are overloaded.
+  # Start with: docker compose --profile outsource up -d
+  # It downloads and converts audio here and needs no GPU, so it runs on the
+  # API image. See docs/setup.md.
+  remote-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    profiles: ["outsource"]
+    env_file:
+      - .env
+    environment: *wiring
+    volumes:
+      - data:/data
+      - ./billing-data:/billing
+      - ./secrets:/run/secrets:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "app.worker.launcher", "remote"]
+    restart: unless-stopped
+
   # Only deletes expired job files, so it runs on the small API image.
   cleanup:
     build:

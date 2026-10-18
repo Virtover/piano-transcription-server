@@ -40,7 +40,7 @@ The body is the file itself, not a multipart form. This lets the server stop rea
 * `filename` is only used as the title (without the extension). It never decides where the file is stored.
 * The size limit is `MAX_UPLOAD_SIZE_MB` (default 200 MB), and the length limit is `MAX_VIDEO_LENGTH_MINUTES`, the same as for links. `GET /api/server-info` returns both.
 * The response is the same as for a link, and the job is polled, cancelled, and downloaded the same way. Its metadata contains only the title and duration.
-* The uploaded file is deleted as soon as it is converted for transcription, or with the job if it fails or is cancelled.
+* The uploaded file is deleted when the job completes, fails, or is cancelled. It is kept until then so the job can be retried on another backend.
 
 Upload errors:
 
@@ -62,7 +62,7 @@ $status = Invoke-RestMethod `
 $status
 ```
 
-Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled.
+Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens.
 
 Cancel a queued or processing job:
 

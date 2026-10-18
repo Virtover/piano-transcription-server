@@ -48,7 +48,8 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     monkeypatch.setattr(transcription_routes, "billing", billing)
     monkeypatch.setattr(tasks, "billing", billing)
     monkeypatch.setattr(transcription_routes, "video_duration", lambda source_url: 130.0)
-    monkeypatch.setattr(transcription_routes.transcribe_job, "send", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks.transcribe_job, "send", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks.transcribe_remote_job, "send", lambda *args, **kwargs: None)
     class FakeResponse:
         def __init__(self, status_code, payload):
             self.status_code = status_code

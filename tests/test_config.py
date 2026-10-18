@@ -351,3 +351,72 @@ def test_settings_import_without_gpu_libraries():
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
+
+
+# --- Outsourcing ------------------------------------------------------------
+
+RUNPOD_ENV = (
+    "OUTSOURCE_PROVIDER=runpod\n"
+    "RUNPOD_ENDPOINT_ID=abc123\n"
+    "OUTSOURCE_STORAGE_ENDPOINT=https://account.eu.r2.cloudflarestorage.com\n"
+    "OUTSOURCE_STORAGE_BUCKET=piano-audio\n"
+)
+RUNPOD_SECRETS = {
+    "runpod_api_key": "rp-key",
+    "outsource_storage_access_key": "access",
+    "outsource_storage_secret_key": "secret",
+}
+
+
+def test_outsourcing_defaults(tmp_path):
+    settings = load(tmp_path)
+
+    assert settings.outsource.provider == "none"
+    assert settings.outsource.max_wait == 120
+    assert settings.outsource.max_concurrency == 4
+    assert settings.outsource.timeout == 900
+    assert settings.outsource.fallback_local is True
+    assert settings.runpod.api_base == "https://api.runpod.ai/v2"
+    assert validate_settings(settings, "all") == []
+
+
+def test_complete_runpod_configuration_is_valid(tmp_path):
+    settings = load(tmp_path, RUNPOD_ENV + "OUTSOURCE_MAX_WAIT=0s\n", RUNPOD_SECRETS)
+
+    assert validate_settings(settings, "remote") == []
+    assert settings.secrets.runpod_api_key.get_secret_value() == "rp-key"
+    assert "rp-key" not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["RUNPOD_ENDPOINT_ID", "OUTSOURCE_STORAGE_ENDPOINT", "OUTSOURCE_STORAGE_BUCKET", *RUNPOD_SECRETS],
+)
+def test_runpod_requirements(tmp_path, missing):
+    env = "".join(line + "\n" for line in RUNPOD_ENV.splitlines() if not line.startswith(missing))
+    secrets = {name: value for name, value in RUNPOD_SECRETS.items() if name != missing}
+
+    problems = validate_settings(load(tmp_path, env, secrets), "remote")
+
+    assert len(problems) == 1
+    assert missing in problems[0]
+    assert validate_settings(load(tmp_path, env, secrets), "api") == problems
+
+
+def test_runpod_settings_not_needed_by_gpu_worker(tmp_path):
+    assert validate_settings(load(tmp_path, "OUTSOURCE_PROVIDER=runpod\n"), "worker") == []
+
+
+def test_runpod_secrets_cannot_come_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNPOD_API_KEY", "leaked")
+
+    settings = load(tmp_path, RUNPOD_ENV + "OUTSOURCE_STORAGE_SECRET_KEY=leaked\n")
+
+    assert settings.secrets.runpod_api_key is None
+    assert settings.secrets.outsource_storage_secret_key is None
+
+
+@pytest.mark.parametrize("line", ["OUTSOURCE_PROVIDER=aws", "OUTSOURCE_MAX_CONCURRENCY=0", "OUTSOURCE_TIMEOUT=15", "OUTSOURCE_FALLBACK_LOCAL=maybe"])
+def test_invalid_outsourcing_values(tmp_path, line):
+    with pytest.raises(ConfigError, match=line.split("=")[0]):
+        load(tmp_path, line + "\n")

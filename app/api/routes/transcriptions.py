@@ -1,8 +1,8 @@
 import json
 import shutil
 import uuid
-from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
@@ -16,11 +16,12 @@ from app.billing import Billing, cancelled_cost, transcription_cost, Insufficien
 from app.api.routes.billing import ensure_allowed_length, video_duration
 from app.auth import AuthenticatedUser, current_user
 from app.media import UnsupportedMedia, probe_audio
+from app.outsource import routing
 from app.worker.tasks import (
     JOB_TTL,
     UPLOAD_FILE_NAME,
     job_key,
-    transcribe_job,
+    send_job,
 )
 
 
@@ -74,6 +75,9 @@ class TranscriptionStatusResponse(BaseModel):
     metadata: TranscriptionMetadataResponse | None = None
     error: str | None = None
     minutes: int | None = None
+    # Where the model runs: local or remote. Absent for jobs queued before
+    # outsourcing existed.
+    backend: str | None = None
 
 
 def current_user_balance(user_id: str | None) -> int | None:
@@ -101,9 +105,11 @@ def queue_job(
     user: AuthenticatedUser | None,
     duration: float,
     fields: dict[str, str],
-    send: Callable[[], object],
+    arguments: tuple[Any, ...] = (),
+    options: dict[str, Any] | None = None,
 ) -> CreateTranscriptionResponse:
-    """Reserve the job's cost, store it as queued, and hand it to the worker."""
+    """Reserve the job's cost, store it as queued, choose the local or
+    remote backend, and hand it to that backend's queue."""
     current_user = user.user_id if user else "anonymous"
     email = user.email if user else None
     cost = transcription_cost(duration)
@@ -131,10 +137,13 @@ def queue_job(
     )
     # Queued jobs do not expire; an upload placeholder had a TTL.
     redis.persist(job_key(job_id))
+    backend = routing.choose_backend(redis, job_id)
+    redis.hset(job_key(job_id), "backend", backend)
 
     try:
-        send()
+        send_job(job_id, backend, *arguments, **(options or {}))
     except Exception as error:
+        routing.mark_finished(redis, backend, job_id)
         redis.delete(job_key(job_id))
         billing.release(job_id)
         raise HTTPException(
@@ -167,7 +176,7 @@ def create_transcription(
         user,
         duration,
         {"source_url": source_url},
-        lambda: transcribe_job.send(job_id, source_url),
+        (source_url,),
     )
 
 
@@ -237,8 +246,9 @@ async def upload_transcription(
             job_id,
             user,
             duration,
-            {"source": "upload", "title": title},
-            lambda: transcribe_job.send(job_id, upload_title=title),
+            {"source": "upload", "title": title, "upload_title": title},
+            (),
+            {"upload_title": title},
         )
     except BaseException:
         redis.delete(key)
@@ -283,6 +293,7 @@ def get_transcription(
         metadata=metadata,
         error=job.get("error"),
         minutes=current_user_balance(job.get("user_id")),
+        backend=job.get("backend"),
     )
 
 

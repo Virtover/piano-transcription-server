@@ -23,7 +23,7 @@ def upload(api_context, monkeypatch):
         state["sent"].append((args, kwargs))
 
     monkeypatch.setattr(transcriptions, "probe_audio", fake_probe)
-    monkeypatch.setattr(transcriptions.transcribe_job, "send", fake_send)
+    monkeypatch.setattr(tasks.transcribe_job, "send", fake_send)
 
     def post(content=b"audio-bytes", filename="My Song.mp3", headers=None):
         params = {} if filename is None else {"filename": filename}
@@ -226,7 +226,7 @@ def test_upload_with_unavailable_worker_is_removed(api_context, upload, monkeypa
     def broken_send(*args, **kwargs):
         raise ConnectionError("broker is down")
 
-    monkeypatch.setattr(transcriptions.transcribe_job, "send", broken_send)
+    monkeypatch.setattr(tasks.transcribe_job, "send", broken_send)
     response = upload["post"](headers={"Authorization": "Bearer user"})
 
     assert response.status_code == 503

@@ -1,5 +1,6 @@
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 
 from app.config import ensure_valid, settings
@@ -10,6 +11,12 @@ from app.transcription.device import (
     gpu_batch_size,
     physical_cpu_count,
 )
+
+
+# Must match the queue names in app.worker.tasks, which is not imported here
+# so that this module starts without connecting to Redis.
+LOCAL_QUEUE = "default"
+REMOTE_QUEUE = "remote"
 
 
 @dataclass(frozen=True)
@@ -69,9 +76,36 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPla
     )
 
 
-def main() -> None:
-    ensure_valid("worker")
-    plan = plan_worker(cuda_job_capacities())
+def remote_plan() -> WorkerPlan:
+    threads = settings.outsource.max_concurrency
+    return WorkerPlan(
+        processes=1,
+        threads=threads,
+        cpu_threads=None,
+        summary=f"remote dispatcher for {settings.outsource.provider}, up to {threads} remote job(s)",
+    )
+
+
+def main(arguments: list[str] | None = None) -> None:
+    """Start Dramatiq for a role: `local` (default) runs the model on this
+    machine and consumes the default queue; `remote` dispatches to the
+    outsourcing provider and consumes the remote queue, without GPU libraries."""
+    arguments = sys.argv[1:] if arguments is None else arguments
+    role = arguments[0] if arguments else "local"
+    if role not in ("local", "remote"):
+        raise SystemExit(f"Unknown worker role {role!r}; use local or remote")
+
+    if role == "remote":
+        ensure_valid("remote")
+        if settings.outsource.provider == "none":
+            raise SystemExit("The remote worker needs OUTSOURCE_PROVIDER to be set")
+        plan = remote_plan()
+        queue = REMOTE_QUEUE
+    else:
+        ensure_valid("worker")
+        plan = plan_worker(cuda_job_capacities())
+        queue = LOCAL_QUEUE
+
     if plan.cpu_threads:
         # Read by the OpenMP and MKL libraries themselves.
         os.environ["OMP_NUM_THREADS"] = str(plan.cpu_threads)
@@ -79,7 +113,7 @@ def main() -> None:
     for warning in plan.warnings:
         print(f"Warning: {warning}", flush=True)
     print(
-        f"Starting Dramatiq with {plan.processes} process(es) and "
+        f"Starting Dramatiq on queue {queue} with {plan.processes} process(es) and "
         f"{plan.threads} thread(s) per process ({plan.summary})",
         flush=True,
     )
@@ -97,6 +131,8 @@ def main() -> None:
             str(plan.processes),
             "--threads",
             str(plan.threads),
+            "--queues",
+            queue,
         ],
     )
 

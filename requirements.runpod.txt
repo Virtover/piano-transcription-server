@@ -1,0 +1,10 @@
+# RunPod Serverless handler: model inference only. No ffmpeg, yt-dlp, or
+# Redis: audio arrives as FLAC from the server's remote worker.
+runpod
+torch
+torchaudio
+transkun
+soundfile
+psutil
+pydantic-settings
+requests

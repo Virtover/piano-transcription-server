@@ -186,244 +186,35 @@ def transcribe_audio(
     audio: np.ndarray,
     progress_callback: ProgressCallback | None = None,
     cancellation_callback: CancellationCallback | None = None,
-):
-    """
-    Transcribe audio using the same segment processing logic
-    as Transkun's TransKun.transcribe().
-
-    Progress is reported after each actual segment has finished.
-    """
-
-    step_in_second = (
-        model.segmentHopSizeInSecond
+) -> list:
+    """Transcribe one audio array (samples x channels, at model.fs) to note
+    events, outside the shared batcher. Used by the remote handler; local jobs
+    go through _GpuBatcher, which runs the same batch loop."""
+    request = _BatchRequest(
+        audio=audio,
+        progress_callback=progress_callback,
+        cancellation_callback=cancellation_callback,
+        result=Future(),
     )
-
-    segment_size_in_second = (
-        model.segmentSizeInSecond
+    run_splitting_on_out_of_memory(
+        [request],
+        lambda requests: _transcribe_audio_batch(model, requests),
+        is_cuda_out_of_memory,
+        lambda: None,
+        lambda size: None,
     )
+    return request.result.result()
 
-    device = next(
-        model.parameters()
-    ).device
 
-    # Transkun expects:
-    #
-    #     channels x samples
-    #
-    x = torch.from_numpy(audio).to(device)
-    x = x.transpose(-1, -2)
+def audio_for_model(model, sample_rate: int, audio: np.ndarray) -> np.ndarray:
+    """Resample audio (samples x channels, float32) to the model's rate."""
+    if sample_rate != model.fs:
+        audio = soxr.resample(audio, sample_rate, model.fs)
+    return audio
 
-    pad_time_begin = (
-        segment_size_in_second
-        - step_in_second
-    )
 
-    x = F.pad(
-        x,
-        (
-            math.ceil(
-                pad_time_begin * model.fs
-            ),
-            math.ceil(
-                pad_time_begin * model.fs
-            ),
-        ),
-    )
-
-    n_sample = x.shape[-1]
-
-    step_size = (
-        math.ceil(
-            step_in_second
-            * model.fs
-            / model.hopSize
-        )
-        * model.hopSize
-    )
-
-    segment_size = math.ceil(
-        segment_size_in_second
-        * model.fs
-    )
-
-    segment_starts = range(
-        0,
-        n_sample,
-        step_size,
-    )
-
-    segment_count = math.ceil(
-        n_sample / step_size
-    )
-
-    events_by_type = defaultdict(list)
-
-    start_frame_idx = math.floor(
-        pad_time_begin
-        * model.fs
-        / model.hopSize
-    )
-
-    start_pos = [
-        start_frame_idx
-    ] * len(model.targetMIDIPitch)
-
-    torch.set_grad_enabled(False)
-
-    for segment_index, i in enumerate(
-        segment_starts,
-        start=1,
-    ):
-        if cancellation_callback and cancellation_callback():
-            raise TranscriptionCancelled()
-
-        # Report progress BEFORE starting the expensive
-        # inference for this segment.
-        #
-        # This is important: otherwise the UI appears frozen
-        # during the first/only segment.
-        if progress_callback:
-            progress_callback(
-                (segment_index - 1)
-                / segment_count
-            )
-
-        j = min(
-            i + segment_size,
-            n_sample,
-        )
-
-        begin_time = (
-            i / model.fs
-            - pad_time_begin
-        )
-
-        cur_slice = x[:, i:j]
-
-        if (
-            cur_slice.shape[-1]
-            < segment_size
-        ):
-            cur_slice = F.pad(
-                cur_slice,
-                (
-                    0,
-                    segment_size
-                    - cur_slice.shape[-1],
-                ),
-            )
-
-        cur_frames = makeFrame(
-            cur_slice,
-            model.hopSize,
-            model.windowSize,
-        )
-
-        last_frame_idx = round(
-            segment_size
-            / model.hopSize
-        )
-
-        cur_events, last_p = (
-            model.transcribeFrames(
-                cur_frames.unsqueeze(0),
-                forcedStartPos=start_pos,
-                velocityCriteron="hamming",
-                onsetBound=None,
-                lastFrameIdx=last_frame_idx,
-            )
-        )
-
-        cur_events = cur_events[0]
-
-        start_pos = [
-            max(
-                k
-                - int(
-                    step_size
-                    / model.hopSize
-                ),
-                0,
-            )
-            for k in last_p
-        ]
-
-        for event in cur_events:
-            event.start += begin_time
-            event.end += begin_time
-
-            event.start = max(
-                event.start,
-                0,
-            )
-
-            event.end = max(
-                event.end,
-                event.start,
-            )
-
-        # This is the same merging logic used by
-        # Transkun's original transcribe().
-        for event in cur_events:
-            pitch = event.pitch
-
-            if events_by_type[pitch]:
-                last_event = (
-                    events_by_type[pitch][-1]
-                )
-
-                if event.start < last_event.end:
-                    if event.hasOnset:
-                        events_by_type[pitch][-1] = (
-                            event
-                        )
-                    else:
-                        last_event.hasOffset = (
-                            event.hasOffset
-                        )
-
-                        last_event.end = max(
-                            event.end,
-                            last_event.end,
-                        )
-
-                    continue
-
-            if event.hasOnset:
-                events_by_type[pitch].append(
-                    event
-                )
-
-        # Segment is now completely processed.
-        if progress_callback:
-            progress_callback(
-                segment_index
-                / segment_count
-            )
-
-    # Same final-event handling as Transkun.
-    for event_type in events_by_type:
-        if events_by_type[event_type]:
-            events_by_type[event_type][
-                -1
-            ].hasOffset = True
-
-    events_all = sum(
-        events_by_type.values(),
-        [],
-    )
-
-    events_all = [
-        event
-        for event in events_all
-        if event.hasOffset
-    ]
-
-    events_all = resolveOverlapping(
-        events_all
-    )
-
-    return events_all
+def write_midi(events: list, output_path: Path) -> None:
+    writeMidi(events).write(str(output_path))
 
 
 def _transcribe_audio_batch(
@@ -722,12 +513,7 @@ def transcribe_piano(
     if cancellation_callback and cancellation_callback():
         raise TranscriptionCancelled()
 
-    if sample_rate != model.fs:
-        audio = soxr.resample(
-            audio,
-            sample_rate,
-            model.fs,
-        )
+    audio = audio_for_model(model, sample_rate, audio)
 
     if progress_callback:
         progress_callback(0.15)
@@ -757,11 +543,7 @@ def transcribe_piano(
     if progress_callback:
         progress_callback(0.96)
 
-    output_midi = writeMidi(events)
-
-    output_midi.write(
-        str(output_path)
-    )
+    write_midi(events, output_path)
 
     if progress_callback:
         progress_callback(1.0)

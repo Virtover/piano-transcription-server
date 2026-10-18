@@ -35,7 +35,8 @@ def test_upload_is_converted_to_mono_44100_wav(tmp_path, source):
     with wave.open(str(audio.path)) as wav:
         assert (wav.getframerate(), wav.getnchannels()) == (44100, 1)
         assert wav.getnframes() / 44100 == pytest.approx(3, abs=0.1)
-    assert not upload.exists()
+    # Kept until the job ends, for a retry on another backend.
+    assert upload.exists()
 
 
 def test_upload_without_title_gets_default(tmp_path):
@@ -58,6 +59,8 @@ def test_upload_is_removed_with_other_audio_files(tmp_path):
     for name in ["upload.input", "download.webm", "audio.wav", "transcription.mid"]:
         (tmp_path / name).write_bytes(b"x")
 
-    pipeline.remove_audio_files(tmp_path)
+    pipeline.remove_audio_files(tmp_path, keep_upload=True)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["transcription.mid", "upload.input"]
 
+    pipeline.remove_audio_files(tmp_path)
     assert [path.name for path in tmp_path.iterdir()] == ["transcription.mid"]

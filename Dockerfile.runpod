@@ -1,0 +1,27 @@
+# RunPod Serverless worker: Transkun inference only. Build and push:
+#   docker build -f Dockerfile.runpod -t <registry>/piano-transcription-runpod:<version> .
+FROM nvidia/cuda:12.6.0-cudnn-runtime-ubuntu22.04
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.runpod.txt .
+
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements.runpod.txt
+
+# The model weights ship inside the transkun package, so they are part of the
+# image. Fail the build if they are missing or unreadable.
+RUN python3 -c "import pkg_resources, torch; torch.load(pkg_resources.resource_filename('transkun', 'pretrained/2.0.pt'), map_location='cpu')"
+
+COPY app ./app
+COPY runpod/handler.py ./handler.py
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python3", "-u", "handler.py"]

@@ -1,275 +1,22 @@
-import json
-import os
-import signal
-import subprocess
-import time
-from dataclasses import dataclass
+"""Local transcription: fetch audio, then run the model on this machine."""
+
 from pathlib import Path
-from typing import Any, Callable
 
-from app.transcription.cancellation import TranscriptionCancelled
-from app.transcription.device import cpu_thread_count
-from app.transcription.piano_transcription import (
-    transcribe_piano,
+from app.transcription.audio import (  # noqa: F401  (re-exported)
+    AUDIO_FILE_SUFFIXES,
+    CancellationCallback,
+    DownloadedAudio,
+    MetadataCallback,
+    ProgressCallback,
+    check_midi,
+    convert_to_wav,
+    download_audio,
+    fetch_audio,
+    format_upload_date,
+    prepare_upload,
+    remove_audio_files,
+    run_process,
 )
-from app.media import probe_audio
-from app.url_safety import ensure_safe_source_url
-
-
-ProgressCallback = Callable[[float], None]
-MetadataCallback = Callable[[dict[str, Any]], None]
-CancellationCallback = Callable[[], bool]
-
-
-AUDIO_FILE_SUFFIXES = {
-    ".aac",
-    ".flac",
-    ".m4a",
-    ".mp3",
-    ".ogg",
-    ".opus",
-    ".wav",
-    ".webm",
-}
-
-
-@dataclass
-class DownloadedAudio:
-    path: Path
-    metadata: dict[str, Any]
-
-
-def ffmpeg_thread_count() -> int:
-    return cpu_thread_count()
-
-
-def download_audio(
-    source_url: str,
-    output_dir: Path,
-    cancellation_callback: CancellationCallback | None = None,
-) -> DownloadedAudio:
-    output_template = str(
-        output_dir / "download.%(ext)s"
-    )
-
-    safe_url = ensure_safe_source_url(str(source_url))
-
-    result = run_process(
-        [
-            "yt-dlp",
-            "--no-playlist",
-            "--js-runtimes",
-            "deno",
-            "--extractor-args",
-            "youtube:player_client=web,android",
-            "--format",
-            "bestaudio/best",
-            "--socket-timeout",
-            "30",
-            "--retries",
-            "3",
-            "--fragment-retries",
-            "3",
-            "--extractor-retries",
-            "3",
-            "--print-json",
-            "-x",
-            "--audio-format",
-            "wav",
-            "-o",
-            output_template,
-            safe_url,
-        ],
-        cancellation_callback=cancellation_callback,
-    )
-
-    json_lines = [
-        line
-        for line in result.stdout.splitlines()
-        if line.strip()
-    ]
-
-    if not json_lines:
-        raise RuntimeError(
-            "yt-dlp did not return video metadata"
-        )
-
-    try:
-        info = json.loads(json_lines[-1])
-    except json.JSONDecodeError as error:
-        raise RuntimeError(
-            "yt-dlp returned invalid video metadata"
-        ) from error
-
-    title = info.get("title")
-
-    if not title:
-        raise RuntimeError(
-            "yt-dlp did not return a video title"
-        )
-
-    downloaded_path = None
-
-    for path in output_dir.glob("download.*"):
-        if path.suffix.lower() == ".wav":
-            downloaded_path = path
-            break
-
-    if downloaded_path is None:
-        raise RuntimeError(
-            "yt-dlp did not produce a WAV file"
-        )
-
-    wav_path = convert_to_wav(
-        downloaded_path,
-        output_dir,
-        cancellation_callback,
-    )
-
-    downloaded_path.unlink()
-
-    return DownloadedAudio(
-        path=wav_path,
-        metadata={
-            "title": title,
-            "author": info.get("uploader") or info.get("channel"),
-            "channel": info.get("channel"),
-            "channel_id": info.get("channel_id"),
-            "channel_url": info.get("channel_url"),
-            "upload_date": format_upload_date(info.get("upload_date")),
-            "duration": info.get("duration"),
-            "thumbnail": info.get("thumbnail"),
-            "webpage_url": info.get("webpage_url") or source_url,
-            "view_count": info.get("view_count"),
-            "like_count": info.get("like_count"),
-        },
-    )
-
-
-def convert_to_wav(
-    input_path: Path,
-    output_dir: Path,
-    cancellation_callback: CancellationCallback | None = None,
-) -> Path:
-    wav_path = output_dir / "audio.wav"
-
-    ffmpeg_threads = ffmpeg_thread_count()
-    ffmpeg_command = [
-        "ffmpeg",
-        "-y",
-        "-nostdin",
-        # Uploaded files are untrusted: never let ffmpeg open URLs.
-        "-protocol_whitelist",
-        "file",
-        "-i",
-        str(input_path),
-        "-vn",
-        "-ar",
-        "44100",
-        "-ac",
-        "1",
-    ]
-    if ffmpeg_threads is not None:
-        ffmpeg_command.extend(["-threads", str(ffmpeg_threads)])
-    ffmpeg_command.append(str(wav_path))
-
-    run_process(
-        ffmpeg_command,
-        cancellation_callback=cancellation_callback,
-    )
-    return wav_path
-
-
-def prepare_upload(
-    upload_path: Path,
-    title: str | None,
-    output_dir: Path,
-    cancellation_callback: CancellationCallback | None = None,
-) -> DownloadedAudio:
-    # Checked again here because the worker runs ffmpeg on the file.
-    duration = probe_audio(upload_path)
-    wav_path = convert_to_wav(
-        upload_path,
-        output_dir,
-        cancellation_callback,
-    )
-    upload_path.unlink()
-    return DownloadedAudio(
-        path=wav_path,
-        metadata={
-            "title": title or "Uploaded file",
-            "duration": duration,
-        },
-    )
-
-
-def format_upload_date(value: str | None) -> str | None:
-    if not value or len(value) != 8 or not value.isdigit():
-        return None
-
-    return f"{value[:4]}-{value[4:6]}-{value[6:]}"
-
-
-def remove_audio_files(output_dir: Path) -> None:
-    for path in output_dir.iterdir():
-        if (
-            path.is_file()
-            and (
-                path.name.startswith(("download.", "upload."))
-                or path.suffix.lower() in AUDIO_FILE_SUFFIXES
-            )
-        ):
-            path.unlink(missing_ok=True)
-
-
-def run_process(
-    command: list[str],
-    cancellation_callback: CancellationCallback | None = None,
-) -> subprocess.CompletedProcess[str]:
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=os.name != "nt",
-    )
-
-    while True:
-        if cancellation_callback and cancellation_callback():
-            if os.name == "nt":
-                process.terminate()
-            else:
-                os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                if os.name == "nt":
-                    process.kill()
-                else:
-                    os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-            raise TranscriptionCancelled()
-
-        try:
-            stdout, stderr = process.communicate(timeout=0.5)
-            break
-        except subprocess.TimeoutExpired:
-            continue
-
-    if process.returncode:
-        raise subprocess.CalledProcessError(
-            process.returncode,
-            command,
-            output=stdout,
-            stderr=stderr,
-        )
-
-    return subprocess.CompletedProcess(
-        command,
-        process.returncode,
-        stdout,
-        stderr,
-    )
 
 
 def transcribe_source(
@@ -282,41 +29,20 @@ def transcribe_source(
     upload_title: str | None = None,
 ) -> Path:
     """Transcribe source_url, or upload_path when it is given."""
-    output_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    if cancellation_callback and cancellation_callback():
-        raise TranscriptionCancelled()
-
-    if progress_callback:
-        progress_callback(0.03)
-        time.sleep(2)
-        progress_callback(0.05)
+    from app.transcription.piano_transcription import transcribe_piano
 
     try:
-        if upload_path is not None:
-            downloaded = prepare_upload(
-                upload_path,
-                upload_title,
-                output_dir,
-                cancellation_callback=cancellation_callback,
-            )
-        else:
-            downloaded = download_audio(
-                source_url,
-                output_dir,
-                cancellation_callback=cancellation_callback,
-            )
-
-        if metadata_callback:
-            metadata_callback(downloaded.metadata)
-
-        midi_path = (
-            output_dir
-            / "transcription.mid"
+        downloaded = fetch_audio(
+            output_dir,
+            source_url=source_url,
+            upload_path=upload_path,
+            upload_title=upload_title,
+            progress_callback=progress_callback,
+            metadata_callback=metadata_callback,
+            cancellation_callback=cancellation_callback,
         )
+
+        midi_path = output_dir / "transcription.mid"
 
         transcribe_piano(
             audio_path=downloaded.path,
@@ -325,21 +51,12 @@ def transcribe_source(
             cancellation_callback=cancellation_callback,
         )
 
-        if not midi_path.exists():
-            raise RuntimeError(
-                "Piano transcription did not "
-                "produce a MIDI file"
-            )
-
-        if midi_path.stat().st_size == 0:
-            raise RuntimeError(
-                "Piano transcription produced "
-                "an empty MIDI file"
-            )
+        check_midi(midi_path)
 
         if progress_callback:
             progress_callback(1.0)
 
         return midi_path
     finally:
-        remove_audio_files(output_dir)
+        # The job lifecycle removes the upload once the job ends.
+        remove_audio_files(output_dir, keep_upload=True)

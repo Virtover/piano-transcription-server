@@ -1,7 +1,8 @@
 import time
 
 from app.config import ensure_valid, settings
-from app.worker.tasks import cleanup_expired_jobs
+from app.outsource import routing
+from app.worker.tasks import cleanup_expired_jobs, job_key, redis
 
 
 # Billing reconciliation is not done here: this service has no access to the
@@ -10,6 +11,9 @@ def main() -> None:
     ensure_valid("cleanup")
     while True:
         cleanup_expired_jobs()
+        # Forget active jobs that ended without being counted out, for
+        # example after a worker crash, so routing does not overestimate load.
+        routing.prune_active(redis, job_key)
         time.sleep(settings.cleanup.interval)
 
 

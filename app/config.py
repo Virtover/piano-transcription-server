@@ -48,7 +48,7 @@ class ConfigError(ValueError):
 DURATION_UNITS = {"s": 1, "m": 60, "h": 60 * 60, "d": 24 * 60 * 60, "w": 7 * 24 * 60 * 60}
 
 
-def duration_seconds(value: str, name: str = "value") -> float:
+def duration_seconds(value: str, name: str = "value", allow_zero: bool = False) -> float:
     """Parse a duration such as 30s, 10m, 1.5h, 7d, or 1w into seconds."""
     text = str(value).strip().lower()
     try:
@@ -56,17 +56,21 @@ def duration_seconds(value: str, name: str = "value") -> float:
         multiplier = DURATION_UNITS[text[-1]]
     except (KeyError, ValueError, IndexError) as error:
         raise ValueError(f"{name} must use a format such as 30s, 10m, 12h, 7d, or 1w") from error
-    if not math.isfinite(amount) or amount <= 0:
-        raise ValueError(f"{name} must be positive")
+    if not math.isfinite(amount) or amount < 0 or (amount == 0 and not allow_zero):
+        raise ValueError(f"{name} must be {'zero or more' if allow_zero else 'positive'}")
     return amount * multiplier
 
 
-def _duration(value: Any) -> float:
+def _duration(value: Any, allow_zero: bool = False) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError("must be positive")
+        if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
+            raise ValueError("must be zero or more" if allow_zero else "must be positive")
         return float(value)
-    return duration_seconds(value, "the value")
+    return duration_seconds(value, "the value", allow_zero)
+
+
+def _duration_or_zero(value: Any) -> float:
+    return _duration(value, allow_zero=True)
 
 
 def _duration_text(value: Any) -> Any:
@@ -95,6 +99,8 @@ def _auto_or_positive_int(value: Any) -> int | None:
 
 # Seconds, parsed from s/m/h/d/w strings.
 Duration = Annotated[float, BeforeValidator(_duration)]
+# The same, but 0s is allowed.
+DurationOrZero = Annotated[float, BeforeValidator(_duration_or_zero)]
 # The original s/m/h/d/w string, validated. Used where the API returns it.
 DurationText = Annotated[str | None, BeforeValidator(_duration_text)]
 # None means `auto`.
@@ -195,6 +201,9 @@ class SecretSettings(BaseSettings):
         default=None,
         validation_alias="google_play_service_account.json",
     )
+    runpod_api_key: SecretStr | None = None
+    outsource_storage_access_key: SecretStr | None = None
+    outsource_storage_secret_key: SecretStr | None = None
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
@@ -202,9 +211,32 @@ class SecretSettings(BaseSettings):
 
 
 class OutsourceSettings(BaseSettings):
-    """Remote inference. Filled in when outsourcing is added."""
+    """Remote inference when local GPUs are overloaded."""
 
     model_config = _group_config("OUTSOURCE_")
+
+    provider: Literal["none", "runpod"] = "none"
+    # Outsource a job when its estimated local wait is longer than this.
+    max_wait: DurationOrZero = 120.0
+    # Maximum remote jobs at once (cost cap). Also the remote-worker thread count.
+    max_concurrency: int = Field(default=4, ge=1)
+    timeout: Duration = 15 * 60.0
+    # On remote failure, put the job back on the local queue instead of failing it.
+    fallback_local: bool = True
+    # S3-compatible storage used to hand audio to the remote provider.
+    storage_endpoint: str | None = None
+    storage_bucket: str | None = None
+    storage_region: str = "auto"
+    # Largest audio file the remote handler downloads.
+    max_audio_mb: float = Field(default=512, gt=0)
+
+
+class RunPodSettings(BaseSettings):
+    model_config = _group_config("RUNPOD_")
+
+    endpoint_id: str | None = None
+    # Override for local testing with the RunPod SDK's local API server.
+    api_base: str = "https://api.runpod.ai/v2"
 
 
 GROUPS: dict[str, type[BaseSettings]] = {
@@ -216,6 +248,7 @@ GROUPS: dict[str, type[BaseSettings]] = {
     "billing": BillingSettings,
     "google_play": GooglePlaySettings,
     "outsource": OutsourceSettings,
+    "runpod": RunPodSettings,
     "secrets": SecretSettings,
 }
 
@@ -230,6 +263,7 @@ class Settings:
     billing: BillingSettings
     google_play: GooglePlaySettings
     outsource: OutsourceSettings
+    runpod: RunPodSettings
     secrets: SecretSettings
     secrets_dir: str = SECRETS_DIR
 
@@ -390,9 +424,23 @@ def google_play_service_account_json(config: "Settings | None" = None) -> str | 
 
 
 def validate_settings(config: "Settings | None" = None, role: str = "all") -> list[str]:
-    """Cross-setting checks for a process role: api, worker, cleanup, or all."""
+    """Cross-setting checks for a process role: api, worker, remote, cleanup, or all."""
     config = config or settings
     problems = []
+    if role in ("api", "remote", "all") and config.outsource.provider == "runpod":
+        required = {
+            "RUNPOD_ENDPOINT_ID": config.runpod.endpoint_id,
+            "OUTSOURCE_STORAGE_ENDPOINT": config.outsource.storage_endpoint,
+            "OUTSOURCE_STORAGE_BUCKET": config.outsource.storage_bucket,
+        }
+        for name, value in required.items():
+            if not value:
+                problems.append(f"{name} is required when OUTSOURCE_PROVIDER=runpod")
+        for name in ("runpod_api_key", "outsource_storage_access_key", "outsource_storage_secret_key"):
+            if getattr(config.secrets, name) is None:
+                problems.append(
+                    f"OUTSOURCE_PROVIDER=runpod needs the secret file {config.secrets_dir}/{name}"
+                )
     if role in ("api", "all") and config.billing.provider == "google_play":
         if not config.google_play.package_name:
             problems.append("GOOGLE_PLAY_PACKAGE_NAME is required when BILLING_PROVIDER=google_play")
@@ -431,7 +479,10 @@ def format_duration(seconds: float) -> str:
 
 
 def is_duration(group: type[BaseSettings], field: str) -> bool:
-    return any(getattr(item, "func", None) is _duration for item in group.model_fields[field].metadata)
+    return any(
+        getattr(item, "func", None) in (_duration, _duration_or_zero)
+        for item in group.model_fields[field].metadata
+    )
 
 
 def describe(config: Settings) -> list[str]:

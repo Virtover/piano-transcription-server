@@ -1,0 +1,185 @@
+import math
+
+import pytest
+
+from app.outsource import routing
+from app.worker import tasks
+
+
+@pytest.fixture(autouse=True)
+def fake_redis(api_context):
+    """Every test here uses the in-memory Redis from api_context."""
+
+
+@pytest.fixture
+def outsourcing(api_context):
+    _, settings, _ = api_context
+    settings.outsource.provider = "runpod"
+    settings.outsource.max_wait = 120
+    settings.outsource.max_concurrency = 2
+    return settings
+
+
+def heartbeat(capacity, average=60.0):
+    routing.publish_heartbeat(tasks.redis, capacity, average)
+
+
+def busy(count):
+    """Add `count` more active local jobs."""
+    start = tasks.redis.scard(routing.ACTIVE_KEYS["local"])
+    for index in range(start, start + count):
+        tasks.redis.sadd(routing.ACTIVE_KEYS["local"], f"busy-{index}")
+
+
+def test_wait_estimate():
+    heartbeat(capacity=2, average=100)
+    assert routing.estimated_local_wait(tasks.redis) == 0
+
+    busy(2)
+    assert routing.estimated_local_wait(tasks.redis) == 100
+    busy(3)
+    assert routing.estimated_local_wait(tasks.redis) == 200
+
+
+def test_missing_heartbeat_means_no_local_capacity():
+    assert routing.local_capacity(tasks.redis) == (0, routing.DEFAULT_JOB_SECONDS)
+    assert routing.estimated_local_wait(tasks.redis) == math.inf
+
+
+def test_heartbeat_expires():
+    heartbeat(capacity=4)
+
+    assert 0 < tasks.redis.ttl(routing.HEARTBEAT_KEY) <= routing.HEARTBEAT_TTL
+
+
+def test_heartbeat_without_history_uses_default_duration():
+    routing.publish_heartbeat(tasks.redis, 3, None)
+
+    assert routing.local_capacity(tasks.redis) == (3, routing.DEFAULT_JOB_SECONDS)
+
+
+def test_provider_none_always_routes_locally(api_context):
+    busy(50)
+
+    assert routing.choose_backend(tasks.redis, "job") == "local"
+    assert tasks.redis.sismember(routing.ACTIVE_KEYS["local"], "job")
+
+
+def test_below_threshold_routes_locally(outsourcing):
+    heartbeat(capacity=2, average=100)
+    busy(2)
+
+    assert routing.choose_backend(tasks.redis, "job") == "local"
+
+
+def test_above_threshold_routes_remotely(outsourcing):
+    heartbeat(capacity=2, average=100)
+    busy(4)
+
+    assert routing.choose_backend(tasks.redis, "job") == "remote"
+    assert tasks.redis.sismember(routing.ACTIVE_KEYS["remote"], "job")
+    assert not tasks.redis.sismember(routing.ACTIVE_KEYS["local"], "job")
+
+
+def test_remote_concurrency_cap(outsourcing):
+    assert [routing.choose_backend(tasks.redis, f"job-{index}") for index in range(4)] == [
+        "remote",
+        "remote",
+        "local",
+        "local",
+    ]
+    assert tasks.redis.scard(routing.ACTIVE_KEYS["remote"]) == 2
+
+
+def test_zero_max_wait_outsources_whenever_local_is_full(outsourcing):
+    outsourcing.outsource.max_wait = 0.001
+    heartbeat(capacity=1)
+
+    assert routing.choose_backend(tasks.redis, "first") == "local"
+    assert routing.choose_backend(tasks.redis, "second") == "remote"
+
+
+def test_prune_forgets_finished_jobs(api_context):
+    tasks.redis.hset(tasks.job_key("running"), "status", "processing")
+    tasks.redis.hset(tasks.job_key("done"), "status", "completed")
+    for job_id in ("running", "done", "gone"):
+        tasks.redis.sadd(routing.ACTIVE_KEYS["local"], job_id)
+
+    assert routing.prune_active(tasks.redis, tasks.job_key) == 2
+    assert tasks.redis.smembers(routing.ACTIVE_KEYS["local"]) == {"running"}
+
+
+def test_fail_active_jobs_resets_counters(api_context):
+    busy(3)
+    tasks.redis.sadd(routing.ACTIVE_KEYS["remote"], "remote-job")
+
+    tasks.fail_active_jobs("restarted")
+
+    assert tasks.redis.scard(routing.ACTIVE_KEYS["local"]) == 0
+    assert tasks.redis.scard(routing.ACTIVE_KEYS["remote"]) == 0
+
+
+# --- API --------------------------------------------------------------------
+
+@pytest.fixture
+def sent(monkeypatch):
+    calls = {"local": [], "remote": []}
+    monkeypatch.setattr(tasks.transcribe_job, "send", lambda *args, **kwargs: calls["local"].append((args, kwargs)))
+    monkeypatch.setattr(tasks.transcribe_remote_job, "send", lambda *args, **kwargs: calls["remote"].append((args, kwargs)))
+    return calls
+
+
+def submit(client):
+    response = client.post("/api/transcriptions", json={"source_url": "https://example.com/video"})
+    assert response.status_code == 202
+    return response.json()["job_id"]
+
+
+def test_api_queues_locally_without_outsourcing(api_context, sent):
+    client, _, _ = api_context
+
+    job_id = submit(client)
+
+    assert sent["local"] == [((job_id, "https://example.com/video"), {})]
+    assert sent["remote"] == []
+    assert client.get(f"/api/transcriptions/{job_id}").json()["backend"] == "local"
+
+
+def test_api_outsources_when_local_is_overloaded(api_context, outsourcing, sent):
+    client, _, _ = api_context
+    heartbeat(capacity=1, average=300)
+    busy(1)
+
+    job_id = submit(client)
+
+    assert sent["remote"] == [((job_id, "https://example.com/video"), {})]
+    assert sent["local"] == []
+    status = client.get(f"/api/transcriptions/{job_id}").json()
+    assert status["backend"] == "remote"
+    assert set(status) >= {"job_id", "status", "progress", "title", "metadata", "error", "minutes"}
+
+
+def test_api_outsources_uploads_with_their_title(api_context, outsourcing, sent, monkeypatch):
+    from app.api.routes import transcriptions
+
+    client, _, _ = api_context
+    monkeypatch.setattr(transcriptions, "probe_audio", lambda path: 130.0)
+
+    response = client.post("/api/transcriptions/upload", params={"filename": "Song.mp3"}, content=b"audio")
+
+    job_id = response.json()["job_id"]
+    assert sent["remote"] == [((job_id,), {"upload_title": "Song"})]
+
+
+def test_api_unavailable_queue_frees_the_slot(api_context, outsourcing, monkeypatch):
+    client, _, billing = api_context
+
+    def broken(*args, **kwargs):
+        raise ConnectionError("broker down")
+
+    monkeypatch.setattr(tasks.transcribe_remote_job, "send", broken)
+
+    response = client.post("/api/transcriptions", json={"source_url": "https://example.com/video"})
+
+    assert response.status_code == 503
+    assert tasks.redis.scard(routing.ACTIVE_KEYS["remote"]) == 0

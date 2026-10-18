@@ -72,8 +72,8 @@ def test_main_passes_resolved_values_to_dramatiq(default_settings, cores, monkey
     monkeypatch.delenv("WORKER_THREADS", raising=False)
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
 
-    launcher.main()
+    launcher.main([])
 
-    assert calls == [["/usr/bin/dramatiq", "app.worker.tasks", "--processes", "1", "--threads", "6"]]
+    assert calls == [["/usr/bin/dramatiq", "app.worker.tasks", "--processes", "1", "--threads", "6", "--queues", "default"]]
     assert os.environ["OMP_NUM_THREADS"] == "6"
     assert "WORKER_THREADS" not in os.environ
