@@ -69,8 +69,8 @@ Optional. When local GPUs are overloaded, jobs run on [RunPod Serverless](https:
 4. Save the token's credentials as files and configure `.env`:
 
 ```powershell
-Set-Content -NoNewline secrets\outsource_storage_access_key '<Access Key ID>'
-Set-Content -NoNewline secrets\outsource_storage_secret_key '<Secret Access Key>'
+Set-Content -Path secrets\outsource_storage_access_key -Value '<Access Key ID>' -NoNewline
+Set-Content -Path secrets\outsource_storage_secret_key -Value '<Secret Access Key>' -NoNewline
 ```
 
 ```env
@@ -110,7 +110,7 @@ Batching makes busy periods cheaper: four 5-minute songs take about 10 s of GPU 
 Then create an API key under **Settings → API Keys** with **Restricted** permissions, giving access only to this endpoint, and configure the server. With `OUTSOURCE_MAX_CONCURRENCY=auto`, the key also needs read access to the endpoint's settings, so the server can read its max workers:
 
 ```powershell
-Set-Content -NoNewline secrets\runpod_api_key '<API key>'
+Set-Content -Path secrets\runpod_api_key -Value '<API key>' -NoNewline
 ```
 
 ```env
@@ -142,7 +142,7 @@ Test outsourcing without RunPod or R2 accounts. [SeaweedFS](https://github.com/s
 
 ```powershell
 docker network create piano-test
-Set-Content -NoNewline s3.json '{"identities":[{"name":"test","credentials":[{"accessKey":"test-access","secretKey":"test-secret"}],"actions":["Admin","Read","Write","List"]}]}'
+Set-Content -Path s3.json -Value '{"identities":[{"name":"test","credentials":[{"accessKey":"test-access","secretKey":"test-secret"}],"actions":["Admin","Read","Write","List"]}]}' -NoNewline
 docker run -d --name seaweed --network piano-test -v "${PWD}\s3.json:/etc/s3.json:ro" `
   chrislusf/seaweedfs server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/s3.json
 docker run --rm --network piano-test yt-piano-to-midi-server-api python -c "import boto3; boto3.client('s3', endpoint_url='http://seaweed:8333', region_name='us-east-1', aws_access_key_id='test-access', aws_secret_access_key='test-secret').create_bucket(Bucket='piano-audio')"
