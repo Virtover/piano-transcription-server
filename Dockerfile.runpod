@@ -1,6 +1,7 @@
 # RunPod Serverless worker: Transkun inference only. Build and push:
 #   docker build -f Dockerfile.runpod -t <registry>/piano-transcription-runpod:<version> .
-FROM nvidia/cuda:12.6.0-cudnn-runtime-ubuntu22.04
+# CUDA 12.8+ lets RunPod schedule the image on its newest GPUs too.
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 WORKDIR /app
 
@@ -12,8 +13,14 @@ RUN apt-get update \
 
 COPY requirements.runpod.txt .
 
+# torch brings its own CUDA libraries, and RunPod picks hosts by the base
+# image's CUDA version. Install torch for that version, not the PyPI default
+# (CUDA 13), or it fails on hosts whose driver supports only 12.8.
 RUN python3 -m pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch torchaudio \
     && pip install --no-cache-dir -r requirements.runpod.txt
+
+RUN python3 -c "import torch; assert torch.version.cuda.startswith('12.8'), f'torch is built for CUDA {torch.version.cuda}, need 12.8'"
 
 # The model weights ship inside the transkun package, so they are part of the
 # image. Fail the build if they are missing or unreadable.
