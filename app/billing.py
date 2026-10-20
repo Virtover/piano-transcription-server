@@ -10,6 +10,7 @@ from app.config import duration_seconds as parse_duration, settings
 
 DELETED_USER_ID = "deleted"
 BACKUP_FILE_PATTERN = re.compile(r"^billing-(\d+)\.sqlite3$")
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 
 
 def transcription_cost(duration_seconds: float) -> int:
@@ -55,6 +56,25 @@ class Billing:
                     user_hash TEXT PRIMARY KEY,
                     free_grant_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS job_diagnostics (
+                    job_id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    source TEXT,
+                    source_url TEXT,
+                    duration_seconds REAL,
+                    cost_minutes INTEGER,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    backend TEXT,
+                    outsourced INTEGER NOT NULL DEFAULT 0,
+                    requeue_reason TEXT,
+                    created_at INTEGER NOT NULL,
+                    started_at INTEGER,
+                    finished_at INTEGER,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS job_diagnostics_user_index ON job_diagnostics (user_id);
+                CREATE INDEX IF NOT EXISTS job_diagnostics_created_index ON job_diagnostics (created_at);
                 """
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
@@ -287,6 +307,7 @@ class Billing:
             ).fetchone()
             connection.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
             connection.execute("DELETE FROM transcription_reservations WHERE user_id = ?", (user_id,))
+            connection.execute("DELETE FROM job_diagnostics WHERE user_id = ?", (user_id,))
             connection.execute(
                 "UPDATE purchases SET user_id = ? WHERE user_id = ?",
                 (DELETED_USER_ID, user_id),
@@ -299,6 +320,62 @@ class Billing:
                         (_user_hash(user_id), user["free_grant_at"]),
                     )
             return user is not None
+
+    def record_job(self, job_id: str, job: dict[str, str]) -> None:
+        """Save a snapshot of a job's state, which outlives the Redis job.
+        The first start and the first terminal state keep their time."""
+        status = job.get("status", "unknown")
+        now = int(time.time())
+        try:
+            duration = float(job["duration"]) if job.get("duration") else None
+        except ValueError:
+            duration = None
+        try:
+            cost = int(job["full_cost"]) if job.get("full_cost") else None
+        except ValueError:
+            cost = None
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO job_diagnostics
+                   (job_id, user_id, source, source_url, duration_seconds, cost_minutes,
+                    status, error, backend, outsourced, requeue_reason,
+                    created_at, started_at, finished_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (job_id) DO UPDATE SET
+                       status = excluded.status,
+                       error = excluded.error,
+                       backend = excluded.backend,
+                       outsourced = excluded.outsourced,
+                       requeue_reason = COALESCE(excluded.requeue_reason, requeue_reason),
+                       started_at = COALESCE(started_at, excluded.started_at),
+                       finished_at = COALESCE(finished_at, excluded.finished_at),
+                       updated_at = excluded.updated_at""",
+                (
+                    job_id,
+                    job.get("user_id"),
+                    job.get("source") or "url",
+                    job.get("source_url"),
+                    duration,
+                    cost,
+                    status,
+                    job.get("error"),
+                    job.get("backend"),
+                    1 if job.get("outsourced") == "1" else 0,
+                    job.get("requeue_reason"),
+                    now,
+                    now if status == "processing" else None,
+                    now if status in TERMINAL_JOB_STATUSES else None,
+                    now,
+                ),
+            )
+
+    def prune_job_diagnostics(self, max_age_seconds: float, now: float | None = None) -> int:
+        cutoff = (time.time() if now is None else now) - max_age_seconds
+        with self._connect() as connection:
+            return connection.execute(
+                "DELETE FROM job_diagnostics WHERE created_at < ?",
+                (int(cutoff),),
+            ).rowcount
 
     def backup(self, destination: str) -> None:
         Path(destination).parent.mkdir(parents=True, exist_ok=True)

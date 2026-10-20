@@ -105,6 +105,7 @@ The endpoint returns `204 No Content`. It removes:
 
 * the user's balance, email, and Google account ID,
 * transcription reservations,
+* job diagnostics records (source URLs, errors, and timings of past jobs),
 * all of the user's jobs in Redis, including source URLs and metadata, and their MIDI and audio files. Running jobs stop without being charged.
 
 Remaining minutes are lost, and deletion cannot be undone. Signing in again creates a new, empty account.

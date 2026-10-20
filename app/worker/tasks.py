@@ -57,6 +57,17 @@ def update_job(job_id: str, **values):
     )
 
 
+def record_job(job_id: str) -> None:
+    """Save the job's current state to its diagnostics record, which is kept
+    after the Redis job expires. Never fails the caller."""
+    try:
+        job = redis.hgetall(job_key(job_id))
+        if job:
+            billing.record_job(job_id, job)
+    except Exception:
+        logger.exception("Could not record diagnostics for job %s", job_id)
+
+
 def is_job_cancelled(job_id: str) -> bool:
     return redis.hget(job_key(job_id), "status") != "processing"
 
@@ -193,6 +204,7 @@ def fail_active_jobs(reason: str) -> None:
                     )
                     pipe.expire(key, JOB_TTL)
                     pipe.execute()
+                    record_job(key.removeprefix("transcription:"))
                     if job.get("user_id"):
                         billing.release(key.removeprefix("transcription:"))
                     shutil.rmtree(
@@ -276,6 +288,7 @@ def run_job(
     try:
         if not claim_job(job_id):
             return
+        record_job(job_id)
         started = time.monotonic()
         output_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -291,6 +304,7 @@ def run_job(
 
         if not complete_job(job_id, midi_path):
             return
+        record_job(job_id)
         billing.settle_success(job_id)
         remove_audio_files(output_dir)
         if backend == "local":
@@ -315,6 +329,7 @@ def run_job(
             status="failed",
             error=str(e),
         )
+        record_job(job_id)
         remove_audio_files(output_dir)
 
         redis.expire(
@@ -340,6 +355,7 @@ def finish_cancelled(job_id: str, output_dir: Path) -> None:
         job_id,
         status="cancelled",
     )
+    record_job(job_id)
     redis.expire(
         job_key(job_id),
         JOB_TTL,
@@ -383,11 +399,15 @@ def requeue_job(job_id: str, source: routing.Backend, target: routing.Backend, r
                         routing.mark_finished(redis, "remote", job_id)
                     return False
                 pipe.multi()
-                pipe.hset(key, mapping={"status": "queued", "backend": target, "outsourced": "1"})
+                pipe.hset(
+                    key,
+                    mapping={"status": "queued", "backend": target, "outsourced": "1", "requeue_reason": reason},
+                )
                 pipe.execute()
                 break
         except WatchError:
             continue
+    record_job(job_id)
 
     routing.move(redis, job_id, source, target)
     logger.warning("Job %s moved from %s to %s: %s", job_id, source, target, reason)
@@ -396,6 +416,7 @@ def requeue_job(job_id: str, source: routing.Backend, target: routing.Backend, r
     except Exception:
         logger.exception("Could not requeue job %s", job_id)
         update_job(job_id, status="processing", backend=source)
+        record_job(job_id)
         routing.move(redis, job_id, target, source)
         return False
     return True

@@ -36,6 +36,7 @@ python -m pytest -q -k cancellation
 | `test_account_api.py` | Account deletion: removed data, kept anonymous purchases, running jobs, free-minute abuse protection, and the `admin_delete` command. |
 | `test_billing.py` | Cost formulas, reservations and settlement, free minutes, and the `admin_credit` command. |
 | `test_backups.py` | Backup creation, retention pruning, interval and retention settings, and duration parsing. |
+| `test_job_diagnostics.py` | Job diagnostics records at each job state, survival after the Redis job expires, account deletion, pruning, and inclusion in backups. |
 | `test_worker_tasks.py` | Worker job lifecycle, billing reconciliation, restart handling, and file cleanup. |
 | `test_auth.py` | Google token checks: audience, expiry, verified email, userinfo fallback, caching, and outages. |
 | `test_url_safety.py` | Source URL validation: allowed hosts, schemes, ports, credentials, and private addresses. |

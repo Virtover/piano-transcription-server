@@ -50,6 +50,24 @@ Uploaded files are untrusted. Only common audio and video container formats are 
 
 Billing backups are pruned by the API after each backup, using `BILLING_BACKUP_RETENTION`.
 
+### 🩺 Job diagnostics
+
+Redis job state disappears an hour after a job ends, so each job also has a record in the `job_diagnostics` table of the billing database. Because it is in that database, the hourly billing backups include it. A record is written when the job is queued, starts, is moved between backends, and ends, and holds:
+
+* job ID, user ID, source (`url` or `upload`), and the source URL (none for uploads; the file name is not stored),
+* audio duration and reserved cost,
+* status, error message, backend, whether the job was outsourced, and why it was last moved between backends,
+* times queued, first started, first finished, and last updated (Unix seconds).
+
+Records older than `BILLING_JOB_DIAGNOSTICS_RETENTION` (default `30d`) are deleted before each backup. Deleting an account deletes its records. Writing a record never fails a job; errors are logged.
+
+To look at recent failures, query a backup copy or the live database:
+
+```sql
+SELECT job_id, datetime(created_at, 'unixepoch'), backend, outsourced, error
+FROM job_diagnostics WHERE status = 'failed' ORDER BY created_at DESC LIMIT 20;
+```
+
 ## ☁️ Outsourcing
 
 With `OUTSOURCE_PROVIDER=runpod`, jobs can run on RunPod Serverless when the local GPU is busy.

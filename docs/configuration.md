@@ -56,6 +56,7 @@ The command validates everything, prints the resolved configuration with secrets
 | `FREE_MINUTES_PERIOD` | `30d` | How often free minutes are topped up. |
 | `BILLING_BACKUP_INTERVAL` | `1h` | How often the billing database is backed up. |
 | `BILLING_BACKUP_RETENTION` | `30d` | Age after which automatic backups are deleted. |
+| `BILLING_JOB_DIAGNOSTICS_RETENTION` | `30d` | Age after which job diagnostics records are deleted. See [Job diagnostics](architecture.md#-job-diagnostics). |
 | `GOOGLE_OAUTH_CLIENT_IDS` | `[]` | Public OAuth client IDs whose Google ID tokens are accepted. Required for billing. |
 | `GOOGLE_PLAY_PACKAGE_NAME` | unset | Android package name used for Google Play verification. Required for billing. |
 
@@ -272,7 +273,7 @@ BILLING_BACKUP_INTERVAL=6h
 BILLING_BACKUP_RETENTION=14d
 ```
 
-Data from a deleted account stays in older backups until they expire, so the retention period is also the longest time deleted data is kept. Copies you make elsewhere are not pruned; apply the same retention to them.
+Data from a deleted account stays in older backups until they expire, so the retention period is also the longest time deleted data is kept. Job diagnostics records are in the same database, so a record can survive in backups for up to `BILLING_JOB_DIAGNOSTICS_RETENTION` plus `BILLING_BACKUP_RETENTION` (60 days with the defaults). Copies you make elsewhere are not pruned; apply the same retention to them.
 
 These backups are on the same disk as the live database. They protect against a bad migration, a wrong manual edit, or file corruption, but not against losing the machine or the disk. Copy `./billing-data/backups` to another location regularly, for example with `rclone` or `rsync` from a host cron job, and encrypt the copy first (for example with `age`). The files contain user emails, Google account IDs, and purchase tokens.
 

@@ -179,6 +179,7 @@ class BillingSettings(BaseSettings):
     backup_dir: str = "/billing/backups"
     backup_interval: Duration = 60 * 60.0
     backup_retention: Duration = 30 * 24 * 60 * 60.0
+    job_diagnostics_retention: Duration = 30 * 24 * 60 * 60.0
     free_minutes: int | None = Field(default=None, ge=0, validation_alias="FREE_MINUTES")
     free_minutes_period: DurationText = Field(default=None, validation_alias="FREE_MINUTES_PERIOD")
 

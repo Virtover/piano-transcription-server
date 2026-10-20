@@ -21,6 +21,7 @@ from app.worker.tasks import (
     JOB_TTL,
     UPLOAD_FILE_NAME,
     job_key,
+    record_job,
     send_job,
 )
 
@@ -150,6 +151,7 @@ def queue_job(
             status_code=503,
             detail="The transcription worker is unavailable",
         ) from error
+    record_job(job_id)
 
     return CreateTranscriptionResponse(
         job_id=job_id,
@@ -346,6 +348,7 @@ def cancel_transcription(
                 )
                 pipe.expire(key, JOB_TTL)
                 pipe.execute()
+                record_job(job_id)
                 user = job.get("user_id")
                 charged = int(job.get("full_cost", 0))
                 progress = float(job.get("progress", 0))
