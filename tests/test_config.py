@@ -372,7 +372,7 @@ def test_outsourcing_defaults(tmp_path):
     settings = load(tmp_path)
 
     assert settings.outsource.provider == "none"
-    assert settings.outsource.max_wait == 120
+    assert settings.outsource.max_wait == 30
     assert settings.outsource.max_concurrency == 4
     assert settings.outsource.timeout == 900
     assert settings.outsource.fallback_local is True

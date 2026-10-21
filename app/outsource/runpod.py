@@ -41,11 +41,12 @@ class RunPodProvider:
         self.session = session or requests.Session()
 
     @classmethod
-    def from_settings(cls) -> "RunPodProvider":
-        api_key = settings.secrets.runpod_api_key
-        if api_key is None or not settings.runpod.endpoint_id:
+    def from_settings(cls, config=None) -> "RunPodProvider":
+        config = config or settings
+        api_key = config.secrets.runpod_api_key
+        if api_key is None or not config.runpod.endpoint_id:
             raise RemoteFailed("RunPod is not configured")
-        return cls(settings.runpod.api_base, settings.runpod.endpoint_id, api_key.get_secret_value())
+        return cls(config.runpod.api_base, config.runpod.endpoint_id, api_key.get_secret_value())
 
     def _request(self, method: str, path: str, timeout: float, **kwargs) -> requests.Response:
         try:
@@ -99,6 +100,21 @@ class RunPodProvider:
         if state == "failed":
             return RemoteStatus(state, error=str(data.get("error") or data.get("status")))
         return RemoteStatus(state)
+
+    def endpoint_settings(self) -> dict[str, Any]:
+        """The endpoint's configuration from RunPod's REST API, including its
+        template (image and environment). Needs read access to endpoints."""
+        try:
+            response = self.session.request(
+                "GET",
+                f"{REST_API_BASE}/endpoints/{self.endpoint_id}",
+                params={"includeTemplate": "true"},
+                headers=self._headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as error:
+            raise RemoteFailed(f"RunPod is unreachable ({type(error).__name__})") from error
+        return self._json(response, "endpoint settings")
 
     def max_workers(self) -> int | None:
         """The endpoint's max workers setting, read from RunPod's REST API.

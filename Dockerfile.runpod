@@ -1,7 +1,8 @@
 # RunPod Serverless worker: Transkun inference only. Build and push:
 #   docker build -f Dockerfile.runpod -t <registry>/piano-transcription-runpod:<version> .
-# CUDA 12.8+ lets RunPod schedule the image on its newest GPUs too.
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+# CUDA 12.8+ lets RunPod schedule the image on its newest GPUs too. The base
+# image has no cuDNN or CUDA libraries: torch installs its own.
+FROM nvidia/cuda:12.8.1-base-ubuntu22.04
 
 WORKDIR /app
 

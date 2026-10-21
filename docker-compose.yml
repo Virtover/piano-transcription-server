@@ -46,7 +46,7 @@ services:
   # Sends jobs to the outsourcing provider when local GPUs are overloaded.
   # Start with: docker compose --profile outsource up -d
   # It downloads and converts audio here and needs no GPU, so it runs on the
-  # API image. See docs/setup.md.
+  # API image. See docs/runpod.md.
   remote-worker:
     build:
       context: .

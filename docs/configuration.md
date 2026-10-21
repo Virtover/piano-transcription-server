@@ -17,6 +17,29 @@ docker compose run --rm api python -m app.config check
 
 The command validates everything, prints the resolved configuration with secrets masked, and exits with code `1` on errors. Outside Docker, run `python -m app.config check --env-file .env --secrets-dir secrets`.
 
+It works offline, so it cannot tell whether a key is *correct*. Add `--online` to test each configured service with the real credentials:
+
+```powershell
+docker compose run --rm api python -m app.config check --online
+```
+
+| Service | Tested when | What is tested |
+| --- | --- | --- |
+| Storage | `OUTSOURCE_PROVIDER=runpod` | Uploads a small object, downloads it through a presigned URL like the RunPod handler, and deletes it. |
+| RunPod | `OUTSOURCE_PROVIDER=runpod` | The endpoint's health, and its settings against the requirements below: image, `OUTSOURCE_STORAGE_ENDPOINT`, allowed CUDA versions, execution timeout, workers, scaling, and idle timeout. |
+| Google sign-in | `BILLING_PROVIDER=google_play` | The format of `GOOGLE_OAUTH_CLIENT_IDS`. Google can only confirm a client ID with a signed-in user's token. |
+| Google Play | `BILLING_PROVIDER=google_play` | Lists the products with the service account and compares them with `BILLING_PRODUCTS`. |
+
+Each result is `OK`, `WARN`, `FAIL`, or `SKIP`, and every warning or failure names the likely fix. The command exits with code `1` if any check fails. It never prints secrets or presigned URLs.
+
+### 📋 External service requirements
+
+```powershell
+docker compose run --rm api python -m app.config requirements
+```
+
+Prints what the external services must provide for outsourcing, sign-in, and billing: each requirement, its value, and the reason. Values are calculated from the configuration and the code, so they cannot go out of date. For example, the GPU endpoint's minimum execution timeout follows `OUTSOURCE_TIMEOUT`, and its requests per worker follow `WORKER_MODEL_MEMORY_GIB` and `WORKER_MEMORY_PER_JOB_GIB`. Requirements are stated as what they must achieve, not as a provider's setting names, so they stay valid when a provider changes its console. Those marked `[checked]` are verified by `check --online`. Add `--json` for scripts and AI agents.
+
 ### ⏱️ Value formats
 
 * **Durations** use a number and a unit: `s`, `m`, `h`, `d`, or `w`, for example `2s`, `10m`, `1.5h`, `30d`. A plain number is rejected, so `600` cannot be mistaken for minutes.
@@ -64,12 +87,12 @@ The command validates everything, prints the resolved configuration with secrets
 
 ### Outsourcing
 
-When local GPUs are overloaded, jobs can run on RunPod Serverless. Only the model runs remotely; downloading and converting stay on this server. See [Outsourcing to RunPod](setup.md#-outsourcing-to-runpod) and [how routing works](architecture.md#-outsourcing).
+When local GPUs are overloaded, jobs can run on RunPod Serverless. Only the model runs remotely; downloading and converting stay on this server. See [Outsourcing to RunPod](runpod.md) and [how routing works](architecture.md#-outsourcing).
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `OUTSOURCE_PROVIDER` | `none` | `none` or `runpod`. With `none`, nothing is outsourced and the `remote-worker` service is not needed. |
-| `OUTSOURCE_MAX_WAIT` | `2m` | Outsource a job when its estimated local wait is longer than this. `0s` outsources whenever every local slot is busy. |
+| `OUTSOURCE_MAX_WAIT` | `30s` | Outsource a job when its estimated local wait is longer than this. The estimate is a whole number of average local job durations, so a value below that average outsources as soon as every local slot is busy. `0s` always does. |
 | `OUTSOURCE_MAX_CONCURRENCY` | `4` | Maximum jobs assigned to the remote backend at once, queued or running. Also the `remote-worker` thread count, because each remote job holds a thread while it downloads, converts, and waits for RunPod. `auto`: the RunPod endpoint's max workers times the requests one worker takes. See [below](#outsource_max_concurrencyauto). |
 | `OUTSOURCE_TIMEOUT` | `15m` | How long a remote job may take, including RunPod's queue and cold start. It is then cancelled. |
 | `OUTSOURCE_FALLBACK_LOCAL` | `true` | When a remote job fails or times out, put it back on the local queue instead of failing it. |

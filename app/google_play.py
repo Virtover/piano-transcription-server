@@ -15,24 +15,24 @@ def is_configured() -> bool:
     return bool(settings.google_play.package_name and google_play_service_account_json())
 
 
-def android_publisher():
+def android_publisher(config=None):
     """An Android Publisher API client using the service-account secret."""
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
     credentials = service_account.Credentials.from_service_account_info(
-        json.loads(google_play_service_account_json() or "{}"),
+        json.loads(google_play_service_account_json(config) or "{}"),
         scopes=[ANDROID_PUBLISHER_SCOPE],
     )
     return build("androidpublisher", "v3", credentials=credentials)
 
 
-def _list_product_ids(service) -> set[str]:
+def list_product_ids(service, package_name: str | None = None) -> set[str]:
     products = set()
     page_token = None
 
     while True:
-        arguments = {"packageName": settings.google_play.package_name}
+        arguments = {"packageName": package_name or settings.google_play.package_name}
         if page_token:
             arguments["pageToken"] = page_token
         response = service.monetization().onetimeproducts().list(**arguments).execute()
@@ -57,7 +57,7 @@ def sync_products() -> None:
         return
 
     try:
-        products = _list_product_ids(android_publisher())
+        products = list_product_ids(android_publisher())
     except Exception as error:
         synced_products = set()
         logger.warning("Could not sync Google Play products: %s", error)

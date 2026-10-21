@@ -109,6 +109,13 @@ def device_free_memory(
     return free_memory, total_memory
 
 
+def job_capacity(free_memory: float, config=None) -> int:
+    """Jobs that fit in free_memory bytes of VRAM next to one model."""
+    worker = (config or settings).worker
+    available_memory = max(0, free_memory - worker.model_memory_gib * 1024**3)
+    return int(available_memory // (worker.memory_per_job_gib * 1024**3))
+
+
 def cuda_job_capacities() -> list[tuple[int, int, int, int]] | None:
     try:
         import torch
@@ -116,8 +123,6 @@ def cuda_job_capacities() -> list[tuple[int, int, int, int]] | None:
         if not torch.cuda.is_available():
             return None
 
-        model_budget = settings.worker.model_memory_gib * 1024**3
-        job_budget = settings.worker.memory_per_job_gib * 1024**3
         capacities = []
         smi_free_memory = nvidia_smi_free_memory()
         for device_index in range(torch.cuda.device_count()):
@@ -126,8 +131,7 @@ def cuda_job_capacities() -> list[tuple[int, int, int, int]] | None:
                 device_index,
                 smi_free_memory,
             )
-            available_memory = max(0, free_memory - model_budget)
-            capacity = int(available_memory // job_budget)
+            capacity = job_capacity(free_memory)
             capacities.append(
                 (
                     device_index,

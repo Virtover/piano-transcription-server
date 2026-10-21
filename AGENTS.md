@@ -1,0 +1,51 @@
+# Agent guide
+
+Piano Transcription Server: a FastAPI API, Dramatiq workers, and Redis, run with Docker Compose. It transcribes piano audio from a video URL or an upload to MIDI with Transkun, on a local GPU or, when that is busy, on RunPod Serverless. Billing (Google Play) and sign-in (Google OAuth) are optional. Human documentation is in `docs/`; start from `README.md`.
+
+## Commands
+
+```powershell
+.\.venv\Scripts\python -m pytest -q                              # all tests; no Docker, GPU, or credentials needed
+docker compose run --rm api python -m app.config check           # validate .env and secrets, offline
+docker compose run --rm api python -m app.config check --online  # also test storage, RunPod, Google Play for real
+docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents
+docker compose up -d --build                                     # the stack; add --profile outsource for RunPod
+```
+
+`check --online` is the way to confirm a setup step worked. Code changes reach the containers only after a rebuild, for example `docker compose build api`.
+
+## Layout
+
+| Path | What |
+| --- | --- |
+| `app/config.py` | All settings (typed, grouped by prefix), validation, and the `check` and `requirements` commands |
+| `app/requirements.py` | What external services must provide, derived from the configuration |
+| `app/online_check.py` | The `check --online` service checks |
+| `app/api/routes/` | HTTP endpoints |
+| `app/worker/tasks.py` | Job lifecycle, billing settlement, local and remote actors |
+| `app/outsource/` | Routing between local and RunPod, storage, the RunPod client |
+| `app/transcription/` | Audio, batching, and the model |
+| `app/billing.py` | SQLite billing database, also job diagnostics |
+| `runpod/handler.py` | The RunPod Serverless handler, built with `Dockerfile.runpod` |
+
+## Conventions
+
+- **Secrets are files** in `secrets/` (mounted at `/run/secrets`), never `.env` values. `.env` holds only choices; container paths are in `docker-compose.yml`.
+- **Every setting is documented** in `docs/configuration.md`; a test fails otherwise. Durations use units (`30s`, `2m`, `1d`).
+- **Docs and skills describe only this project.** What a provider must offer lives in `app/requirements.py`, stated as an intent with its reason ("signed links must work from any IP address"), with values calculated from settings and code. Never add provider menu paths or setting names to docs or skills: they go stale. Where a provider's API can read a setting, verify it in `app/online_check.py`.
+- Match the surrounding code's style and comment density. Add or update tests with every change.
+
+## Setup tasks
+
+For guided setup, use the skills in `.claude/skills/`: `setup-runpod` for outsourcing, `setup-google` for sign-in and billing. Their rules apply to any agent:
+
+- Take the requirements from `requirements --json`, and look up the providers' current documentation for where each is set.
+- Never ask for a secret in the chat or read secret files; give the user the command to write it, then check the file exists.
+- Ask before outward-facing actions: pushing images, changing a cloud account.
+
+## Pitfalls
+
+- `Set-Content -NoNewline <file> <value>` swaps its arguments in Windows PowerShell 5.1 and creates a file named after the secret. Always use `Set-Content -Path <file> -Value <value> -NoNewline`.
+- Only `secrets/` is git-ignored for secrets: check `git status` for stray files after writing one.
+- The RunPod image installs PyTorch for a fixed CUDA version, `RUNPOD_CUDA_VERSION` in `app/requirements.py`; a test keeps `Dockerfile.runpod` in sync with it. pip's default PyTorch targets a newer CUDA and fails on hosts whose driver does not support it.
+- Every image build is about 8 GB. When Docker Desktop's disk fills up, builds fail with `error reading from server: EOF` and Docker stops starting. See "Freeing disk space" in `docs/setup.md`.

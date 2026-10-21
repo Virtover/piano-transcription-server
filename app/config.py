@@ -218,7 +218,7 @@ class OutsourceSettings(BaseSettings):
 
     provider: Literal["none", "runpod"] = "none"
     # Outsource a job when its estimated local wait is longer than this.
-    max_wait: DurationOrZero = 120.0
+    max_wait: DurationOrZero = 30.0
     # Maximum remote jobs at once. `auto`: the RunPod endpoint's max workers
     # times the requests one worker takes (see app/outsource/capacity.py).
     max_concurrency: AutoInt = 4
@@ -519,9 +519,23 @@ def main(arguments: list[str]) -> int:
     check = subcommands.add_parser("check", help="validate the configuration and print it")
     check.add_argument("--env-file", default=".env", help="env file to read (default: .env)")
     check.add_argument("--secrets-dir", default=SECRETS_DIR)
+    check.add_argument(
+        "--online",
+        action="store_true",
+        help="also test the configured services (storage, RunPod, Google Play) with the real credentials",
+    )
+    requirements = subcommands.add_parser(
+        "requirements",
+        help="print what the external services must provide, derived from the configuration",
+    )
+    requirements.add_argument("--env-file", default=".env", help="env file to read (default: .env)")
+    requirements.add_argument("--secrets-dir", default=SECRETS_DIR)
+    requirements.add_argument("--json", action="store_true", help="print JSON, for scripts and AI agents")
     args = parser.parse_args(arguments)
 
     logging.basicConfig(level=logging.WARNING, format="warning: %(message)s")
+    if args.command == "requirements":
+        return print_requirements(args)
     try:
         config = load_settings(args.env_file, args.secrets_dir)
         problems = validate_settings(config, "all")
@@ -536,6 +550,32 @@ def main(arguments: list[str]) -> int:
             print(f"  - {problem}", file=sys.stderr)
         return 1
     print("\nConfiguration OK")
+    if args.online:
+        from app.online_check import format_results, run_checks
+
+        print("\nOnline checks:")
+        results = run_checks(config)
+        print("\n".join(format_results(results)))
+        if any(result.status == "fail" for result in results):
+            return 1
+    return 0
+
+
+def print_requirements(args) -> int:
+    from app.requirements import build_requirements, format_requirements, requirements_json
+
+    try:
+        config = load_settings(args.env_file, args.secrets_dir)
+    except ConfigError as error:
+        print("Configuration errors:", file=sys.stderr)
+        for problem in error.problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 1
+    sections = build_requirements(config)
+    if args.json:
+        print(json.dumps(requirements_json(sections), indent=2))
+    else:
+        print("\n".join(format_requirements(sections)))
     return 0
 
 

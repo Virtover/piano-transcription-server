@@ -1,59 +1,51 @@
 # 💳 Google Play billing
 
-This guide covers the additional setup required when `BILLING_PROVIDER=google_play`. Uncomment the billing section of [.env.example](../.env.example) in your `.env`, and see [Configuration](configuration.md#billing) for every setting.
+This guide covers the additional setup required when `BILLING_PROVIDER=google_play`. Set up [Google sign-in](google-sign-in.md) first: billing needs it. Uncomment the billing section of [.env.example](../.env.example) in your `.env`, and see [Configuration](configuration.md#billing) for every setting.
 
-## 🔐 Google Cloud and OAuth
+## 🧭 Setting it up
 
-1. In Google Cloud Console, create the OAuth 2.0 client IDs used by the application, including the **Android client ID** and **Web client ID**.
-2. Put the public client IDs in `.env`:
-
-```env
-GOOGLE_OAUTH_CLIENT_IDS=["123456789-android-example.apps.googleusercontent.com","123456789-web-example.apps.googleusercontent.com"]
-```
-
-3. Configure the Android client to request Google ID tokens whose audience is one of these IDs.
-
-The client IDs are public configuration. Never commit OAuth client secrets or service-account credentials.
-
-## 🔑 Google Play service account
-
-1. Create or select a Google Cloud service account.
-2. Enable the Android Publisher API for its project.
-3. Grant the service account access to the Android application in Google Play Console with permission to view and manage orders and subscriptions, as required by the Publisher API.
-4. Download its JSON key and save it as `secrets/google_play_service_account.json`. Do not commit it.
-5. Set the package name in `.env`:
-
-```env
-GOOGLE_PLAY_PACKAGE_NAME=com.example.pianoweave
-```
-
-Compose mounts `./secrets` at `/run/secrets`, so the key is read from `/run/secrets/google_play_service_account.json` inside the containers. Secrets are only read from files, never from `.env`. Older setups that use `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` keep working, with a deprecation warning.
-
-6. Check the configuration. The API refuses to start if the package name, the OAuth client IDs, or the key is missing:
+The server lists products and verifies and consumes purchases through the Google Play Developer API, as a service account. What you must create, with the reasons, comes from the server itself:
 
 ```powershell
-docker compose run --rm api python -m app.config check
+docker compose run --rm api python -m app.config requirements
 ```
 
-## 🛍️ Products and free minutes
+See the **Google Play** section of its output: the API, the service account and its key, its access in Play Console, and the products from `BILLING_PRODUCTS`.
 
-Create the one-time products in Google Play Console, then map their exact product IDs to transcription minutes:
+> [!TIP]
+> With an AI coding agent such as Claude Code, run `/setup-google`. It turns each requirement into Google's current settings, guides you through them, and verifies the result.
 
-```env
-BILLING_PRODUCTS={"transcription_25":25,"transcription_60":60,"transcription_300":300}
+1. **Create what `requirements` lists**, using Google's documentation: [Play Developer API access](https://developers.google.com/android-publisher/getting_started), [one-time products](https://support.google.com/googleplay/android-developer/answer/1153481), and [testing billing](https://developer.android.com/google/play/billing/test).
+2. **Save the service account's JSON key** under the exact name the server expects:
 
-FREE_MINUTES=10
+   ```powershell
+   Move-Item "$env:USERPROFILE\Downloads\<downloaded-key>.json" secrets\google_play_service_account.json
+   ```
 
-FREE_MINUTES_PERIOD=30d
-```
+   The key gives access to your app's orders: never commit, email, or paste it. Compose mounts `./secrets` at `/run/secrets`, so the containers read `/run/secrets/google_play_service_account.json`. Older setups that use `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` keep working, with a deprecation warning.
 
-Only products confirmed by the startup synchronization are advertised through `/api/server-info`. Restart the API after adding or changing products:
+3. **Configure `.env`.** Map every product ID to the transcription minutes it buys:
 
-```powershell
-docker compose restart api
-```
+   ```env
+   GOOGLE_PLAY_PACKAGE_NAME=com.example.pianoweave
+   BILLING_PRODUCTS={"transcription_25":25,"transcription_60":60,"transcription_300":300}
+   FREE_MINUTES=10
+   FREE_MINUTES_PERIOD=30d
+   ```
 
-There is currently no on-demand synchronization endpoint.
+   Only products that exist in Play Console **and** are listed in `BILLING_PRODUCTS` are offered through `/api/server-info`. The API reads the products at startup, so restart it after changes; there is no on-demand synchronization endpoint:
+
+   ```powershell
+   docker compose restart api
+   ```
+
+4. **Verify.** `check --online` lists the products with the service account and compares them with `BILLING_PRODUCTS`. A failure names the likely cause: a rejected key, missing permissions, or a wrong package name. Products in only one of the two places are reported as warnings.
+
+   ```powershell
+   docker compose run --rm api python -m app.config check --online
+   ```
+
+   A 401 or 403 right after giving the service account access is usually Google's delay in applying new permissions, which can take up to a day.
 
 ## 🔄 Purchase flow
 

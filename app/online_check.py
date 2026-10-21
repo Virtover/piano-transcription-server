@@ -1,0 +1,375 @@
+"""`python -m app.config check --online`: test each configured service with
+the real credentials, so a wrong key fails here instead of on a user's job.
+
+Each check returns a Result with a hint for the most likely fix. Checks never
+print secrets, presigned URLs, or raw provider responses.
+"""
+
+import re
+import uuid
+from dataclasses import dataclass
+from typing import Callable, Literal
+
+import requests
+
+Status = Literal["ok", "warn", "fail", "skip"]
+
+REQUEST_TIMEOUT = 15
+CLIENT_ID_PATTERN = re.compile(r"^\d+-[a-z0-9]+\.apps\.googleusercontent\.com$")
+TEST_BODY = b"piano-transcription-server online check\n"
+
+
+@dataclass(frozen=True)
+class Result:
+    name: str
+    status: Status
+    detail: str
+    hint: str | None = None
+
+
+# --- Storage ----------------------------------------------------------------
+
+STORAGE_HINTS = {
+    "InvalidAccessKeyId": "The access key ID is wrong. Rewrite secrets/outsource_storage_access_key, or create a new R2 API token.",
+    "SignatureDoesNotMatch": "The secret access key does not match the access key ID. Rewrite secrets/outsource_storage_secret_key.",
+    "Unauthorized": "The storage keys are wrong. Rewrite both key files, or create a new R2 API token.",
+    "AccessDenied": "The token cannot write to this bucket. It needs Object Read & Write, applied to this bucket.",
+    "NoSuchBucket": (
+        "No bucket with this name at this endpoint. Check OUTSOURCE_STORAGE_BUCKET; a bucket in the EU "
+        "jurisdiction is only visible through the .eu. endpoint, and other buckets only without it."
+    ),
+}
+
+
+def _error_code(error: Exception) -> str | None:
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        return response.get("Error", {}).get("Code")
+    return None
+
+
+def _storage_failure(step: str, error: Exception) -> Result:
+    code = _error_code(error)
+    if code:
+        return Result("Storage", "fail", f"{step}: {code}", STORAGE_HINTS.get(code))
+    hint = None
+    if "Endpoint" in type(error).__name__ or "Connect" in type(error).__name__:
+        hint = "The endpoint cannot be reached. Check OUTSOURCE_STORAGE_ENDPOINT."
+    return Result("Storage", "fail", f"{step}: {type(error).__name__}", hint)
+
+
+def check_storage(config, storage_factory: Callable | None = None, http=requests) -> Result:
+    """Upload a small object, download it through a presigned URL like the
+    remote handler does, and delete it."""
+    from app.outsource.storage import S3Storage
+
+    try:
+        storage = (storage_factory or S3Storage.from_settings)(config)
+    except Exception as error:
+        return Result("Storage", "fail", str(error))
+
+    key = f"online-check/{uuid.uuid4().hex}.txt"
+    try:
+        storage.client.put_object(Bucket=storage.bucket, Key=key, Body=TEST_BODY)
+    except Exception as error:
+        return _storage_failure("Upload", error)
+
+    try:
+        try:
+            url = storage.presigned_url(key, 300)
+            response = http.get(url, timeout=REQUEST_TIMEOUT)
+        except Exception as error:
+            return Result("Storage", "fail", f"Signed download: {type(error).__name__}")
+        if response.status_code != 200 or response.content != TEST_BODY:
+            return Result(
+                "Storage",
+                "fail",
+                f"Signed download: HTTP {response.status_code}",
+                "Signed links are rejected. If the R2 token has client IP address filtering, remove it: "
+                "RunPod downloads through these links from its own addresses.",
+            )
+    finally:
+        try:
+            storage.client.delete_object(Bucket=storage.bucket, Key=key)
+            deleted = None
+        except Exception as error:
+            deleted = error
+    if deleted is not None:
+        return _storage_failure("Delete", deleted)
+    return Result("Storage", "ok", f"upload, signed download, and delete work in bucket {storage.bucket}")
+
+
+# --- RunPod -----------------------------------------------------------------
+
+RUNPOD_HINTS = {
+    401: "The API key is wrong. Create a new key and rewrite secrets/runpod_api_key.",
+    403: "The API key has no access to this endpoint. Give it access to the endpoint, or create a new restricted key.",
+    404: "No endpoint with this ID. Check RUNPOD_ENDPOINT_ID.",
+}
+
+
+def check_runpod(config, provider_factory: Callable | None = None) -> list[Result]:
+    from app.outsource.provider import RemoteFailed
+    from app.outsource.runpod import RunPodProvider
+
+    try:
+        provider = (provider_factory or RunPodProvider.from_settings)(config)
+    except RemoteFailed as error:
+        return [Result("RunPod", "fail", str(error))]
+
+    if provider.local:
+        try:
+            provider.session.request("GET", provider.base_url, timeout=REQUEST_TIMEOUT)
+        except requests.RequestException as error:
+            return [Result("RunPod", "fail", f"Local test server unreachable: {type(error).__name__}")]
+        return [Result("RunPod", "ok", "local test server reachable")]
+
+    try:
+        response = provider._request("GET", "health", REQUEST_TIMEOUT)
+    except RemoteFailed as error:
+        return [Result("RunPod", "fail", str(error))]
+    if not response.ok:
+        return [
+            Result(
+                "RunPod",
+                "fail",
+                f"Endpoint health: HTTP {response.status_code}",
+                RUNPOD_HINTS.get(response.status_code),
+            )
+        ]
+    try:
+        workers = response.json().get("workers", {})
+        detail = ", ".join(f"{count} {state}" for state, count in workers.items() if count) or "no workers running"
+    except (ValueError, AttributeError):
+        detail = "reachable"
+    results = [Result("RunPod", "ok", f"endpoint {provider.endpoint_id}: {detail}")]
+    results.extend(check_endpoint_settings(config, provider))
+    return results
+
+
+def _version(value: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in str(value).split("."))
+    except ValueError:
+        return (0,)
+
+
+def check_endpoint_settings(config, provider) -> list[Result]:
+    """Compare the endpoint's settings with `python -m app.config requirements`."""
+    from app.outsource.provider import RemoteFailed
+    from app.requirements import (
+        IDLE_TIMEOUT_SECONDS,
+        RUNPOD_CUDA_VERSION,
+        execution_timeout_minutes,
+        jobs_per_gpu,
+    )
+
+    name = "RunPod settings"
+    try:
+        endpoint = provider.endpoint_settings()
+    except RemoteFailed as error:
+        return [
+            Result(
+                name,
+                "warn",
+                f"cannot read the endpoint's settings: {error}",
+                "Give the API key read access to the endpoint's settings, so they can be checked "
+                "(OUTSOURCE_MAX_CONCURRENCY=auto needs it too).",
+            )
+        ]
+
+    results = []
+    template = endpoint.get("template") or {}
+    image = template.get("imageName")
+    results.append(
+        Result(name, "ok", f"image {image}")
+        if image
+        else Result(name, "warn", "the endpoint reports no image", "Check the endpoint's container image.")
+    )
+
+    env = {**(template.get("env") or {}), **(endpoint.get("env") or {})}
+    expected = config.outsource.storage_endpoint
+    if env.get("OUTSOURCE_STORAGE_ENDPOINT") != expected:
+        results.append(
+            Result(
+                name,
+                "fail",
+                "OUTSOURCE_STORAGE_ENDPOINT on the endpoint "
+                + ("is missing" if "OUTSOURCE_STORAGE_ENDPOINT" not in env else "differs from .env"),
+                f"Set the endpoint's environment variable OUTSOURCE_STORAGE_ENDPOINT to {expected}; "
+                "the handler refuses downloads from any other host.",
+            )
+        )
+
+    minimum = _version(RUNPOD_CUDA_VERSION)
+    allowed = endpoint.get("allowedCudaVersions") or []
+    min_cuda = endpoint.get("minCudaVersion")
+    if not ((min_cuda and _version(min_cuda) >= minimum) or (allowed and all(_version(v) >= minimum for v in allowed))):
+        results.append(
+            Result(
+                name,
+                "warn",
+                "hosts with CUDA older than " + RUNPOD_CUDA_VERSION + " are allowed",
+                f"Allow only CUDA {RUNPOD_CUDA_VERSION} and newer: jobs fail at start on older drivers.",
+            )
+        )
+
+    timeout_ms = endpoint.get("executionTimeoutMs")
+    required_minutes = execution_timeout_minutes(config)
+    if not timeout_ms or timeout_ms < required_minutes * 60_000:
+        shown = f"{timeout_ms / 60_000:g} min" if timeout_ms else "not set"
+        results.append(
+            Result(
+                name,
+                "warn",
+                f"execution timeout {shown}, needs at least {required_minutes} min",
+                "Raise the endpoint's execution timeout, or RunPod stops jobs the server still waits for.",
+            )
+        )
+
+    if (endpoint.get("workersMin") or 0) > 0:
+        results.append(
+            Result(
+                name,
+                "warn",
+                f"{endpoint['workersMin']} workers always on",
+                "Always-on workers are billed while idle. Use 0 unless cold starts are unacceptable.",
+            )
+        )
+    workers_max = endpoint.get("workersMax") or 0
+    per_worker = max(1, jobs_per_gpu(16, config))
+    if config.outsource.max_concurrency and workers_max * per_worker < config.outsource.max_concurrency:
+        results.append(
+            Result(
+                name,
+                "warn",
+                f"max workers {workers_max} run about {workers_max * per_worker} jobs, "
+                f"fewer than OUTSOURCE_MAX_CONCURRENCY={config.outsource.max_concurrency}",
+                "Raise the endpoint's max workers, or lower OUTSOURCE_MAX_CONCURRENCY.",
+            )
+        )
+    elif config.outsource.max_concurrency is None:
+        results.append(Result(name, "ok", f"max workers {workers_max} (OUTSOURCE_MAX_CONCURRENCY=auto)"))
+
+    if endpoint.get("scalerType") != "REQUEST_COUNT":
+        results.append(
+            Result(
+                name,
+                "warn",
+                f"scaling by {str(endpoint.get('scalerType') or 'unknown').lower().replace('_', ' ')}",
+                f"Scale by request count, about {per_worker} per worker: each worker batches that many requests.",
+            )
+        )
+
+    idle = endpoint.get("idleTimeout")
+    if idle and idle > 6 * IDLE_TIMEOUT_SECONDS:
+        results.append(
+            Result(
+                name,
+                "warn",
+                f"idle timeout {idle} s",
+                f"Idle workers are billed; about {IDLE_TIMEOUT_SECONDS} s is enough.",
+            )
+        )
+
+    if len(results) == 1:
+        results.append(Result(name, "ok", "match the requirements"))
+    return results
+
+
+# --- Google -----------------------------------------------------------------
+
+def check_client_ids(config) -> Result:
+    client_ids = [client_id.strip() for client_id in config.auth.client_ids if client_id.strip()]
+    invalid = [client_id for client_id in client_ids if not CLIENT_ID_PATTERN.match(client_id)]
+    if invalid:
+        return Result(
+            "Google sign-in",
+            "fail",
+            f"{len(invalid)} of {len(client_ids)} client IDs are malformed: {', '.join(invalid)}",
+            "Client IDs look like 123456789-abc123.apps.googleusercontent.com. Copy them from the "
+            "Google Cloud console, and do not use the client secret.",
+        )
+    return Result(
+        "Google sign-in",
+        "ok",
+        f"{len(client_ids)} client IDs well formed (Google can only confirm them with a signed-in user's token)",
+    )
+
+
+PLAY_HINTS = {
+    401: "Google rejected the service account. Its key may be deleted or disabled: create a new JSON key.",
+    403: (
+        "The service account lacks Play Console permissions for this app, or they have not applied yet: "
+        "new permissions can take up to 24 hours. Check the account under Play Console > Users and permissions."
+    ),
+    404: "No app with this package name in the service account's Play developer account. Check GOOGLE_PLAY_PACKAGE_NAME.",
+}
+
+
+def check_google_play(config, service_factory: Callable | None = None) -> Result:
+    from app.google_play import android_publisher, list_product_ids
+
+    try:
+        service = (service_factory or android_publisher)(config)
+        products = list_product_ids(service, config.google_play.package_name)
+    except Exception as error:
+        status = getattr(getattr(error, "resp", None), "status", None)
+        if status is not None:
+            return Result("Google Play", "fail", f"Listing products: HTTP {status}", PLAY_HINTS.get(int(status)))
+        hint = None
+        if "RefreshError" in type(error).__name__:
+            hint = "The service account key was rejected. Create a new JSON key for the service account."
+        if "Google Play Android Developer API" in str(error) or "has not been used" in str(error):
+            hint = "Enable the Google Play Android Developer API in the service account's Google Cloud project."
+        return Result("Google Play", "fail", f"Listing products: {type(error).__name__}", hint)
+
+    configured = set(config.billing.products)
+    missing = sorted(configured - products)
+    unused = sorted(products - configured)
+    if missing:
+        return Result(
+            "Google Play",
+            "warn",
+            f"{len(products)} products in Play Console; configured but missing there: {', '.join(missing)}",
+            "Create and activate these products in Play Console, or remove them from BILLING_PRODUCTS. "
+            "Missing products are not offered to users.",
+        )
+    if unused:
+        return Result(
+            "Google Play",
+            "warn",
+            f"products in Play Console but not in BILLING_PRODUCTS: {', '.join(unused)}",
+            "Add them to BILLING_PRODUCTS with their minutes, or users cannot buy them.",
+        )
+    return Result("Google Play", "ok", f"{len(products)} products, all configured")
+
+
+# --- Running ----------------------------------------------------------------
+
+def run_checks(config) -> list[Result]:
+    results = []
+    if config.outsource.provider == "runpod":
+        results.append(check_storage(config))
+        results.extend(check_runpod(config))
+    else:
+        results.append(Result("Outsourcing", "skip", "OUTSOURCE_PROVIDER=none"))
+    if config.billing.provider == "google_play":
+        results.append(check_client_ids(config))
+        results.append(check_google_play(config))
+    else:
+        results.append(Result("Google", "skip", "BILLING_PROVIDER=none"))
+    return results
+
+
+LABELS = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL", "skip": "SKIP"}
+
+
+def format_results(results: list[Result]) -> list[str]:
+    width = max(len(result.name) for result in results)
+    lines = []
+    for result in results:
+        lines.append(f"{LABELS[result.status]}  {result.name.ljust(width)}  {result.detail}")
+        if result.hint:
+            lines.append(f"      {' ' * width}  -> {result.hint}")
+    return lines

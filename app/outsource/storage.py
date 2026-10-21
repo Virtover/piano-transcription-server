@@ -30,13 +30,14 @@ class S3Storage:
         self.bucket = bucket
 
     @classmethod
-    def from_settings(cls) -> "S3Storage":
+    def from_settings(cls, config=None) -> "S3Storage":
         import boto3
         from botocore.config import Config
 
-        outsource = settings.outsource
-        access_key = settings.secrets.outsource_storage_access_key
-        secret_key = settings.secrets.outsource_storage_secret_key
+        config = config or settings
+        outsource = config.outsource
+        access_key = config.secrets.outsource_storage_access_key
+        secret_key = config.secrets.outsource_storage_secret_key
         if not (outsource.storage_endpoint and outsource.storage_bucket and access_key and secret_key):
             raise RemoteFailed("Outsourcing storage is not configured")
         client = boto3.client(
