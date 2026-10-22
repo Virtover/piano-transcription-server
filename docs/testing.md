@@ -33,6 +33,8 @@ GitHub Actions runs the tests on every push to `main` and every pull request ([.
 
 A test that needs an optional dependency must skip without it: import the dependency with `pytest.importorskip` before anything that uses it, not with a plain `import` at the top.
 
+CI runs as an ordinary user, not root, so code must not write to the container paths (`/billing`, `/data`) when it is imported. Create files on first use instead, as `Billing` does. To reproduce CI locally, run the tests as a non-root user in a `python:3.12-slim` container.
+
 ## 🗂️ What is covered
 
 | File | Covers |

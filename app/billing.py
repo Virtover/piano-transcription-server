@@ -2,6 +2,7 @@ import hashlib
 import math
 import re
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from pathlib import Path
@@ -26,10 +27,16 @@ def cancelled_cost(full_cost: int, progress: float) -> int:
 
 class Billing:
     def __init__(self, database_path: str | None = None):
+        # The database is created on first use, not here: modules create a
+        # Billing when imported, also in services and tests without access
+        # to the billing directory.
         self.database_path = database_path or settings.billing.database_path
-        database_parent = Path(self.database_path).parent
-        database_parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        self._ready = False
+        self._ready_lock = threading.Lock()
+
+    def _create_schema(self) -> None:
+        Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
+        with closing(self._open()) as connection, connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -85,11 +92,19 @@ class Billing:
             if "order_id" not in purchase_columns:
                 connection.execute("ALTER TABLE purchases ADD COLUMN order_id TEXT")
 
-    def _connect(self) -> sqlite3.Connection:
+    def _open(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         return connection
+
+    def _connect(self) -> sqlite3.Connection:
+        if not self._ready:
+            with self._ready_lock:
+                if not self._ready:
+                    self._create_schema()
+                    self._ready = True
+        return self._open()
 
     @staticmethod
     def _ensure_user(connection: sqlite3.Connection, user_id: str, email: str | None = None) -> None:

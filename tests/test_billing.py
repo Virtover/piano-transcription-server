@@ -145,3 +145,17 @@ def test_admin_credit_command_rejects_invalid_input(billed, monkeypatch, argv):
     with pytest.raises(SystemExit) as error:
         admin_credit.main()
     assert error.value.code == 2
+
+
+def test_database_is_created_on_first_use_not_at_construction(tmp_path):
+    from app.billing import Billing
+
+    path = tmp_path / "missing" / "billing.sqlite3"
+    billing = Billing(str(path))
+
+    # Constructing touches nothing: modules create a Billing at import, also
+    # where the billing directory is not available.
+    assert not path.parent.exists()
+
+    assert billing.reserved_job_ids() == []
+    assert path.exists()
