@@ -27,6 +27,12 @@ python -m pytest -q tests/test_account_api.py
 python -m pytest -q -k cancellation
 ```
 
+## 🤖 Continuous integration
+
+GitHub Actions runs the tests on every push to `main` and every pull request ([.github/workflows/tests.yml](../.github/workflows/tests.yml)), on Linux with Python 3.12 and ffmpeg, from a clean checkout: no `.env`, no secrets. The model tests, which need the worker requirements and PyTorch, are skipped there. Run them locally after installing `requirements.worker.txt`.
+
+A test that needs an optional dependency must skip without it: import the dependency with `pytest.importorskip` before anything that uses it, not with a plain `import` at the top.
+
 ## 🗂️ What is covered
 
 | File | Covers |

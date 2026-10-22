@@ -1,8 +1,10 @@
 import threading
 from concurrent.futures import Future
 
-import numpy as np
 import pytest
+
+# Skipped like the model imports below when the worker requirements are missing.
+np = pytest.importorskip("numpy")
 
 # Needs the worker dependencies (requirements.worker.txt).
 piano_transcription = pytest.importorskip("app.transcription.piano_transcription")

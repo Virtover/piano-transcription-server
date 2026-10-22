@@ -3,8 +3,10 @@ import base64
 import importlib.util
 from pathlib import Path
 
-import numpy as np
 import pytest
+
+# Skipped like the model imports below when the worker requirements are missing.
+np = pytest.importorskip("numpy")
 
 # Needs the RunPod handler image (requirements.runpod.txt).
 pytest.importorskip("runpod")
