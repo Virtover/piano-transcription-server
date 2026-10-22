@@ -1,14 +1,5 @@
 {
   "permissions": {
     "deny": ["Read(./secrets/**)", "Edit(./secrets/**)"]
-  },
-  "sandbox": {
-    "enabled": true,
-    "failIfUnavailable": true,
-    "allowUnsandboxedCommands": false,
-    "filesystem": {
-      "denyRead": ["./secrets"],
-      "denyWrite": ["./secrets"]
-    }
   }
 }
