@@ -52,6 +52,12 @@ Set-Content -Path secrets\outsource_storage_secret_key -Value '<secret access ke
 Set-Content -Path secrets\runpod_api_key -Value '<RunPod API key>' -NoNewline
 ```
 
+Optionally, a fourth: a RunPod key with read-only access to the account. The key above is restricted to the endpoint, and RunPod does not let restricted keys read endpoint settings. With the read key, `check --online` verifies the endpoint's settings, and `OUTSOURCE_MAX_CONCURRENCY=auto` follows the endpoint's maximum workers; without it, use a number. The read key cannot change anything.
+
+```powershell
+Set-Content -Path secrets\runpod_read_api_key -Value '<RunPod read-only API key>' -NoNewline
+```
+
 > [!WARNING]
 > Always name the parameters as above. The short form `Set-Content -NoNewline <file> <value>` swaps them in Windows PowerShell 5.1 and creates a file **named after your secret** in the current folder. If that happens, delete the file; if it was ever committed, replace the key.
 
@@ -70,7 +76,7 @@ OUTSOURCE_MAX_CONCURRENCY=4
 | --- | --- |
 | `OUTSOURCE_STORAGE_ENDPOINT` | The storage's S3 endpoint URL. The GPU endpoint needs the same value as an environment variable, because the handler downloads only from this host. |
 | `OUTSOURCE_MAX_WAIT` | Default `30s`. Send a job to RunPod when its estimated local wait is longer than this. The estimate is a whole number of average local job durations (60 s until the worker has measured some), so any value below that average means "as soon as every local slot is busy". `30s` does that, and keeps short local queues local once jobs get faster. Set a few minutes to outsource only under heavy load. |
-| `OUTSOURCE_MAX_CONCURRENCY` | At most this many jobs on RunPod at once, which caps the cost. `auto` follows the endpoint's maximum workers. |
+| `OUTSOURCE_MAX_CONCURRENCY` | At most this many jobs on RunPod at once, which caps the cost. `auto` follows the endpoint's maximum workers; it needs the optional read key, and allows 4 jobs without it. |
 
 All settings are in [Configuration](configuration.md#outsourcing).
 

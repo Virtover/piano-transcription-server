@@ -203,6 +203,9 @@ class SecretSettings(BaseSettings):
         validation_alias="google_play_service_account.json",
     )
     runpod_api_key: SecretStr | None = None
+    # Optional. A Restricted key cannot use RunPod's management API, so
+    # reading the endpoint's settings needs a separate key with read access.
+    runpod_read_api_key: SecretStr | None = None
     outsource_storage_access_key: SecretStr | None = None
     outsource_storage_secret_key: SecretStr | None = None
 

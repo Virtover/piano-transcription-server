@@ -72,7 +72,10 @@ def outsourcing_sections(config) -> list[Section]:
         )
     else:
         workers = "any; this caps the cost"
-        workers_reason = "OUTSOURCE_MAX_CONCURRENCY=auto follows the endpoint's maximum workers."
+        workers_reason = (
+            "OUTSOURCE_MAX_CONCURRENCY=auto follows the endpoint's maximum workers, read with the optional "
+            "read key; without it, the server allows 4 remote jobs."
+        )
 
     storage = Section(
         "Storage",
@@ -217,10 +220,16 @@ def outsourcing_sections(config) -> list[Section]:
             ),
             Requirement(
                 "API key",
-                "restricted to this endpoint: run, status, cancel, and read its settings; "
-                "saved as secrets/runpod_api_key",
-                "The server submits and cancels jobs. Reading the settings lets check --online verify this list "
-                "and OUTSOURCE_MAX_CONCURRENCY=auto read the maximum workers.",
+                "restricted to this endpoint with read and write access, saved as secrets/runpod_api_key",
+                "The server submits, follows, and cancels jobs with it. A leaked copy cannot touch anything else.",
+                True,
+            ),
+            Requirement(
+                "Read key (optional)",
+                "read-only access to the account, saved as secrets/runpod_read_api_key",
+                "Restricted keys cannot read endpoint settings. With this key, check --online verifies the "
+                "settings in this list, and OUTSOURCE_MAX_CONCURRENCY=auto reads the maximum workers. It cannot "
+                "change anything.",
                 True,
             ),
         ],

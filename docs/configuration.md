@@ -144,7 +144,8 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | File | Used for |
 | --- | --- |
 | `google_play_service_account.json` | Google Play service-account JSON key, used to verify purchases and read the product catalog. |
-| `runpod_api_key` | RunPod API key, restricted to the transcription endpoint. |
+| `runpod_api_key` | RunPod API key, restricted to the transcription endpoint. It runs, follows, and cancels jobs. |
+| `runpod_read_api_key` | Optional. A RunPod key with read-only access to the account. Restricted keys cannot read endpoint settings, so `OUTSOURCE_MAX_CONCURRENCY=auto` and the endpoint settings check of `check --online` use this one. Without it, `auto` allows 4 remote jobs. |
 | `outsource_storage_access_key` | Access key ID of the storage token. |
 | `outsource_storage_secret_key` | Secret access key of the storage token. |
 

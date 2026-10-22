@@ -168,15 +168,18 @@ def check_endpoint_settings(config, provider) -> list[Result]:
     try:
         endpoint = provider.endpoint_settings()
     except RemoteFailed as error:
-        return [
-            Result(
-                name,
-                "warn",
-                f"cannot read the endpoint's settings: {error}",
-                "Give the API key read access to the endpoint's settings, so they can be checked "
-                "(OUTSOURCE_MAX_CONCURRENCY=auto needs it too).",
+        if provider.has_read_key:
+            hint = (
+                "The key in secrets/runpod_read_api_key was rejected. It needs read access to the "
+                "account (permission Read Only), not only to the endpoint."
             )
-        ]
+        else:
+            hint = (
+                "Restricted keys, like the one that runs jobs, cannot read endpoint settings. To check "
+                "them, and to use OUTSOURCE_MAX_CONCURRENCY=auto, save a key with read access to the "
+                "account (permission Read Only) as secrets/runpod_read_api_key. Jobs run either way."
+            )
+        return [Result(name, "warn", f"cannot read the endpoint's settings: {error}", hint)]
 
     results = []
     template = endpoint.get("template") or {}

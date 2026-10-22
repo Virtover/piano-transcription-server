@@ -373,3 +373,60 @@ def test_cli_without_online_does_not_contact_services(tmp_path, monkeypatch):
     monkeypatch.setattr(online_check, "run_checks", lambda config: pytest.fail("contacted services"))
 
     assert config_module.main(["check", "--env-file", str(env_file), "--secrets-dir", str(tmp_path)]) == 0
+
+
+def test_read_key_is_used_only_for_the_management_api(outsourcing):
+    session = Session(HttpResponse(payload={"workers": {}}), HttpResponse(payload=GOOD_SETTINGS))
+    calls = []
+    original = session.request
+    session.request = lambda method, url, **kwargs: calls.append((url, kwargs["headers"])) or original(method, url, **kwargs)
+    provider = RunPodProvider("https://api.runpod.ai/v2", "endpoint-1", "run-key", session=session, read_api_key="read-key")
+
+    check_runpod(outsourcing, lambda config: provider)
+
+    assert calls[0] == ("https://api.runpod.ai/v2/endpoint-1/health", {"Authorization": "Bearer run-key"})
+    assert calls[1] == ("https://rest.runpod.io/v1/endpoints/endpoint-1", {"Authorization": "Bearer read-key"})
+
+
+def test_without_read_key_the_main_key_reads_settings():
+    provider = RunPodProvider("https://api.runpod.ai/v2", "endpoint-1", "run-key", session=Session())
+
+    assert not provider.has_read_key
+    assert provider._read_headers == {"Authorization": "Bearer run-key"}
+
+
+def test_unreadable_settings_hint_suggests_the_read_key(outsourcing):
+    provider = runpod(HttpResponse(payload={"workers": {}}), HttpResponse(401))
+
+    [_, warning] = check_runpod(outsourcing, lambda config: provider)
+
+    assert "secrets/runpod_read_api_key" in warning.hint
+    assert "Jobs run either way" in warning.hint
+
+
+def test_rejected_read_key_says_so(outsourcing):
+    provider = RunPodProvider(
+        "https://api.runpod.ai/v2", "endpoint-1", "run-key",
+        session=Session(HttpResponse(payload={"workers": {}}), HttpResponse(401)), read_api_key="read-key",
+    )
+
+    [_, warning] = check_runpod(outsourcing, lambda config: provider)
+
+    assert "runpod_read_api_key was rejected" in warning.hint
+
+
+def test_read_key_is_loaded_from_its_secret_file(tmp_path):
+    from app.config import load_settings
+
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    (secrets / "runpod_api_key").write_text("run-key")
+    (secrets / "runpod_read_api_key").write_text("read-key")
+    (tmp_path / ".env").write_text("RUNPOD_ENDPOINT_ID=endpoint-1\n")
+    config = load_settings(str(tmp_path / ".env"), str(secrets))
+
+    provider = RunPodProvider.from_settings(config)
+
+    assert provider.has_read_key
+    assert provider._read_headers == {"Authorization": "Bearer read-key"}
+    assert provider._headers == {"Authorization": "Bearer run-key"}

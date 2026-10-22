@@ -27,7 +27,14 @@ STATES = {
 
 
 class RunPodProvider:
-    def __init__(self, api_base: str, endpoint_id: str, api_key: str, session: Any = None):
+    def __init__(
+        self,
+        api_base: str,
+        endpoint_id: str,
+        api_key: str,
+        session: Any = None,
+        read_api_key: str | None = None,
+    ):
         api_base = api_base.rstrip("/")
         # The SDK's local API server (`--rp_serve_api`) serves /run and
         # /status at its root, without the endpoint ID.
@@ -38,6 +45,10 @@ class RunPodProvider:
         else:
             self.base_url = f"{api_base}/{endpoint_id}"
         self._headers = {"Authorization": f"Bearer {api_key}"}
+        # Endpoint settings come from RunPod's management API, which rejects
+        # Restricted keys. Without a separate read key, the main key is tried.
+        self.has_read_key = read_api_key is not None
+        self._read_headers = {"Authorization": f"Bearer {read_api_key or api_key}"}
         self.session = session or requests.Session()
 
     @classmethod
@@ -46,7 +57,13 @@ class RunPodProvider:
         api_key = config.secrets.runpod_api_key
         if api_key is None or not config.runpod.endpoint_id:
             raise RemoteFailed("RunPod is not configured")
-        return cls(config.runpod.api_base, config.runpod.endpoint_id, api_key.get_secret_value())
+        read_key = config.secrets.runpod_read_api_key
+        return cls(
+            config.runpod.api_base,
+            config.runpod.endpoint_id,
+            api_key.get_secret_value(),
+            read_api_key=read_key.get_secret_value() if read_key else None,
+        )
 
     def _request(self, method: str, path: str, timeout: float, **kwargs) -> requests.Response:
         try:
@@ -102,14 +119,15 @@ class RunPodProvider:
         return RemoteStatus(state)
 
     def endpoint_settings(self) -> dict[str, Any]:
-        """The endpoint's configuration from RunPod's REST API, including its
-        template (image and environment). Needs read access to endpoints."""
+        """The endpoint's configuration from RunPod's management API,
+        including its template (image and environment). Restricted keys
+        cannot use that API; see runpod_read_api_key."""
         try:
             response = self.session.request(
                 "GET",
                 f"{REST_API_BASE}/endpoints/{self.endpoint_id}",
                 params={"includeTemplate": "true"},
-                headers=self._headers,
+                headers=self._read_headers,
                 timeout=REQUEST_TIMEOUT,
             )
         except requests.RequestException as error:
@@ -117,8 +135,8 @@ class RunPodProvider:
         return self._json(response, "endpoint settings")
 
     def max_workers(self) -> int | None:
-        """The endpoint's max workers setting, read from RunPod's REST API.
-        The API key needs read access to the endpoint's settings."""
+        """The endpoint's max workers setting, read from RunPod's management
+        API. Restricted keys cannot use that API; see runpod_read_api_key."""
         if self.local:
             # The SDK's local test server runs a single worker.
             return 1
@@ -126,7 +144,7 @@ class RunPodProvider:
             response = self.session.request(
                 "GET",
                 f"{REST_API_BASE}/endpoints/{self.endpoint_id}",
-                headers=self._headers,
+                headers=self._read_headers,
                 timeout=REQUEST_TIMEOUT,
             )
         except requests.RequestException as error:
@@ -134,8 +152,9 @@ class RunPodProvider:
             return None
         if not response.ok:
             logger.warning(
-                "Could not read the RunPod endpoint settings (HTTP %s); "
-                "give the API key read access to the endpoint, or set OUTSOURCE_MAX_CONCURRENCY",
+                "Could not read the RunPod endpoint settings (HTTP %s). Restricted keys cannot read "
+                "them: save a key with read access as secrets/runpod_read_api_key, or set "
+                "OUTSOURCE_MAX_CONCURRENCY to a number",
                 response.status_code,
             )
             return None
