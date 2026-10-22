@@ -36,7 +36,7 @@ The Transkun checkpoint detects sustain-pedal events separately instead of autom
 
 ## 🗄️ Job retention and restart behavior
 
-Job files are stored under `/data/jobs/<job_id>/`. Queued and processing jobs do not receive a Redis expiration. On API startup, jobs left in those states by a previous session are marked failed, billing reservations are released, and partial files are removed.
+Job files are stored under `/data/jobs/<job_id>/`. Queued and processing jobs do not receive a Redis expiration. On API startup, jobs left processing by a previous session are marked failed, their billing reservations are released, and their partial files are removed: their worker stopped mid-job. Queued jobs are sent to their queue again and keep their reservation, so a restart does not lose them. A message for a queued job left over from before the restart is harmless, because only one delivery can claim a job.
 
 Completed and failed jobs receive a one-hour Redis TTL. The cleanup service periodically removes job directories whose Redis keys no longer exist, so files can remain briefly after the TTL expires.
 
@@ -49,6 +49,33 @@ The API streams an upload into `/data/jobs/<job_id>/upload.input`, stopping as s
 Uploaded files are untrusted. Only common audio and video container formats are accepted. Playlist and concat formats such as HLS are rejected because they make `ffmpeg` open other files or URLs. `ffprobe` and `ffmpeg` run with `-protocol_whitelist file`, so they cannot open network URLs at all. The worker checks the format again before converting.
 
 Billing backups are pruned by the API after each backup, using `BILLING_BACKUP_RETENTION`.
+
+### 🔁 Planned restarts and shutdowns
+
+Restart or stop the stack with `scripts/server.py` on the host instead of running `docker compose` directly. It announces the restart or shutdown to clients first, and needs only Python 3 and the docker CLI:
+
+```powershell
+python scripts/server.py restart 5m                  # restart in 5 minutes, for example to update
+python scripts/server.py restart 5m --outsource      # the same, with the outsource profile
+python scripts/server.py restart 10m --reason "Faster transcription" --grace 10m
+python scripts/server.py stop 10m --back-in 2h       # shut down in 10 minutes, back in about 2 hours
+python scripts/server.py start --outsource           # start again and wait until ready
+python scripts/server.py status
+python scripts/server.py cancel                      # also stops a waiting script
+```
+
+**Restart:**
+
+1. **Announce.** The notice is stored in Redis, and clients see it in `GET /api/server-info`, job status, and the `X-Server-Maintenance` headers; see [Planned restarts and shutdowns](api.md#-planned-restarts-and-shutdowns). It expires on its own shortly after the planned time plus the grace period, so a crashed script cannot leave it behind.
+2. **Build while serving.** The new images are built during the countdown, and the current version keeps serving. If the build fails, the restart is cancelled and the notice removed. If the build takes longer than the countdown, the restart waits for it.
+3. **Refuse jobs that would not finish.** New jobs whose estimated wait and run time ends after the planned time are refused with `503`, without charge; in the last minute, all are.
+4. **Drain.** At the planned time, running jobs get up to `--grace` (default `5m`) to finish. Queued jobs wait and are queued again after the restart.
+5. **Restart** with `docker compose up -d --build`, which recreates only services whose image or configuration changed. Profiles given with `--profile` or `--outsource` apply to the build and the restart. `--command` replaces the restart command; then nothing is built before the countdown ends.
+6. **Clear** the notice once the API answers `/ready`. If it does not within 3 minutes, the script stops with an error and the notice expires on its own.
+
+**Shutdown** (`stop`) announces, refuses late jobs, and drains the same way, without building. Then it stops every service with `docker compose --profile "*" stop`, so services from any profile stop too. With `--down`, the containers are removed as well; volumes and the billing data are kept either way. `--back-in` tells clients when the server is expected back. Queued jobs stay in Redis and run after `start`, whose command line, with the profiles that were running, the script prints. The notice stays in Redis while the server is off, and the API removes it when it starts.
+
+Ctrl+C during a countdown cancels it and removes the notice. The script runs `python -m app.maintenance` in the `api` container, so the stack must be running, with a version that includes it.
 
 ### 🩺 Job diagnostics
 

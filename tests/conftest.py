@@ -80,7 +80,7 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     monkeypatch.setattr(auth.requests, "get", fake_google_request)
     auth._token_cache.clear()
 
-    monkeypatch.setattr(main, "fail_active_jobs", lambda reason: None)
+    monkeypatch.setattr(main, "recover_active_jobs", lambda reason: None)
     monkeypatch.setattr(main, "reconcile_billing", lambda: None)
     monkeypatch.setattr(main, "sync_products", lambda: None)
     monkeypatch.setattr(main, "backup_billing_database", lambda: None)

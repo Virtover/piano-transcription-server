@@ -9,7 +9,8 @@ from redis import Redis
 
 from app.billing import Billing, transcription_cost
 from app.config import settings
-from app import google_play
+from app import google_play, maintenance
+from app.maintenance import NoticeResponse
 from app.auth import AuthenticatedUser, current_user, google_oauth_client_ids
 from app.url_safety import ensure_safe_source_url, UnsafeSourceUrl
 
@@ -52,6 +53,8 @@ class ServerInfoResponse(BaseModel):
     free_minutes: int | None = None
     free_minutes_period: str | None = None
     google_oauth_client_ids: list[str] | None = None
+    # A planned server restart or shutdown, if one is pending.
+    maintenance: NoticeResponse | None = None
 
 
 class BalanceResponse(BaseModel):
@@ -120,6 +123,9 @@ def server_info() -> ServerInfoResponse:
         max_video_length_minutes=settings.limits.max_video_length_minutes,
         max_upload_size_mb=settings.limits.max_upload_size_mb,
     )
+    # Always present, null when nothing is planned.
+    notice = maintenance.current(redis)
+    info.maintenance = notice.as_response() if notice else None
     if settings.billing.provider != "none":
         info.free_minutes = settings.billing.free_minutes
         info.free_minutes_period = settings.billing.free_minutes_period

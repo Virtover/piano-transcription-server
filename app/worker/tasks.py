@@ -185,14 +185,23 @@ def reconcile_billing() -> None:
             )
 
 
-def fail_active_jobs(reason: str) -> None:
+def recover_active_jobs(reason: str) -> None:
+    """Run at API startup. Jobs that were processing are failed and refunded:
+    their worker stopped mid-job. Queued jobs are sent to their queue again,
+    so a planned restart does not lose them; a leftover message from before
+    the restart is harmless, because only one delivery can claim the job."""
+    queued = []
     for key in redis.scan_iter(match="transcription:*"):
+        job_id = key.removeprefix("transcription:")
         while True:
             try:
                 with redis.pipeline() as pipe:
                     pipe.watch(key)
                     job = pipe.hgetall(key)
-                    if job.get("status") not in {"queued", "processing"}:
+                    if job.get("status") == "queued":
+                        queued.append((job_id, job))
+                        break
+                    if job.get("status") != "processing":
                         break
                     pipe.multi()
                     pipe.hset(
@@ -204,20 +213,37 @@ def fail_active_jobs(reason: str) -> None:
                     )
                     pipe.expire(key, JOB_TTL)
                     pipe.execute()
-                    record_job(key.removeprefix("transcription:"))
+                    record_job(job_id)
                     if job.get("user_id"):
-                        billing.release(key.removeprefix("transcription:"))
-                    shutil.rmtree(
-                        Path(settings.service.data_dir)
-                        / "jobs"
-                        / key.removeprefix("transcription:"),
-                        ignore_errors=True,
-                    )
+                        billing.release(job_id)
+                    shutil.rmtree(job_dir(job_id), ignore_errors=True)
                     break
             except WatchError:
                 continue
-    # Every queued and processing job is now failed.
+    # Rebuild the routing counts from the jobs that are still queued.
     routing.clear_active(redis)
+    for job_id, job in queued:
+        requeue_after_restart(job_id, job, reason)
+
+
+def requeue_after_restart(job_id: str, job: dict[str, str], reason: str) -> None:
+    backend: routing.Backend = "remote" if job.get("backend") == "remote" else "local"
+    if backend == "remote" and not routing.outsourcing_enabled():
+        # Outsourcing was turned off while the server was down.
+        backend = "local"
+        update_job(job_id, backend=backend)
+    routing.mark_active(redis, backend, job_id)
+    try:
+        send_job(job_id, backend, *job_arguments(job))
+    except Exception:
+        logger.exception("Could not requeue job %s after the restart", job_id)
+        routing.mark_finished(redis, backend, job_id)
+        update_job(job_id, status="failed", error=reason)
+        redis.expire(job_key(job_id), JOB_TTL)
+        record_job(job_id)
+        if job.get("user_id"):
+            billing.release(job_id)
+        shutil.rmtree(job_dir(job_id), ignore_errors=True)
 
 
 class JobContext:
@@ -285,9 +311,11 @@ def run_job(
     """
     output_dir = job_dir(job_id)
     requeued = False
+    claimed = False
     try:
         if not claim_job(job_id):
             return
+        claimed = True
         record_job(job_id)
         started = time.monotonic()
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -337,7 +365,9 @@ def run_job(
             JOB_TTL,
         )
     finally:
-        if not requeued:
+        # A second delivery of a job that is running elsewhere claims nothing
+        # and must not remove the running job from the routing count.
+        if not requeued and (claimed or redis.hget(job_key(job_id), "status") != "processing"):
             routing.mark_finished(redis, backend, job_id)
 
 

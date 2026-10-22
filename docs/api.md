@@ -62,7 +62,7 @@ $status = Invoke-RestMethod `
 $status
 ```
 
-Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens.
+Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens. `maintenance` announces a planned restart or shutdown; see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns).
 
 Cancel a queued or processing job:
 
@@ -82,9 +82,51 @@ Invoke-WebRequest `
 
 The MIDI can contain piano notes, velocities, onset and offset information, sustain-pedal events (`CC64`), and other detected MIDI control events. The download returns `409` while processing, `404` for an unknown or missing result, and `500` for invalid stored result metadata.
 
+## 🔁 Planned restarts and shutdowns
+
+Before a planned restart or shutdown, the server announces it. The notice appears in three places, so a client sees it whatever it is doing:
+
+* `GET /api/server-info` and every job status response have a `maintenance` field: `null`, or
+
+  ```json
+  {"action": "restart", "at": 1792668429, "seconds_remaining": 287,
+   "message": "Server restart in 5 m", "reason": "Update", "back_at": null}
+  ```
+
+* Every response has the headers `X-Server-Maintenance: restart` (or `shutdown`) and `X-Server-Maintenance-At: <unix time>` while one is pending.
+
+| Field | Meaning |
+| --- | --- |
+| `action` | `restart`: the server is back within a few minutes. `shutdown`: it goes offline. |
+| `at` | When it happens, as a Unix timestamp in seconds. |
+| `seconds_remaining` | Seconds until `at`, when the response was made. |
+| `message` | Ready-made English text, such as `Server restart in 5 m` or `Server shutting down in 30 s`: minutes rounded, or seconds under a minute. |
+| `reason` | Optional text from the operator, or `null`. |
+| `back_at` | Shutdowns only: when the server is expected back, as a Unix timestamp, or `null` if unknown. |
+
+While a restart or shutdown is pending, a new transcription is refused with `503` if it would not finish before it, and always in the last minute. Nothing is reserved or charged. The body looks like:
+
+```json
+{"detail": {"message": "Server restart in 1 m; new transcriptions are paused until it is back",
+            "maintenance": {"action": "restart", "at": 1792668429, "seconds_remaining": 58}}}
+```
+
+The `maintenance` object in the body is complete; it is shortened here. The response has a `Retry-After` header with the seconds until the server should accept jobs again: after a restart, or at `back_at` for a shutdown. A shutdown without `back_at` has no `Retry-After`.
+
+During a restart, requests fail to connect, and right after it the API answers `503` with `Retry-After: 10` until it has finished starting.
+
+Jobs survive both: running jobs get time to finish first, and queued jobs stay queued, keeping their `job_id`. After a restart they continue within minutes; after a shutdown, when the server starts again. Only a job still running when the grace period ends fails, with its minutes refunded.
+
+**Recommended client behavior:**
+
+* Show a banner while `maintenance` is not `null`, counting down from `at` locally rather than from `seconds_remaining`, so the countdown stays exact between polls. Build the text in the user's language from `action`, `at`, and `back_at` instead of showing `message`.
+* Before submitting a long recording, warn the user if a restart or shutdown is close.
+* After a restart: on `503` or a connection error, wait for `Retry-After` (or a few seconds) and retry instead of showing an error, and keep polling jobs: their `job_id` stays valid.
+* After a shutdown: show the server as offline, with `back_at` if known, and check again from time to time instead of retrying quickly.
+
 ## 💳 Billing endpoints
 
-* `GET /api/server-info` returns billing provider, available offers, cleanup interval, free-minute policy, maximum video length, and the upload size limit (`max_upload_size_mb`).
+* `GET /api/server-info` returns billing provider, available offers, cleanup interval, free-minute policy, maximum video length, the upload size limit (`max_upload_size_mb`), and a pending restart or shutdown (`maintenance`, see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns)).
 * `GET /api/billing/cost?source_url=...` reads video duration and returns the transcription cost before submission. For a file, use `?duration_seconds=...` instead. Pass exactly one of the two.
 * `GET /api/billing/balance` returns the authenticated user's balance and free-minute timing.
 * `POST /api/billing/google-play/verify` verifies and credits a completed Google Play purchase.

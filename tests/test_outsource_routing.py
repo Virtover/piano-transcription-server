@@ -109,13 +109,14 @@ def test_prune_forgets_finished_jobs(api_context):
     assert tasks.redis.smembers(routing.ACTIVE_KEYS["local"]) == {"running"}
 
 
-def test_fail_active_jobs_resets_counters(api_context):
+def test_restart_recovery_rebuilds_counters_from_queued_jobs(api_context):
     busy(3)
     tasks.redis.sadd(routing.ACTIVE_KEYS["remote"], "remote-job")
+    tasks.redis.hset(tasks.job_key("waiting"), mapping={"status": "queued", "backend": "local", "source_url": "u"})
 
-    tasks.fail_active_jobs("restarted")
+    tasks.recover_active_jobs("restarted")
 
-    assert tasks.redis.scard(routing.ACTIVE_KEYS["local"]) == 0
+    assert tasks.redis.smembers(routing.ACTIVE_KEYS["local"]) == {"waiting"}
     assert tasks.redis.scard(routing.ACTIVE_KEYS["remote"]) == 0
 
 

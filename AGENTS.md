@@ -10,6 +10,7 @@ docker compose run --rm api python -m app.config check           # validate .env
 docker compose run --rm api python -m app.config check --online  # also test storage, RunPod, Google Play for real
 docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents
 docker compose up -d --build                                     # the stack; add --profile outsource for RunPod
+python scripts/server.py restart 5m [--outsource]                # announced restart; also: stop 10m, start, status, cancel
 ```
 
 `check --online` is the way to confirm a setup step worked. Code changes reach the containers only after a rebuild, for example `docker compose build api`.
@@ -27,6 +28,7 @@ docker compose up -d --build                                     # the stack; ad
 | `app/transcription/` | Audio, batching, and the model |
 | `app/billing.py` | SQLite billing database, also job diagnostics |
 | `runpod/handler.py` | The RunPod Serverless handler, built with `Dockerfile.runpod` |
+| `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
 
 ## Conventions
 
@@ -41,7 +43,7 @@ For guided setup, use the skills in `.claude/skills/`: `setup-runpod` for outsou
 
 - Take the requirements from `requirements --json`, and look up the providers' current documentation for where each is set.
 - Never ask for a secret in the chat or read secret files; give the user the command to write it, then check the file exists.
-- Ask before outward-facing actions: pushing images, changing a cloud account.
+- Ask before outward-facing actions: pushing images, changing a cloud account, restarting a stack that serves users.
 
 ## Pitfalls
 

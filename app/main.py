@@ -4,8 +4,12 @@ import time
 
 from fastapi import FastAPI
 from fastapi import HTTPException
+from fastapi import Request
+from fastapi.concurrency import run_in_threadpool
 from redis import Redis
 
+from app import maintenance
+from app.api.routes import transcriptions as transcription_routes
 from app.api.routes.transcriptions import (
     enable_transcription_submissions,
     router,
@@ -14,7 +18,7 @@ from app.api.routes.account import router as account_router
 from app.api.routes.billing import router as billing_router, server_info
 from app.config import ensure_valid, settings
 from app.google_play import sync_products
-from app.worker.tasks import fail_active_jobs, reconcile_billing
+from app.worker.tasks import reconcile_billing, recover_active_jobs
 from app.billing import Billing, prune_backups
 
 
@@ -51,10 +55,28 @@ app.include_router(account_router, prefix="/api")
 app.add_api_route("/api/server-info", server_info, methods=["GET"], include_in_schema=False)
 
 
+@app.middleware("http")
+async def maintenance_headers(request: Request, call_next):
+    """Tells every client about a planned restart or shutdown, whatever it
+    requested."""
+    response = await call_next(request)
+    try:
+        notice = await run_in_threadpool(maintenance.current, transcription_routes.redis)
+    except Exception:
+        # /health must keep answering while Redis is down.
+        notice = None
+    if notice is not None:
+        response.headers["X-Server-Maintenance"] = notice.action
+        response.headers["X-Server-Maintenance-At"] = str(int(notice.at))
+    return response
+
+
 @app.on_event("startup")
 def sync_billing_catalog() -> None:
     ensure_valid("api")
-    fail_active_jobs("Transcription interrupted because the server restarted")
+    # The restart or shutdown a past notice announced has happened.
+    maintenance.clear_past(transcription_routes.redis)
+    recover_active_jobs("Transcription interrupted because the server restarted")
     reconcile_billing()
     sync_products()
     enable_transcription_submissions()

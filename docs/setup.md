@@ -40,6 +40,8 @@ Invoke-RestMethod http://localhost:8000/ready
 
 Do not commit `.env`, the `secrets` folder, or any machine-specific values.
 
+To update a running server, use `python scripts/server.py restart 5m`: it announces the restart to clients, builds while the current version keeps serving, and lets running jobs finish. `python scripts/server.py stop 10m` shuts the server down the same way. See [Planned restarts and shutdowns](architecture.md#-planned-restarts-and-shutdowns).
+
 ## 🎮 GPU and CPU execution
 
 Verify GPU access before starting the stack:

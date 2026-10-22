@@ -139,23 +139,93 @@ def test_reconcile_billing_finishes_interrupted_transitions(worker):
     assert billing.get_balance("user") == 4
 
 
-def test_fail_active_jobs_marks_jobs_failed_and_releases(worker):
+def test_restart_fails_interrupted_jobs_and_keeps_queued_ones(worker, monkeypatch):
     settings, billing = worker
-    queue_job(billing, "queued")
+    sent = []
+    monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments: sent.append((job_id, backend, arguments)))
+    queue_job(billing, "queued", cost=3, source_url="https://example.com/a", backend="local")
     queue_job(billing, "processing")
     tasks.redis.hset(tasks.job_key("processing"), "status", "processing")
     tasks.redis.hset(tasks.job_key("done"), mapping={"status": "completed", "user_id": "user"})
-    job_dir = Path(settings.service.data_dir) / "jobs" / "processing"
-    job_dir.mkdir(parents=True)
+    interrupted_dir = Path(settings.service.data_dir) / "jobs" / "processing"
+    queued_dir = Path(settings.service.data_dir) / "jobs" / "queued"
+    interrupted_dir.mkdir(parents=True)
+    queued_dir.mkdir(parents=True)
 
-    tasks.fail_active_jobs("restarted")
+    tasks.recover_active_jobs("restarted")
+
+    assert job("processing")["status"] == "failed"
+    assert job("processing")["error"] == "restarted"
+    assert not interrupted_dir.exists()
+    assert job("queued")["status"] == "queued"
+    assert queued_dir.exists()
+    assert sent == [("queued", "local", ("https://example.com/a",))]
+    assert job("done")["status"] == "completed"
+    # The queued job keeps its reservation; the interrupted one is refunded.
+    assert billing.reserved_job_ids() == ["queued"]
+    assert billing.get_balance("user") == 7
+
+
+def test_queued_upload_is_requeued_from_its_file(worker, monkeypatch):
+    _, billing = worker
+    sent = []
+    monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments: sent.append(arguments))
+    queue_job(billing, "upload", source="upload", upload_title="Nocturne", backend="local")
+
+    tasks.recover_active_jobs("restarted")
+
+    assert sent == [(None, "Nocturne")]
+
+
+def test_remote_job_runs_locally_when_outsourcing_was_turned_off(worker, monkeypatch):
+    _, billing = worker
+    sent = []
+    monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments: sent.append(backend))
+    queue_job(billing, "remote", source_url="https://example.com/a", backend="remote")
+
+    tasks.recover_active_jobs("restarted")
+
+    assert sent == ["local"]
+    assert job("remote")["backend"] == "local"
+    assert tasks.redis.smembers(tasks.routing.ACTIVE_KEYS["local"]) == {"remote"}
+
+
+def test_queued_job_that_cannot_be_requeued_fails_and_is_refunded(worker, monkeypatch):
+    _, billing = worker
+
+    def broken(*args):
+        raise ConnectionError("broker down")
+
+    monkeypatch.setattr(tasks, "send_job", broken)
+    queue_job(billing, "queued", source_url="https://example.com/a", backend="local")
+
+    tasks.recover_active_jobs("restarted")
 
     assert job("queued")["status"] == "failed"
-    assert job("processing")["error"] == "restarted"
-    assert job("done")["status"] == "completed"
-    assert not job_dir.exists()
     assert billing.reserved_job_ids() == []
-    assert billing.get_balance("user") == 10
+    assert tasks.redis.scard(tasks.routing.ACTIVE_KEYS["local"]) == 0
+
+
+def test_second_delivery_of_a_running_job_keeps_its_routing_entry(worker):
+    _, billing = worker
+    queue_job(billing)
+    tasks.redis.hset(tasks.job_key("job"), "status", "processing")
+    tasks.redis.sadd(tasks.routing.ACTIVE_KEYS["local"], "job")
+
+    tasks.run_job("job", "local", lambda context: pytest.fail("ran twice"))
+
+    assert tasks.redis.smembers(tasks.routing.ACTIVE_KEYS["local"]) == {"job"}
+
+
+def test_delivery_of_a_cancelled_job_removes_its_routing_entry(worker):
+    _, billing = worker
+    queue_job(billing)
+    tasks.redis.hset(tasks.job_key("job"), "status", "cancelled")
+    tasks.redis.sadd(tasks.routing.ACTIVE_KEYS["local"], "job")
+
+    tasks.run_job("job", "local", lambda context: pytest.fail("ran a cancelled job"))
+
+    assert tasks.redis.scard(tasks.routing.ACTIVE_KEYS["local"]) == 0
 
 
 def test_cleanup_removes_only_expired_job_directories(worker):
@@ -208,3 +278,24 @@ def test_uploaded_file_is_transcribed_from_job_directory(worker, monkeypatch):
     assert job()["status"] == "completed"
     assert job()["title"] == "My Song"
     assert billing.get_balance("user") == 6
+
+
+def test_cleanup_service_exits_on_sigterm(monkeypatch):
+    import signal
+
+    from app.worker import cleanup
+
+    class StopLoop(BaseException):
+        pass
+
+    handlers = {}
+    monkeypatch.setattr(cleanup, "ensure_valid", lambda role: None)
+    monkeypatch.setattr(cleanup.signal, "signal", lambda signum, handler: handlers.update({signum: handler}))
+    monkeypatch.setattr(cleanup, "cleanup_expired_jobs", lambda: (_ for _ in ()).throw(StopLoop()))
+
+    with pytest.raises(StopLoop):
+        cleanup.main()
+
+    with pytest.raises(SystemExit) as exited:
+        handlers[signal.SIGTERM](signal.SIGTERM, None)
+    assert exited.value.code == 0

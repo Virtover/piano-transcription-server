@@ -71,6 +71,14 @@ def estimated_local_wait(redis: Redis) -> float:
     return math.ceil((active - capacity + 1) / capacity) * average
 
 
+def estimated_job_seconds(redis: Redis) -> float:
+    """Rough time until a new job would finish: its local wait, if the worker
+    is up, plus one average job."""
+    wait = estimated_local_wait(redis)
+    _, average = local_capacity(redis)
+    return (0.0 if math.isinf(wait) else wait) + average
+
+
 def outsourcing_enabled() -> bool:
     return settings.outsource.provider != "none"
 

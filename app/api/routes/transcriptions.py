@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
 from redis.exceptions import WatchError
 
+from app import maintenance
+from app.maintenance import NoticeResponse
 from app.config import settings
 from app.billing import Billing, cancelled_cost, transcription_cost, InsufficientMinutes
 from app.api.routes.billing import ensure_allowed_length, video_duration
@@ -79,6 +81,8 @@ class TranscriptionStatusResponse(BaseModel):
     # Where the model runs: local or remote. Absent for jobs queued before
     # outsourcing existed.
     backend: str | None = None
+    # A planned server restart or shutdown, if one is pending.
+    maintenance: NoticeResponse | None = None
 
 
 def current_user_balance(user_id: str | None) -> int | None:
@@ -98,7 +102,33 @@ def ensure_submissions_enabled() -> None:
         raise HTTPException(
             status_code=503,
             detail="The transcription server is still starting",
+            headers={"Retry-After": "10"},
         )
+
+
+def ensure_no_maintenance_pending() -> None:
+    """Refuse a job that would not finish before a planned restart or
+    shutdown. Nothing is reserved or charged."""
+    notice = maintenance.refusal(redis, routing.estimated_job_seconds(redis))
+    if notice is None:
+        return
+    response = notice.as_response()
+    paused = (
+        "new transcriptions are paused until it is back"
+        if notice.action == "restart"
+        else "new transcriptions are paused"
+    )
+    retry_after = notice.retry_after()
+    raise HTTPException(
+        status_code=503,
+        detail={"message": f"{response.message}; {paused}", "maintenance": response.model_dump()},
+        headers={"Retry-After": str(retry_after)} if retry_after is not None else None,
+    )
+
+
+def current_notice() -> NoticeResponse | None:
+    notice = maintenance.current(redis)
+    return notice.as_response() if notice else None
 
 
 def queue_job(
@@ -111,6 +141,7 @@ def queue_job(
 ) -> CreateTranscriptionResponse:
     """Reserve the job's cost, store it as queued, choose the local or
     remote backend, and hand it to that backend's queue."""
+    ensure_no_maintenance_pending()
     current_user = user.user_id if user else "anonymous"
     email = user.email if user else None
     cost = transcription_cost(duration)
@@ -170,6 +201,7 @@ def create_transcription(
     user: AuthenticatedUser | None = Depends(current_user),
 ):
     ensure_submissions_enabled()
+    ensure_no_maintenance_pending()
     duration = video_duration(request.source_url)
     job_id = str(uuid.uuid4())
     source_url = str(request.source_url)
@@ -205,6 +237,7 @@ async def upload_transcription(
 ):
     """Transcribe an audio or video file sent as the raw request body."""
     ensure_submissions_enabled()
+    ensure_no_maintenance_pending()
 
     size_limit = int(settings.limits.max_upload_size_mb * 1024**2)
     too_large = HTTPException(
@@ -296,6 +329,7 @@ def get_transcription(
         error=job.get("error"),
         minutes=current_user_balance(job.get("user_id")),
         backend=job.get("backend"),
+        maintenance=current_notice(),
     )
 
 

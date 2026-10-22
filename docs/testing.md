@@ -37,6 +37,8 @@ python -m pytest -q -k cancellation
 | `test_billing.py` | Cost formulas, reservations and settlement, free minutes, and the `admin_credit` command. |
 | `test_backups.py` | Backup creation, retention pruning, interval and retention settings, and duration parsing. |
 | `test_online_check.py` | `check --online`: each service check's success, failure hints, and secret-free output, and RunPod endpoint settings against the requirements, with fake services. |
+| `test_maintenance.py` | Planned restarts and shutdowns: the notice, its expiry, messages, and return time, refusing jobs that would not finish, the `maintenance` field, the `X-Server-Maintenance` headers, `Retry-After`, and clearing past notices at startup. |
+| `test_server_script.py` | `scripts/server.py` with a fake stack and clock: announce, build during the countdown, cancel on build failure or Ctrl+C, drain within the grace period, restart, stop every profile, start, and clear. |
 | `test_requirements.py` | `requirements`: values calculated from the configuration, the RunPod CUDA version matching `Dockerfile.runpod`, and the text and JSON output. |
 | `test_job_diagnostics.py` | Job diagnostics records at each job state, survival after the Redis job expires, account deletion, pruning, and inclusion in backups. |
 | `test_worker_tasks.py` | Worker job lifecycle, billing reconciliation, restart handling, and file cleanup. |
