@@ -1,5 +1,7 @@
 # 🎹 Piano Transcription Server
 
+[![Tests](https://github.com/Virtover/piano-transcription-server/actions/workflows/tests.yml/badge.svg)](https://github.com/Virtover/piano-transcription-server/actions/workflows/tests.yml)
+
 > Download a piano performance, transcribe it to MIDI, and retrieve the result through a simple asynchronous API.
 
 Piano Transcription Server accepts a public video URL or an uploaded audio or video file, runs [Transkun](https://github.com/Yujia-Yan/Transkun), and exposes the resulting MIDI file through FastAPI. Redis stores job state and Docker Compose runs the API, worker, cleanup service, and Redis together. The worker uses NVIDIA CUDA when available and falls back to CPU.
