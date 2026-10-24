@@ -41,7 +41,7 @@ class FakeBuild:
 
 class FakeStack:
     def __init__(self, clock, build_seconds=30, build_code=0, active_jobs=(), up_code=0, stop_code=0,
-                 ready_after=0, running=("api", "worker")):
+                 ready_after=0):
         self.clock = clock
         self.calls = []
         self.notice = None
@@ -51,7 +51,6 @@ class FakeStack:
         self.up_code = up_code
         self.stop_code = stop_code
         self.ready_after = ready_after
-        self.running = set(running)
         self.build = None
         self.up_call = None
         self.stop_call = None
@@ -86,9 +85,6 @@ class FakeStack:
         self.stop_call = (self.clock.now(), down)
         return self.stop_code
 
-    def running_services(self):
-        return self.running
-
     def ready(self):
         return self.up_call is not None and self.clock.now() >= self.up_call[0] + self.ready_after
 
@@ -116,9 +112,15 @@ def test_invalid_durations(text):
         server.parse_duration(text)
 
 
-def test_outsource_shorthand_adds_the_profile():
-    assert server.parse_arguments(["restart", "5m", "--outsource"]).profile == ["outsource"]
-    assert server.parse_arguments(["start", "--outsource", "--profile", "outsource"]).profile == ["outsource"]
+def test_outsource_option_is_no_longer_needed(capsys):
+    # .env decides; the option is still accepted so older commands keep working.
+    assert server.parse_arguments(["restart", "5m", "--outsource"]).profile == []
+
+    code, stack, _ = run(["start", "--outsource"])
+
+    assert code == 0
+    assert server.OUTSOURCE_NOTE in capsys.readouterr().out
+    assert stack.up_call is not None
 
 
 @pytest.mark.parametrize("arguments", [[], ["restart"], ["stop"], ["stop", "5m", "--outsource"], ["start", "5m"]])
@@ -153,11 +155,9 @@ def test_stop_covers_every_profile():
 
     stack.stop(down=False)
     stack.stop(down=True)
-    stack.running_services()
 
     assert calls[0] == ["docker", "compose", "--profile", "*", "stop"]
     assert calls[1] == ["docker", "compose", "--profile", "*", "down"]
-    assert calls[2] == ["docker", "compose", "--profile", "*", "ps", "--services", "--status", "running"]
 
 
 def test_custom_command_is_run_instead_of_compose_up():
@@ -301,10 +301,12 @@ def test_shutdown_can_remove_the_containers():
     assert stack.stop_call == (0, True)
 
 
-def test_shutdown_tells_how_to_start_with_the_same_profiles(capsys):
-    run(["stop", "0s"], running=("api", "worker", "remote-worker"))
+def test_shutdown_tells_how_to_start_again(capsys):
+    run(["stop", "0s"])
 
-    assert "python scripts/server.py start --outsource" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Start again with: python scripts/server.py start\n" in output
+    assert "--outsource" not in output
 
 
 def test_cancelled_shutdown_does_not_stop():
@@ -331,7 +333,7 @@ def test_failed_stop_reports_the_error(capsys):
 
 
 def test_start_waits_until_ready(capsys):
-    code, stack, _ = run(["start", "--outsource"], ready_after=6)
+    code, stack, _ = run(["start"], ready_after=6)
 
     assert code == 0
     assert stack.up_call == (0, None, False)

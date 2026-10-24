@@ -77,3 +77,31 @@ def test_main_passes_resolved_values_to_dramatiq(default_settings, cores, monkey
     assert calls == [["/usr/bin/dramatiq", "app.worker.tasks", "--processes", "1", "--threads", "6", "--queues", "default"]]
     assert os.environ["OMP_NUM_THREADS"] == "6"
     assert "WORKER_THREADS" not in os.environ
+
+
+def test_remote_worker_idles_when_outsourcing_is_off(default_settings, monkeypatch, capsys):
+    # The service always runs; .env decides whether it does anything.
+    idled = []
+    monkeypatch.setattr(launcher, "idle", lambda reason: idled.append(reason))
+    monkeypatch.setattr(launcher.os, "execv", lambda path, args: pytest.fail("Dramatiq started"))
+
+    launcher.main(["remote"])
+
+    assert len(idled) == 1 and "OUTSOURCE_PROVIDER" in idled[0]
+
+
+def test_idle_waits_until_the_container_is_stopped(monkeypatch, capsys):
+    handlers = {}
+    monkeypatch.setattr(launcher.signal, "signal", lambda signum, handler: handlers.setdefault(signum, handler))
+
+    def sleep(seconds):
+        # docker stop sends SIGTERM.
+        handlers[launcher.signal.SIGTERM](launcher.signal.SIGTERM, None)
+
+    monkeypatch.setattr(launcher.time, "sleep", sleep)
+
+    with pytest.raises(SystemExit) as stopped:
+        launcher.idle("Outsourcing is off")
+
+    assert stopped.value.code == 0
+    assert "Outsourcing is off" in capsys.readouterr().out

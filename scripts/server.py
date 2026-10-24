@@ -1,9 +1,8 @@
 """Planned restarts and shutdowns, announced to clients first.
 
     python scripts/server.py restart 5m                  # announce, build, wait, drain, restart
-    python scripts/server.py restart 5m --outsource      # the same with the outsource profile
     python scripts/server.py stop 10m --back-in 2h       # announce, wait, drain, stop everything
-    python scripts/server.py start [--outsource]         # start again and wait until ready
+    python scripts/server.py start                       # start again and wait until ready
     python scripts/server.py status
     python scripts/server.py cancel                      # also stops a waiting script
 
@@ -29,8 +28,7 @@ STATUS_INTERVAL = 10
 DRAIN_INTERVAL = 5
 # A shutdown stops every service, whichever profiles started it.
 ALL_PROFILES = ["*"]
-# Services that only run with a profile, and the option that starts them.
-PROFILE_SERVICES = {"remote-worker": "--outsource"}
+OUTSOURCE_NOTE = "--outsource is no longer needed: OUTSOURCE_PROVIDER in .env turns outsourcing on or off"
 
 
 def parse_duration(text: str) -> float:
@@ -76,14 +74,6 @@ class Stack:
         probe = "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=5)"
         result = self._run(self.compose() + ["exec", "-T", "api", "python", "-c", probe], capture_output=True, text=True)
         return result.returncode == 0
-
-    def running_services(self) -> set[str]:
-        result = self._run(
-            self.compose(ALL_PROFILES) + ["ps", "--services", "--status", "running"],
-            capture_output=True,
-            text=True,
-        )
-        return set(result.stdout.split()) if result.returncode == 0 else set()
 
     def start_build(self):
         return self._popen(self.compose() + ["build"])
@@ -234,14 +224,13 @@ def stop(args, stack: Stack, clock: Clock) -> int:
     if code is not None:
         return code
     drain(stack, clock, args.grace)
-    options = [option for service, option in PROFILE_SERVICES.items() if service in stack.running_services()]
     say("stopping every service" + (" and removing the containers" if args.down else ""))
     code = stack.stop(args.down)
     if code != 0:
         say(f"docker compose failed with exit code {code}")
         return code
     # The notice stays in Redis; the API removes it when it starts again.
-    say("stopped. Start again with: python scripts/server.py start" + "".join(f" {option}" for option in options))
+    say("stopped. Start again with: python scripts/server.py start")
     return 0
 
 
@@ -267,7 +256,8 @@ def parse_arguments(arguments: list[str]) -> argparse.Namespace:
 
     def profiles(subparser):
         subparser.add_argument("--profile", action="append", default=[], help="Compose profile; repeatable")
-        subparser.add_argument("--outsource", action="store_true", help="shorthand for --profile outsource")
+        # Accepted so older commands keep working; the remote worker always runs now.
+        subparser.add_argument("--outsource", action="store_true", help=argparse.SUPPRESS)
 
     def timing(subparser, noun):
         subparser.add_argument("delay", type=parse_duration, help=f"time until the {noun}, for example 5m or 30s")
@@ -294,13 +284,13 @@ def parse_arguments(arguments: list[str]) -> argparse.Namespace:
 
     args = parser.parse_args(arguments)
     args.profile = list(getattr(args, "profile", []))
-    if getattr(args, "outsource", False) and "outsource" not in args.profile:
-        args.profile.append("outsource")
     return args
 
 
 def main(arguments: list[str], stack: Stack | None = None, clock: Clock | None = None) -> int:
     args = parse_arguments(arguments)
+    if getattr(args, "outsource", False):
+        say(OUTSOURCE_NOTE)
     stack = stack or Stack(args.profile)
     clock = clock or Clock()
     try:
