@@ -83,6 +83,27 @@ services:
     command: ["python", "-m", "app.worker.cleanup"]
     restart: unless-stopped
 
+  # Optional HTTPS access through a Cloudflare Tunnel. Started only with
+  # COMPOSE_PROFILES=cloudflare in .env. It connects out to Cloudflare and
+  # forwards to the API on this network, so no port is opened. Only it gets
+  # the token's folder. See docs/cloudflare-tunnel.md.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.0
+    profiles: [cloudflare]
+    command:
+      - tunnel
+      # Readiness for `check --online`, on this network only.
+      - --metrics
+      - 0.0.0.0:20241
+      - run
+      - --token-file
+      - /run/secrets/cloudflare/tunnel_token
+    volumes:
+      - ./secrets/cloudflare:/run/secrets/cloudflare:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     healthcheck:

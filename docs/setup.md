@@ -6,6 +6,7 @@ The basic stack runs with Docker alone. The other parts are optional and each ne
 | --- | --- | --- | --- |
 | Basic stack | Transcribing on this machine | [Run the stack](#-run-the-stack) | 15 min |
 | Server password | A private server reachable from the internet | [Password protection](#-password-protection) | 5 min |
+| Cloudflare Tunnel | An HTTPS address without opening ports | [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md) | about 20 min, with a domain on Cloudflare |
 | Google sign-in | Accounts; required for billing | [Google sign-in](google-sign-in.md) | about 30 min |
 | Google Play billing | Paid minutes, free minutes | [Google Play billing](google-play-billing.md) | about 1 hour, plus up to a day for Google permissions |
 | RunPod outsourcing | Extra GPUs when this machine is busy | [Outsourcing to RunPod](runpod.md) | about 1 hour |
@@ -87,7 +88,7 @@ Every request then needs the password, except `/health` and `/ready`:
 
 Requests without the correct password get `401` with `{"detail": "Server password required"}`.
 
-**Use HTTPS when the server is reachable from the internet.** Over plain `http://`, the password and the transcriptions are readable by anyone on the network path. Put the API behind a reverse proxy or tunnel that terminates HTTPS and forwards to port 8000, and expose only that. If the proxy runs on the same machine, set `API_BIND_ADDRESS=127.0.0.1` in `.env` so port 8000 cannot be reached around it.
+**Use HTTPS when the server is reachable from the internet.** Over plain `http://`, the password and the transcriptions are readable by anyone on the network path. Put the API behind a reverse proxy or tunnel that terminates HTTPS and forwards to port 8000, and expose only that. The stack includes an optional one: see [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md). If the proxy runs on the same machine, set `API_BIND_ADDRESS=127.0.0.1` in `.env` so port 8000 cannot be reached around it.
 
 ## 👤 Running as a non-root user
 

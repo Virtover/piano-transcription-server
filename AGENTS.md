@@ -40,7 +40,7 @@ python scripts/server.py restart 5m                              # announced res
 
 ## Setup tasks
 
-For guided setup, use the skills in `.claude/skills/`: `setup-runpod` for outsourcing, `setup-google` for sign-in and billing. Their rules apply to any agent:
+For guided setup, use the skills in `.claude/skills/`: `setup-runpod` for outsourcing, `setup-google` for sign-in and billing. The Cloudflare Tunnel has no skill; follow `docs/cloudflare-tunnel.md`. These rules apply to any agent:
 
 - Take the requirements from `requirements --json`, and look up the providers' current documentation for where each is set.
 - Never ask for a secret in the chat or read secret files; give the user the command to write it, then check the file exists.

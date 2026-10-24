@@ -18,13 +18,14 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
 
 from dotenv import dotenv_values
-from pydantic import BeforeValidator, Field, SecretStr, ValidationError
+from pydantic import BeforeValidator, Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,10 +33,17 @@ logger = logging.getLogger(__name__)
 
 SECRETS_DIR = "/run/secrets"
 # Unknown variables with these prefixes are reported as possible typos.
-CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "RUNPOD_", "GOOGLE_PLAY_")
+CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_")
 MIN_SERVER_PASSWORD_LENGTH = 12
 # Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
 COMPOSE_VARIABLES = {"API_BIND_ADDRESS"}
+# The Compose profile that starts the cloudflared service.
+TUNNEL_PROFILE = "cloudflare"
+# In a folder of its own, mounted into cloudflared alone. Docker creates a
+# missing mount source as a directory; an empty folder is harmless, a
+# directory where the token file should be is not.
+TUNNEL_TOKEN_FILE = "cloudflare/tunnel_token"
+HOSTNAME_PATTERN = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 
 
 class ConfigError(ValueError):
@@ -247,6 +255,34 @@ class OutsourceSettings(BaseSettings):
     max_audio_mb: float = Field(default=512, gt=0)
 
 
+class TunnelSettings(BaseSettings):
+    """Optional HTTPS access through a Cloudflare Tunnel: the cloudflared
+    service in docker-compose.yml."""
+
+    model_config = _group_config("CLOUDFLARE_TUNNEL_")
+
+    # Read by Docker Compose; it starts cloudflared when this lists `cloudflare`.
+    compose_profiles: str = Field(default="", validation_alias="COMPOSE_PROFILES")
+    # The public hostname, such as piano.example.com. Only check --online
+    # and the requirements use it.
+    hostname: str | None = None
+
+    @field_validator("hostname")
+    @classmethod
+    def _bare_hostname(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().lower().rstrip(".")
+        if not HOSTNAME_PATTERN.match(value):
+            raise ValueError("must be a hostname such as piano.example.com, without https:// or a path")
+        return value
+
+    @property
+    def enabled(self) -> bool:
+        profiles = {profile.strip() for profile in self.compose_profiles.split(",")}
+        return bool(profiles & {TUNNEL_PROFILE, "*"})
+
+
 class RunPodSettings(BaseSettings):
     model_config = _group_config("RUNPOD_")
 
@@ -265,6 +301,7 @@ GROUPS: dict[str, type[BaseSettings]] = {
     "google_play": GooglePlaySettings,
     "outsource": OutsourceSettings,
     "runpod": RunPodSettings,
+    "tunnel": TunnelSettings,
     "secrets": SecretSettings,
 }
 
@@ -280,6 +317,7 @@ class Settings:
     google_play: GooglePlaySettings
     outsource: OutsourceSettings
     runpod: RunPodSettings
+    tunnel: TunnelSettings
     secrets: SecretSettings
     secrets_dir: str = SECRETS_DIR
 
@@ -483,7 +521,33 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
                 json.loads(account)
             except ValueError:
                 problems.append("The Google Play service-account secret is not valid JSON")
+    if role == "all" and config.tunnel.enabled:
+        # Only cloudflared reads the token, so only `check` looks for it.
+        token = Path(config.secrets_dir) / TUNNEL_TOKEN_FILE
+        if not token.is_file() or token.stat().st_size == 0:
+            problems.append(
+                f"COMPOSE_PROFILES={TUNNEL_PROFILE} needs the tunnel token in the secret file "
+                f"{config.secrets_dir}/{TUNNEL_TOKEN_FILE}"
+            )
     return problems
+
+
+def configuration_warnings(config: "Settings", environment: dict[str, str]) -> list[str]:
+    """Choices that work but are probably mistakes."""
+    warnings = []
+    if config.tunnel.enabled:
+        if config.secrets.server_password is None and config.billing.provider == "none":
+            warnings.append(
+                "The Cloudflare Tunnel makes the server reachable from the internet, and it has neither a "
+                "password nor sign-in: anyone who finds the address can use it. See \"Password protection\" "
+                "in docs/setup.md."
+            )
+        if environment.get("API_BIND_ADDRESS", "0.0.0.0") != "127.0.0.1":
+            warnings.append(
+                "Port 8000 is published on every network interface, so the server is also reachable without the "
+                "tunnel's HTTPS. Set API_BIND_ADDRESS=127.0.0.1 unless devices on your network connect directly."
+            )
+    return warnings
 
 
 CONTAINER_UID = 10001
@@ -590,6 +654,11 @@ def main(arguments: list[str]) -> int:
         config = None
     if config is not None:
         print("\n".join(describe(config)))
+        warnings = configuration_warnings(config, read_environment(args.env_file))
+        if warnings:
+            print("\nWarnings:")
+            for warning in warnings:
+                print(f"  - {warning}")
     if problems:
         print("\nConfiguration errors:", file=sys.stderr)
         for problem in problems:

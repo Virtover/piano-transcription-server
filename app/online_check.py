@@ -362,6 +362,85 @@ def check_google_play(config, service_factory: Callable | None = None) -> Result
     return Result("Google Play", "ok", f"{len(products)} products, all configured")
 
 
+# --- Cloudflare Tunnel ------------------------------------------------------
+
+# cloudflared's readiness endpoint, on the Compose network (docker-compose.yml).
+TUNNEL_READY_URL = "http://cloudflared:20241/ready"
+
+
+def check_tunnel(config, http=requests) -> list[Result]:
+    try:
+        response = http.get(TUNNEL_READY_URL, timeout=REQUEST_TIMEOUT)
+        connections = response.json().get("readyConnections", 0)
+    except Exception as error:
+        return [Result(
+            "Cloudflare Tunnel",
+            "fail",
+            f"cloudflared cannot be reached: {type(error).__name__}",
+            "Start the stack with COMPOSE_PROFILES=cloudflare in .env, and run this check with "
+            "`docker compose run`, which joins the stack's network.",
+        )]
+    if response.status_code != 200 or not connections:
+        return [Result(
+            "Cloudflare Tunnel",
+            "fail",
+            "cloudflared is not connected to Cloudflare",
+            "See `docker compose logs cloudflared`. If Cloudflare refuses the tunnel, the token in "
+            "secrets/cloudflare/tunnel_token is wrong or its tunnel was deleted: write the token again, then "
+            "`docker compose up -d cloudflared`.",
+        )]
+    results = [Result("Cloudflare Tunnel", "ok", f"connected to Cloudflare ({connections} connections)")]
+    results.append(check_public_address(config, http))
+    return results
+
+
+def check_public_address(config, http=requests) -> Result:
+    """The public hostname reaches this API, and only with the password if
+    one is set."""
+    hostname = config.tunnel.hostname
+    if not hostname:
+        return Result(
+            "Public address",
+            "warn",
+            "CLOUDFLARE_TUNNEL_HOSTNAME is not set, so the public address was not checked",
+            "Set it to the tunnel's public hostname, such as piano.example.com.",
+        )
+    base = f"https://{hostname}"
+    try:
+        health = http.get(f"{base}/health", timeout=REQUEST_TIMEOUT)
+    except Exception as error:
+        return Result(
+            "Public address",
+            "fail",
+            f"{base}/health: {type(error).__name__}",
+            "Check that the hostname is spelled right and that its DNS record exists.",
+        )
+    try:
+        # A page from Cloudflare or another server is not this API's JSON.
+        reached = health.status_code == 200 and health.json().get("status") == "ok"
+    except (ValueError, AttributeError):
+        reached = False
+    if not reached:
+        return Result(
+            "Public address",
+            "fail",
+            f"{base}/health: HTTP {health.status_code}, not this server",
+            "Route the tunnel's public hostname to the service http://api:8000 (cloudflared reaches the API by "
+            "its Compose name, not localhost), with no challenge or access login in front of it: the app "
+            "cannot pass one.",
+        )
+    if config.secrets.server_password is not None:
+        response = http.get(f"{base}/api/server-info", timeout=REQUEST_TIMEOUT)
+        if response.status_code != 401:
+            return Result(
+                "Public address",
+                "fail",
+                f"{base}/api/server-info answered HTTP {response.status_code} without the server password",
+                "Something in front of the API answers for it. Turn off caching for the hostname.",
+            )
+    return Result("Public address", "ok", f"{base} reaches this server")
+
+
 # --- Running ----------------------------------------------------------------
 
 def run_checks(config) -> list[Result]:
@@ -376,6 +455,10 @@ def run_checks(config) -> list[Result]:
         results.append(check_google_play(config))
     else:
         results.append(Result("Google", "skip", "BILLING_PROVIDER=none"))
+    if config.tunnel.enabled:
+        results.extend(check_tunnel(config))
+    else:
+        results.append(Result("Cloudflare Tunnel", "skip", "COMPOSE_PROFILES does not list cloudflare"))
     return results
 
 

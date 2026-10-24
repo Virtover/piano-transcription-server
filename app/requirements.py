@@ -327,8 +327,62 @@ def google_sections(config) -> list[Section]:
     return [sign_in, play]
 
 
+def tunnel_sections(config) -> list[Section]:
+    enabled = config.tunnel.enabled
+    note = (
+        "enabled (COMPOSE_PROFILES=cloudflare)"
+        if enabled
+        else "not enabled; set COMPOSE_PROFILES=cloudflare to serve the API over HTTPS through Cloudflare"
+    )
+    hostname = _or_placeholder(config.tunnel.hostname, "CLOUDFLARE_TUNNEL_HOSTNAME")
+    upload_mb = f"{config.limits.max_upload_size_mb:g}"
+    return [
+        Section(
+            "Cloudflare Tunnel",
+            "Cloudflare",
+            enabled,
+            note,
+            [
+                Requirement(
+                    "Domain",
+                    "a domain whose DNS is managed by Cloudflare",
+                    "A tunnel's public hostnames are names in a domain of the same Cloudflare account.",
+                ),
+                Requirement(
+                    "Tunnel",
+                    "one tunnel, run with a token, the token saved as secrets/cloudflare/tunnel_token",
+                    "The cloudflared service in docker-compose.yml runs it. It connects out to Cloudflare, so no "
+                    "port needs to be open on this machine or its router.",
+                    True,
+                ),
+                Requirement(
+                    "Public hostname",
+                    f"{hostname}, sent to the service http://api:8000",
+                    "cloudflared runs in the Compose network, where the API is reachable by its service name. "
+                    "localhost there is cloudflared itself.",
+                    True,
+                ),
+                Requirement(
+                    "Request size",
+                    f"request bodies up to {upload_mb} MB (MAX_UPLOAD_SIZE_MB), or MAX_UPLOAD_SIZE_MB lowered to "
+                    "what the plan accepts",
+                    "Cloudflare refuses larger uploads before they reach the server, with an error the app cannot "
+                    "explain. The limit depends on the Cloudflare plan.",
+                ),
+                Requirement(
+                    "No challenges or caching",
+                    f"no browser challenge, bot protection, or access login on {hostname}, and no caching",
+                    "The app calls the API directly and cannot pass a challenge page. Responses belong to one "
+                    "user and change while jobs run. Protect the server with its own password instead.",
+                    True,
+                ),
+            ],
+        )
+    ]
+
+
 def build_requirements(config) -> list[Section]:
-    return outsourcing_sections(config) + google_sections(config)
+    return outsourcing_sections(config) + google_sections(config) + tunnel_sections(config)
 
 
 def format_requirements(sections: list[Section]) -> list[str]:

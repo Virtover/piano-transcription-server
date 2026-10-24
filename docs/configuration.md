@@ -119,6 +119,15 @@ When local GPUs are overloaded, jobs can run on RunPod Serverless. Only the mode
 
 A number is easier to reason about, because it limits what your server does: every remote job downloads and converts audio here, from your IP. `auto` suits deployments where the RunPod console should be the one place that sets capacity. Either way, RunPod's max workers is the ceiling on the bill.
 
+### Cloudflare Tunnel
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `COMPOSE_PROFILES` | unset | Read by Docker Compose: `cloudflare` starts the `cloudflared` service, which serves the API over HTTPS through a Cloudflare Tunnel. Separate several profiles with commas. |
+| `CLOUDFLARE_TUNNEL_HOSTNAME` | unset | The tunnel's public hostname, such as `piano.example.com`, without `https://`. Only `check --online` and `requirements` use it. |
+
+`COMPOSE_PROFILES=cloudflare` also requires the secret file `cloudflare/tunnel_token`; `check` fails without it. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
+
 ### Container wiring
 
 Set by `docker-compose.yml`. Change them only when running the services outside Docker.
@@ -154,6 +163,8 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `outsource_storage_access_key` | Access key ID of the storage token. |
 | `outsource_storage_secret_key` | Secret access key of the storage token. |
 | `server_password` | Optional. When present, every request except `/health` and `/ready` needs this password, as the `X-Server-Password` header or HTTP Basic auth with any user name. At least 12 characters; the API refuses to start otherwise. See [Password protection](setup.md#-password-protection). |
+
+The Cloudflare tunnel token is in a folder of its own, `secrets/cloudflare/tunnel_token`, because only the `cloudflared` service gets that folder. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
 
 Secrets are only read from these files: a variable with the same name in `.env` or the environment is ignored. Never commit the `secrets` folder.
 

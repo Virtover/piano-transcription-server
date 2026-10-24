@@ -20,6 +20,7 @@ cleanup service: deletes expired job files and stale routing entries
 * `remote-worker` consumes the `remote` queue when `OUTSOURCE_PROVIDER` is set; with `none` it only idles. It always starts, so `.env` is the one switch. It downloads and converts audio here, then runs the model on RunPod. It runs on the API image and never loads torch or the model.
 * `cleanup` removes files whose Redis job state has expired.
 * `redis` stores job state and queues work.
+* `cloudflared` is optional and starts only with `COMPOSE_PROFILES=cloudflare`. It connects out to a Cloudflare Tunnel and forwards HTTPS requests to the API. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
 * The shared `data` volume stores job files. Billing SQLite data and its periodic backups are stored in the host-mounted `billing-data` directory, available only to the API and the workers.
 
 The main implementation surfaces are `app/main.py`, `app/api/routes/`, `app/worker/`, and `app/transcription/`.
