@@ -1,9 +1,6 @@
 import sqlite3
-import sys
 import time
 from pathlib import Path
-
-import pytest
 
 from app.worker import tasks
 
@@ -164,14 +161,12 @@ def test_running_job_of_deleted_account_is_not_charged(api_context, monkeypatch)
     assert billing.reserved_job_ids() == []
 
 
-def run_admin_delete(monkeypatch, billing, *argv, answer=None):
-    from app import admin_delete
+def run_admin_delete(monkeypatch, *arguments, answer=None):
+    from app.admin.__main__ import main
 
-    monkeypatch.setattr(admin_delete, "Billing", lambda: billing)
-    monkeypatch.setattr(sys, "argv", ["admin_delete", *argv])
     if answer is not None:
         monkeypatch.setattr("builtins.input", lambda prompt: answer)
-    admin_delete.main()
+    return main(["user", *arguments])
 
 
 def test_admin_delete_command_removes_account(api_context, monkeypatch, capsys):
@@ -184,9 +179,9 @@ def test_admin_delete_command_removes_account(api_context, monkeypatch, capsys):
         json={"source_url": "https://example.com/video"},
     ).json()["job_id"]
 
-    run_admin_delete(monkeypatch, billing, "--user", " Owner@Example.com ", "--yes")
+    assert run_admin_delete(monkeypatch, " Owner@Example.com ", "delete", "--yes") == 0
 
-    assert "Deleted account of owner@example.com" in capsys.readouterr().out
+    assert "Deleted the account of owner@example.com" in capsys.readouterr().out
     assert rows(settings, "SELECT * FROM users") == []
     assert rows(settings, "SELECT user_id FROM purchases") == [("deleted",)]
     assert not tasks.redis.exists(tasks.job_key(job_id))
@@ -197,19 +192,18 @@ def test_admin_delete_command_asks_for_confirmation(api_context, monkeypatch, ca
     enable_billing(settings, free_minutes=None)
     billing.credit_purchase("owner", "starter", "purchase-token", "order-1", "owner@example.com")
 
-    run_admin_delete(monkeypatch, billing, "--user", "owner@example.com", answer="n")
-    assert "Cancelled" in capsys.readouterr().out
+    run_admin_delete(monkeypatch, "owner@example.com", "delete", answer="n")
+    assert "Nothing changed" in capsys.readouterr().out
     assert billing.get_balance("owner") == 10
 
-    run_admin_delete(monkeypatch, billing, "--user", "owner@example.com", answer="y")
+    run_admin_delete(monkeypatch, "owner@example.com", "delete", answer="y")
     assert billing.get_balance("owner") == 0
     assert rows(settings, "SELECT * FROM users") == []
 
 
-def test_admin_delete_command_rejects_unknown_email(api_context, monkeypatch):
-    _, settings, billing = api_context
+def test_admin_delete_command_rejects_unknown_email(api_context, monkeypatch, capsys):
+    _, settings, _ = api_context
     enable_billing(settings, free_minutes=None)
 
-    with pytest.raises(SystemExit) as error:
-        run_admin_delete(monkeypatch, billing, "--user", "missing@example.com", "--yes")
-    assert error.value.code == 2
+    assert run_admin_delete(monkeypatch, "missing@example.com", "delete", "--yes") == 1
+    assert "missing@example.com" in capsys.readouterr().err

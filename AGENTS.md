@@ -11,6 +11,7 @@ docker compose run --rm api python -m app.config check --online  # also test sto
 docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents
 docker compose up -d --build                                     # the stack; OUTSOURCE_PROVIDER in .env switches RunPod on
 python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start, status, cancel
+docker compose exec api python -m app.admin status              # live picture; also jobs, user, billing, limits, audit
 ```
 
 `check --online` is the way to confirm a setup step worked. Code changes reach the containers only after a rebuild, for example `docker compose build api`.
@@ -28,6 +29,7 @@ python scripts/server.py restart 5m                              # announced res
 | `app/transcription/` | Audio, batching, and the model |
 | `app/billing.py` | SQLite billing database, also job diagnostics |
 | `runpod/handler.py` | The RunPod Serverless handler, built with `Dockerfile.runpod` |
+| `app/admin/`, `app/controls.py` | `python -m app.admin`: status, jobs, users, the billing report, and temporary limits the API reads from Redis |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
 
 ## Conventions

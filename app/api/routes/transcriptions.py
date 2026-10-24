@@ -9,19 +9,19 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
-from redis.exceptions import WatchError
 
 from app import job_limits, maintenance, video_info
 from app.maintenance import NoticeResponse
 from app.config import settings
-from app.billing import Billing, cancelled_cost, transcription_cost, InsufficientMinutes
-from app.api.routes.billing import check_video, ensure_allowed_length
+from app.billing import Billing, transcription_cost, InsufficientMinutes
+from app.api.routes.billing import check_video, ensure_accepting, ensure_allowed_length
 from app.auth import AuthenticatedUser, current_user
 from app.media import UnsupportedMedia, probe_audio
 from app.outsource import routing
 from app.worker.tasks import (
     JOB_TTL,
     UPLOAD_FILE_NAME,
+    cancel_job,
     job_key,
     record_job,
     send_job,
@@ -175,9 +175,10 @@ def queue_job(
     fields: dict[str, str],
     arguments: tuple[Any, ...] = (),
     options: dict[str, Any] | None = None,
+    backend: routing.Backend | None = None,
 ) -> CreateTranscriptionResponse:
     """Reserve the job's cost, store it as queued, choose the local or
-    remote backend, and hand it to that backend's queue."""
+    remote backend unless one is given, and hand it to that backend's queue."""
     ensure_no_maintenance_pending()
     current_user = user.user_id if user else "anonymous"
     email = user.email if user else None
@@ -206,7 +207,10 @@ def queue_job(
     )
     # Queued jobs do not expire; an upload placeholder had a TTL.
     redis.persist(job_key(job_id))
-    backend = routing.choose_backend(redis, job_id)
+    if backend is None:
+        backend = routing.choose_backend(redis, job_id)
+    else:
+        routing.mark_active(redis, backend, job_id)
     redis.hset(job_key(job_id), "backend", backend)
 
     try:
@@ -239,26 +243,39 @@ def create_transcription(
 ):
     ensure_submissions_enabled()
     ensure_no_maintenance_pending()
-    job_id = str(uuid.uuid4())
     user_id = user.user_id if user else "anonymous"
+    ensure_accepting(user_id, link=True)
+    job_id = str(uuid.uuid4())
     # The place is held during the video check too, which runs yt-dlp.
     hold_place(job_id, user_id, "preparing")
-    job_dir = Path(settings.service.data_dir) / "jobs" / job_id
     try:
-        video = check_video(request.source_url)
-        source_url = str(request.source_url)
-        # The worker downloads with this info instead of asking the site again.
-        video_info.save_video_info(job_dir, video.info, video.checked_at)
-        fields = {"source_url": source_url}
-        # Clients see the title while the job waits; the download updates it.
-        metadata = video_info.video_metadata(video.info, source_url)
-        if metadata["title"]:
-            fields.update(title=metadata["title"], metadata=json.dumps(metadata))
-        return queue_job(job_id, user, video.duration, fields, (source_url,))
+        return submit_link(job_id, str(request.source_url), user)
     except BaseException:
         give_back_place(job_id, user_id)
-        shutil.rmtree(job_dir, ignore_errors=True)
+        shutil.rmtree(job_directory(job_id), ignore_errors=True)
         raise
+
+
+def job_directory(job_id: str) -> Path:
+    return Path(settings.service.data_dir) / "jobs" / job_id
+
+
+def submit_link(
+    job_id: str,
+    source_url: str,
+    user: AuthenticatedUser | None,
+    backend: routing.Backend | None = None,
+) -> CreateTranscriptionResponse:
+    """Check a video link and queue it, for a job whose place is held."""
+    video = check_video(source_url)
+    # The worker downloads with this info instead of asking the site again.
+    video_info.save_video_info(job_directory(job_id), video.info, video.checked_at)
+    fields = {"source_url": source_url}
+    # Clients see the title while the job waits; the download updates it.
+    metadata = video_info.video_metadata(video.info, source_url)
+    if metadata["title"]:
+        fields.update(title=metadata["title"], metadata=json.dumps(metadata))
+    return queue_job(job_id, user, video.duration, fields, (source_url,), backend=backend)
 
 
 def title_from_filename(filename: str) -> str:
@@ -285,6 +302,7 @@ async def upload_transcription(
     """Transcribe an audio or video file sent as the raw request body."""
     ensure_submissions_enabled()
     ensure_no_maintenance_pending()
+    await run_in_threadpool(ensure_accepting, user.user_id if user else "anonymous", False)
 
     size_limit = int(settings.limits.max_upload_size_mb * 1024**2)
     too_large = HTTPException(
@@ -389,61 +407,30 @@ def cancel_transcription(
     job_id: str,
     user: AuthenticatedUser | None = Depends(current_user),
 ):
-    key = job_key(job_id)
+    job = redis.hgetall(job_key(job_id))
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail="Transcription job not found",
+        )
+    require_job_owner(job, user.user_id if user else None)
 
-    while True:
-        try:
-            with redis.pipeline() as pipe:
-                pipe.watch(key)
-                job = pipe.hgetall(key)
-
-                if not job:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="Transcription job not found",
-                    )
-                require_job_owner(job, user.user_id if user else None)
-
-                status = job.get("status", "unknown")
-
-                if status == "cancelled":
-                    return CreateTranscriptionResponse(
-                        job_id=job_id,
-                        status=status,
-                        minutes=current_user_balance(job.get("user_id")),
-                    )
-
-                if status not in {"queued", "processing"}:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Transcription is not running",
-                    )
-
-                pipe.multi()
-                pipe.hset(
-                    key,
-                    mapping={
-                        "status": "cancelled",
-                        "error": "Transcription cancelled",
-                        "progress": job.get("progress", "0.0"),
-                    },
-                )
-                pipe.expire(key, JOB_TTL)
-                pipe.execute()
-                record_job(job_id)
-                user = job.get("user_id")
-                charged = int(job.get("full_cost", 0))
-                progress = float(job.get("progress", 0))
-                if user:
-                    final_cost = cancelled_cost(charged, progress)
-                    billing.settle_cancellation(job_id, final_cost)
-                return CreateTranscriptionResponse(
-                    job_id=job_id,
-                    status="cancelled",
-                    minutes=current_user_balance(user),
-                )
-        except WatchError:
-            continue
+    status = cancel_job(job_id)
+    if status is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Transcription job not found",
+        )
+    if status not in {"queued", "processing", "cancelled"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Transcription is not running",
+        )
+    return CreateTranscriptionResponse(
+        job_id=job_id,
+        status="cancelled",
+        minutes=current_user_balance(job.get("user_id")),
+    )
 
 
 @router.get("/{job_id}/midi")

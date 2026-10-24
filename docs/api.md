@@ -67,6 +67,7 @@ Upload errors:
 | `422` | The file is empty, is not a supported audio or video file, has no audio, or `filename` is missing. |
 | `402` | Not enough transcription minutes (billing enabled). A balance below one minute is refused before the file is read. |
 | `429` | Too many transcriptions in progress; see [Limits](#-limits). |
+| `403`, `503` | Submissions are stopped by an administrator; see [Limits](#-limits). |
 
 To show the cost before uploading, read the duration on the device and call `GET /api/billing/cost?duration_seconds=...`.
 
@@ -126,6 +127,11 @@ The server limits how many transcriptions are in progress at once: uploading, be
 * `MAX_ACTIVE_JOBS_PER_USER` (default 5): one signed-in user, when billing is enabled.
 
 A transcription stops counting when it completes, fails, or is cancelled.
+
+An administrator can also stop submissions for a while, without a restart (see [Administration](administration.md#-limits)). Show the `detail` to the user:
+
+* `503` for every new transcription while submissions are paused, and for links and their cost while links are turned off; uploads are still accepted then. `Retry-After` is sent when the end is known.
+* `403` for a blocked account, on new transcriptions and link costs. Its jobs, balance, and account deletion still work.
 
 Checking a link's length runs a video download tool, and only a few checks run at once. When they are all busy for 10 seconds, `POST /api/transcriptions` and `GET /api/billing/cost?source_url=...` answer `503` with `Retry-After: 5`. A check is reused for 5 minutes, so submitting a link right after asking its cost does not run it again.
 
@@ -217,6 +223,6 @@ Billing backups still contain the deleted data until they expire after `BILLING_
 
 The endpoint returns `401` without a valid token and `409` when billing is disabled, because there are no accounts then.
 
-Administrators can delete an account by email with `python -m app.admin_delete`; see [Configuration](configuration.md).
+Administrators can delete an account by email with `python -m app.admin user <email> delete`; see [Administration](administration.md#-users).
 
 When billing is enabled, send a valid Google OAuth 2.0 access token as `Authorization: Bearer <token>`. The server checks the token with Google's `tokeninfo` endpoint, requires its audience to match one of `GOOGLE_OAUTH_CLIENT_IDS`, and uses the verified Google `sub` claim as the billing identity. The token must include the `openid` and `email` scopes, and the account's email must be verified. Results are cached for up to 5 minutes, so a revoked token can keep working for that long. `X-User-Id` cannot select another user. See [Google sign-in](google-sign-in.md) for the setup.

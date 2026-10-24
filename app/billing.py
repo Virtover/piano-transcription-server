@@ -12,6 +12,10 @@ from app.config import duration_seconds as parse_duration, settings
 DELETED_USER_ID = "deleted"
 BACKUP_FILE_PATTERN = re.compile(r"^billing-(\d+)\.sqlite3$")
 TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
+# Kinds of minute_ledger entries. Each change to a balance is one entry.
+LEDGER_KINDS = ("purchase", "free", "used", "voided", "admin")
+# billing_state key: when this database started recording minute_ledger.
+LEDGER_SINCE_KEY = "minute_ledger_since"
 
 
 def transcription_cost(duration_seconds: float) -> int:
@@ -84,6 +88,25 @@ class Billing:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS minute_ledger (
+                    id INTEGER PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    minutes INTEGER NOT NULL,
+                    at INTEGER NOT NULL,
+                    note TEXT
+                );
+                CREATE TABLE IF NOT EXISTS admin_actions (
+                    id INTEGER PRIMARY KEY,
+                    at INTEGER NOT NULL,
+                    actor TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    target TEXT,
+                    detail TEXT,
+                    reason TEXT
+                );
+                CREATE INDEX IF NOT EXISTS minute_ledger_user_index ON minute_ledger (user_id);
+                CREATE INDEX IF NOT EXISTS minute_ledger_at_index ON minute_ledger (at);
                 CREATE INDEX IF NOT EXISTS job_diagnostics_user_index ON job_diagnostics (user_id);
                 CREATE INDEX IF NOT EXISTS job_diagnostics_created_index ON job_diagnostics (created_at);
                 """
@@ -92,6 +115,10 @@ class Billing:
             if "email" not in columns:
                 connection.execute("ALTER TABLE users ADD COLUMN email TEXT")
             connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_email_index ON users (email)")
+            connection.execute(
+                "INSERT OR IGNORE INTO billing_state (key, value) VALUES (?, ?)",
+                (LEDGER_SINCE_KEY, str(int(time.time()))),
+            )
             purchase_columns = {row[1] for row in connection.execute("PRAGMA table_info(purchases)")}
             if "order_id" not in purchase_columns:
                 connection.execute("ALTER TABLE purchases ADD COLUMN order_id TEXT")
@@ -165,6 +192,7 @@ class Billing:
                 "UPDATE users SET minutes = minutes + ?, free_grant_at = ? WHERE user_id = ?",
                 (grant, now, user_id),
             )
+            _log_minutes(connection, user_id, "free", grant)
             return grant
 
     def get_balance(self, user_id: str) -> int:
@@ -221,12 +249,21 @@ class Billing:
             ).fetchone()["total"]
             if user["minutes"] - reserved < cost:
                 raise InsufficientMinutes()
-            connection.execute(
+            # A failed job, whose reservation was released, can be queued
+            # again under its ID (python -m app.admin jobs requeue).
+            reserved_now = connection.execute(
                 """INSERT INTO transcription_reservations
                    (job_id, user_id, reserved_minutes, status)
-                   VALUES (?, ?, ?, 'reserved')""",
+                   VALUES (?, ?, ?, 'reserved')
+                   ON CONFLICT (job_id) DO UPDATE SET
+                       reserved_minutes = excluded.reserved_minutes,
+                       charged_minutes = NULL,
+                       status = 'reserved'
+                   WHERE status = 'released' AND user_id = excluded.user_id""",
                 (job_id, user_id, cost),
-            )
+            ).rowcount
+            if not reserved_now:
+                raise ValueError(f"Job {job_id} already has a reservation")
             return int(user["minutes"] - reserved - cost)
 
     def settle_success(self, job_id: str) -> None:
@@ -270,6 +307,7 @@ class Billing:
                    SET status = 'settled', charged_minutes = ? WHERE job_id = ?""",
                 (charge, job_id),
             )
+            _log_minutes(connection, reservation["user_id"], "used", -charge, job_id)
 
     def credit_purchase(
         self,
@@ -297,6 +335,7 @@ class Billing:
                 "UPDATE users SET minutes = minutes + ? WHERE user_id = ?",
                 (minutes, user_id),
             )
+            _log_minutes(connection, user_id, "purchase", minutes, order_id)
             return minutes
 
     def void_purchase(self, token: str) -> tuple[str, int] | None:
@@ -307,7 +346,7 @@ class Billing:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             purchase = connection.execute(
-                "SELECT rowid, user_id, minutes FROM purchases WHERE purchase_token = ? AND voided_at IS NULL",
+                "SELECT rowid, user_id, minutes, order_id FROM purchases WHERE purchase_token = ? AND voided_at IS NULL",
                 (token,),
             ).fetchone()
             if purchase is None:
@@ -322,6 +361,7 @@ class Billing:
                 "UPDATE users SET minutes = minutes - ? WHERE user_id = ?",
                 (purchase["minutes"], purchase["user_id"]),
             )
+            _log_minutes(connection, purchase["user_id"], "voided", -purchase["minutes"], purchase["order_id"])
             return purchase["user_id"], purchase["minutes"]
 
     def get_state(self, key: str) -> str | None:
@@ -345,21 +385,38 @@ class Billing:
             ).fetchone()
         return user["user_id"] if user else None
 
-    def credit_minutes_by_email(self, email: str, minutes: int) -> int:
-        normalized_email = email.strip().lower()
+    def adjust_minutes(self, user_id: str, minutes: int, reason: str) -> int:
+        """Add minutes to a user's balance by hand, or take them away when
+        negative. Returns the new balance, which can be below zero."""
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            user = connection.execute(
-                "SELECT user_id FROM users WHERE email = ?",
-                (normalized_email,),
-            ).fetchone()
-            if user is None:
-                raise ValueError(f"No billed user found for email: {normalized_email}")
-            connection.execute(
+            updated = connection.execute(
                 "UPDATE users SET minutes = minutes + ? WHERE user_id = ?",
-                (minutes, user["user_id"]),
+                (minutes, user_id),
+            ).rowcount
+            if not updated:
+                raise ValueError(f"No billed user with ID {user_id}")
+            _log_minutes(connection, user_id, "admin", minutes, reason)
+            return connection.execute("SELECT minutes FROM users WHERE user_id = ?", (user_id,)).fetchone()["minutes"]
+
+    def log_admin_action(
+        self,
+        actor: str,
+        action: str,
+        target: str | None = None,
+        detail: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO admin_actions (at, actor, action, target, detail, reason) VALUES (?, ?, ?, ?, ?, ?)",
+                (int(time.time()), actor, action, target, detail, reason),
             )
-            return minutes
+
+    def read(self, query: str, parameters: tuple = ()) -> list[sqlite3.Row]:
+        """Rows of a read-only query, for the admin commands' reports."""
+        with closing(self._connect()) as connection:
+            return connection.execute(query, parameters).fetchall()
 
     def delete_user(self, user_id: str) -> bool:
         """Delete a user's account data. Purchases are kept without the user ID
@@ -376,6 +433,15 @@ class Billing:
             connection.execute(
                 "UPDATE purchases SET user_id = ? WHERE user_id = ?",
                 (DELETED_USER_ID, user_id),
+            )
+            # Totals stay right; whose minutes they were is forgotten.
+            connection.execute(
+                "UPDATE minute_ledger SET user_id = ? WHERE user_id = ?",
+                (DELETED_USER_ID, user_id),
+            )
+            connection.execute(
+                "UPDATE admin_actions SET target = ? WHERE target = ?",
+                (deleted_user_target(user_id), user_id),
             )
             _purge_expired_deleted_users(connection)
             if user and user["free_grant_at"] and _free_minutes_enabled():
@@ -434,6 +500,16 @@ class Billing:
                 ),
             )
 
+    def reopen_job_record(self, job_id: str, reason: str) -> None:
+        """Forget a job's start, end, and error before it is queued again."""
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE job_diagnostics
+                   SET started_at = NULL, finished_at = NULL, error = NULL, requeue_reason = ?
+                   WHERE job_id = ?""",
+                (reason, job_id),
+            )
+
     def prune_job_diagnostics(self, max_age_seconds: float, now: float | None = None) -> int:
         cutoff = (time.time() if now is None else now) - max_age_seconds
         with self._connect() as connection:
@@ -470,6 +546,19 @@ def prune_backups(directory: str, max_age_seconds: float, now: float | None = No
             path.unlink()
             removed.append(path)
     return removed
+
+
+def deleted_user_target(user_id: str) -> str:
+    """How the audit log names a deleted user: by a hash, like deleted_users."""
+    return "deleted:" + _user_hash(user_id)[:16]
+
+
+def _log_minutes(connection: sqlite3.Connection, user_id: str, kind: str, minutes: int, note: str | None = None) -> None:
+    if minutes:
+        connection.execute(
+            "INSERT INTO minute_ledger (user_id, kind, minutes, at, note) VALUES (?, ?, ?, ?, ?)",
+            (user_id, kind, minutes, int(time.time()), note),
+        )
 
 
 def _free_minutes_enabled() -> bool:

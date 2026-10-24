@@ -51,8 +51,10 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | --- | --- |
 | `test_transcriptions_api.py` | Job creation, status, cancellation, MIDI download, path checks, job ownership, reservations, and startup and worker errors. |
 | `test_billing_api.py` | Server info, cost, balance, Google Play purchase verification, and free-minute grants. |
-| `test_account_api.py` | Account deletion: removed data, kept anonymous purchases, running jobs, free-minute abuse protection, and the `admin_delete` command. |
-| `test_billing.py` | Cost formulas, reservations and settlement, free minutes, and the `admin_credit` command. |
+| `test_account_api.py` | Account deletion: removed data, kept anonymous purchases, running jobs, free-minute abuse protection, and deletion with `app.admin user ... delete`. |
+| `test_billing.py` | Cost formulas, reservations and settlement, reserving a failed job again, free minutes, changes by hand, and the minute ledger. |
+| `test_admin.py` | `python -m app.admin`: status, listing and showing jobs, cancelling and queueing them again, user accounts, credits and deletion, the billing report, limits, the audit log, and secret-free output. |
+| `test_controls.py` | Temporary controls in the API: pausing submissions, turning links off, blocking a user, the per-user limit, expiry, and running jobs left alone. |
 | `test_backups.py` | Backup creation, retention pruning, interval and retention settings, and duration parsing. |
 | `test_online_check.py` | `check --online`: each service check's success, failure hints, and secret-free output, and RunPod endpoint settings against the requirements, with fake services. |
 | `test_maintenance.py` | Planned restarts and shutdowns: the notice, its expiry, messages, and return time, refusing jobs that would not finish, the `maintenance` field, the `X-Server-Maintenance` headers, `Retry-After`, and clearing past notices at startup. |

@@ -5,6 +5,7 @@ the next time the set is counted, so no code path has to remember to."""
 
 from redis import Redis
 
+from app import controls
 from app.config import settings
 
 
@@ -46,10 +47,12 @@ def acquire(redis: Redis, job_id: str, user_id: str, job_key) -> None:
         raise TooManyJobs("The server is busy; try again when some transcriptions have finished")
     if settings.billing.provider == "none":
         return
-    if not _take(redis, user_jobs_key(user_id), job_id, limits.max_active_jobs_per_user, job_key):
+    # An administrator can change the per-user limit for a while.
+    per_user = controls.per_user_job_limit(redis)
+    if not _take(redis, user_jobs_key(user_id), job_id, per_user, job_key):
         redis.srem(ALL_JOBS_KEY, job_id)
         raise TooManyJobs(
-            f"You can have at most {limits.max_active_jobs_per_user} transcriptions in progress; "
+            f"You can have at most {per_user} transcriptions in progress; "
             "wait for one to finish"
         )
 

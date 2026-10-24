@@ -1,8 +1,5 @@
-import sys
-
 import pytest
 
-from app import admin_credit
 from app.billing import InsufficientMinutes, cancelled_cost, period_seconds, transcription_cost
 
 
@@ -111,40 +108,75 @@ def test_free_minutes_period_defaults_to_30_days(api_context):
     assert period_seconds() == 30 * 24 * 60 * 60
 
 
-def test_unknown_email_cannot_be_credited(billed):
+def test_unknown_user_cannot_be_credited(billed):
     _, billing = billed
 
-    with pytest.raises(ValueError, match="nobody@example.com"):
-        billing.credit_minutes_by_email(" Nobody@Example.com ", 5)
+    with pytest.raises(ValueError, match="nobody"):
+        billing.adjust_minutes("nobody", 5, "test")
 
 
-def test_admin_credit_command(billed, monkeypatch, capsys):
+def test_adjust_minutes_can_go_below_zero(billed):
     _, billing = billed
-    billing.credit_purchase("user", "starter", "token", "order", "user@example.com")
-    monkeypatch.setattr(admin_credit, "Billing", lambda: billing)
-    monkeypatch.setattr(sys, "argv", ["admin_credit", "--user", "USER@example.com", "--minutes", "7"])
+    billing.credit_purchase("user", "starter", "token", "order")
 
-    admin_credit.main()
-
-    assert "Credited 7 minutes to user@example.com" in capsys.readouterr().out
-    assert billing.get_balance("user") == 17
+    assert billing.adjust_minutes("user", 7, "goodwill") == 17
+    assert billing.adjust_minutes("user", -20, "chargeback") == -3
+    assert billing.get_balance("user") == -3
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["--user", "user@example.com", "--minutes", "0"],
-        ["--user", "missing@example.com", "--minutes", "5"],
-    ],
-)
-def test_admin_credit_command_rejects_invalid_input(billed, monkeypatch, argv):
+def ledger(billing):
+    return [
+        (row["user_id"], row["kind"], row["minutes"], row["note"])
+        for row in billing.read("SELECT * FROM minute_ledger ORDER BY id")
+    ]
+
+
+def test_every_balance_change_is_in_the_ledger(billed):
+    settings, billing = billed
+    settings.billing.free_minutes = 5
+    settings.billing.free_minutes_period = "1d"
+
+    billing.grant_free_minutes("user")
+    billing.credit_purchase("user", "starter", "token", "GPA.1")
+    billing.reserve("user", "job-1", 3)
+    billing.settle_success("job-1")
+    billing.reserve("user", "job-2", 4)
+    billing.settle_cancellation("job-2", 0)
+    billing.void_purchase("token")
+    billing.adjust_minutes("user", 2, "goodwill")
+
+    assert ledger(billing) == [
+        ("user", "free", 5, None),
+        ("user", "purchase", 10, "GPA.1"),
+        ("user", "used", -3, "job-1"),
+        ("user", "voided", -10, "GPA.1"),
+        ("user", "admin", 2, "goodwill"),
+    ]
+    # The ledger adds up to the balance.
+    assert sum(entry[2] for entry in ledger(billing)) == billing.get_balance("user")
+
+
+def test_released_reservation_can_be_reserved_again(billed):
     _, billing = billed
-    monkeypatch.setattr(admin_credit, "Billing", lambda: billing)
-    monkeypatch.setattr(sys, "argv", ["admin_credit", *argv])
+    billing.credit_purchase("user", "starter", "token", "order")
+    billing.reserve("user", "job", 3)
+    billing.release("job")
 
-    with pytest.raises(SystemExit) as error:
-        admin_credit.main()
-    assert error.value.code == 2
+    assert billing.reserve("user", "job", 3) == 7
+    billing.settle_success("job")
+    assert billing.get_balance("user") == 7
+
+
+@pytest.mark.parametrize("finish", ["settle", "reserved"])
+def test_reservation_in_use_is_not_replaced(billed, finish):
+    _, billing = billed
+    billing.credit_purchase("user", "starter", "token", "order")
+    billing.reserve("user", "job", 3)
+    if finish == "settle":
+        billing.settle_success("job")
+
+    with pytest.raises(ValueError, match="already has a reservation"):
+        billing.reserve("user", "job", 3)
 
 
 def test_database_is_created_on_first_use_not_at_construction(tmp_path):

@@ -29,6 +29,7 @@ See [Local setup](docs/setup.md) for requirements, GPU checks, health checks, an
 * [Local setup](docs/setup.md) - run the Docker stack, check services, protect a private server with a password, tune CPU/GPU workers, and free disk space.
 * [HTTPS through a Cloudflare Tunnel](docs/cloudflare-tunnel.md) - an HTTPS address for the server without opening ports, turned on from `.env`.
 * [Outsourcing to RunPod](docs/runpod.md) - step by step: Cloudflare R2 storage, Docker Hub, the RunPod endpoint, and a free local test.
+* [Administration](docs/administration.md) - server status, jobs, user accounts and credits, the billing report, and temporary limits, with `python -m app.admin`.
 * [Configuration and environment](docs/configuration.md) - environment variables, GPU memory and batching, secrets, and database backups.
 * [Testing](docs/testing.md) - install development dependencies and run checks.
 * Using an AI coding agent? [AGENTS.md](AGENTS.md) has the commands and pitfalls, and Claude Code users can run `/setup-runpod` and `/setup-google` for guided setup. `python -m app.config requirements` prints what each external service must provide, and `python -m app.config check --online` verifies it.

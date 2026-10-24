@@ -13,7 +13,7 @@ from redis import Redis
 
 from app.billing import Billing, transcription_cost
 from app.config import settings
-from app import google_play, maintenance, video_info
+from app import controls, google_play, maintenance, video_info
 from app.maintenance import NoticeResponse
 from app.auth import AuthenticatedUser, current_user, google_oauth_client_ids
 from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url, UnsafeSourceUrl
@@ -143,6 +143,18 @@ def video_duration(source_url: HttpUrl) -> float:
     return check_video(source_url).duration
 
 
+def ensure_accepting(user_id: str, link: bool, submission: bool = True) -> None:
+    """Refuse a request that an administrator's control stops; see app.controls."""
+    refused = controls.refusal(redis, user_id, link, submission)
+    if refused is not None:
+        status, message, retry_after = refused
+        raise HTTPException(
+            status_code=status,
+            detail=message,
+            headers={"Retry-After": str(retry_after)} if retry_after else None,
+        )
+
+
 def ensure_allowed_length(duration: float) -> float:
     if settings.limits.max_video_length_minutes and duration > settings.limits.max_video_length_minutes * 60:
         raise HTTPException(status_code=413, detail="Video exceeds the configured maximum length")
@@ -202,6 +214,7 @@ def cost(
     """Cost of a video URL, or of a file of the given duration before it is uploaded."""
     if (source_url is None) == (duration_seconds is None):
         raise HTTPException(status_code=422, detail="Provide either source_url or duration_seconds")
+    ensure_accepting(user.user_id if user else "anonymous", link=source_url is not None, submission=False)
     if source_url is not None:
         duration = video_duration(source_url)
     else:

@@ -96,6 +96,7 @@ When a purchase is refunded, charged back, or cancelled, Google Play reports it 
 * A voided purchase stays recorded, so its token can never be credited again.
 * Google keeps voided purchases for 30 days. If the API was stopped for longer, older ones are missed, and the API logs a warning.
 * Purchases of deleted accounts are marked voided without changing any balance.
+* `python -m app.admin billing` lists the users with a negative balance and when voided purchases were last read; see [Administration](administration.md#-billing).
 
 Reading voided purchases needs the service account's access to orders and financial data, which `requirements` lists and `check --online` verifies.
 
@@ -127,4 +128,4 @@ The cancellation charge cannot exceed the reserved cost. Billing records are sto
 
 Google Play requires apps that let users create an account to also let them delete it. The client can call `DELETE /api/account` with the user's Google ID token. See **Account deletion** in the [API guide](api.md) for what is deleted and what is kept.
 
-Google Play also requires a web link where users can request deletion without the app. Handle those requests with the `app.admin_delete` command described in [Configuration](configuration.md).
+Google Play also requires a web link where users can request deletion without the app. Handle those requests with `python -m app.admin user <email> delete`, described in [Administration](administration.md#-users).

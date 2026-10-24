@@ -162,6 +162,47 @@ def delete_account(user_id: str) -> bool:
     return billing.delete_user(user_id)
 
 
+def cancel_job(job_id: str, charge: bool = True) -> str | None:
+    """Cancel a queued or processing job, as its owner does; its worker stops
+    at the next progress update. The reservation is settled at the
+    cancellation price, or released with charge=False. Returns the status
+    the job had, or None if there is no such job. Only queued and processing
+    jobs change."""
+    key = job_key(job_id)
+    while True:
+        try:
+            with redis.pipeline() as pipe:
+                pipe.watch(key)
+                job = pipe.hgetall(key)
+                status = job.get("status", "unknown") if job else None
+                if status not in {"queued", "processing"}:
+                    return status
+                pipe.multi()
+                pipe.hset(
+                    key,
+                    mapping={
+                        "status": "cancelled",
+                        "error": "Transcription cancelled",
+                        "progress": job.get("progress", "0.0"),
+                    },
+                )
+                pipe.expire(key, JOB_TTL)
+                pipe.execute()
+                break
+        except WatchError:
+            continue
+    record_job(job_id)
+    if job.get("user_id"):
+        if charge:
+            billing.settle_cancellation(
+                job_id,
+                cancelled_cost(int(job.get("full_cost", 0)), float(job.get("progress", 0))),
+            )
+        else:
+            billing.release(job_id)
+    return status
+
+
 def reconcile_billing() -> None:
     """Finish billing transitions left incomplete by a worker interruption."""
     for job_id in billing.reserved_job_ids():

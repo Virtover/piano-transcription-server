@@ -90,7 +90,7 @@ Redis job state disappears an hour after a job ends, so each job also has a reco
 
 Records older than `BILLING_JOB_DIAGNOSTICS_RETENTION` (default `30d`) are deleted before each backup. Deleting an account deletes its records. Writing a record never fails a job; errors are logged.
 
-To look at recent failures, query a backup copy or the live database:
+To look at recent failures, use `python -m app.admin jobs --failed` and `jobs show <job>`; see [Administration](administration.md#-jobs). A backup copy can also be queried directly:
 
 ```sql
 SELECT job_id, datetime(created_at, 'unixepoch'), backend, outsourced, error

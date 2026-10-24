@@ -288,21 +288,13 @@ Example capacities with the default values:
 
 For billing configuration, uncomment the billing section of [.env.example](../.env.example) and follow the [Google Play billing guide](google-play-billing.md).
 
-To manually add transcription minutes to an existing billed user, run the command in the API container:
+To add minutes to a user by hand, take them away, or delete an account, use the admin commands in the API container, for example:
 
 ```shell
-docker compose exec api python -m app.admin_credit --user user@example.com --minutes 30
+docker compose exec api python -m app.admin user user@example.com credit 30 --reason "refund for a failed job"
 ```
 
-The email must belong to a user who has authenticated with the API at least once.
-
-To delete a user's account and data, for example after a deletion request by email or through a web form, run:
-
-```shell
-docker compose exec api python -m app.admin_delete --user user@example.com
-```
-
-The command asks for confirmation; add `--yes` to skip it. It deletes the same data as `DELETE /api/account`, including running jobs and remaining minutes, and cannot be undone. See **Account deletion** in the [API guide](api.md) for what is kept.
+See [Administration](administration.md#-users).
 
 
 ## 💾 Billing database backups
