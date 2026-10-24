@@ -1,9 +1,11 @@
+import json
 import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 
-from app import google_play, main
+from app import google_play, main, video_info
 from app.api.routes import billing as billing_routes
 
 
@@ -170,3 +172,99 @@ def test_unsafe_urls_are_rejected_before_yt_dlp(api_context, monkeypatch):
     assert duration_error("http://localhost/video") == 422
     response = client.get("/api/billing/cost", params={"source_url": "http://127.0.0.1/video"})
     assert response.status_code == 422
+
+
+def test_video_check_is_reused_for_the_same_url(yt_dlp):
+    yt_dlp["stdout"] = '{"duration": 90, "title": "Nocturne", "automatic_captions": {"en": []}}'
+
+    first = billing_routes.check_video("https://youtube.com/watch?v=1")
+    second = billing_routes.check_video("https://youtube.com/watch?v=1")
+
+    assert len(yt_dlp["commands"]) == 1
+    assert second.info == first.info == {"duration": 90, "title": "Nocturne"}
+    assert second.checked_at == first.checked_at
+    [key] = billing_routes.redis.scan_iter(billing_routes.VIDEO_CHECK_KEY + "*")
+    assert 0 < billing_routes.redis.ttl(key) <= billing_routes.VIDEO_CHECK_TTL
+
+
+def test_reused_video_check_still_enforces_the_length_limit(yt_dlp, api_context):
+    _, settings, _ = api_context
+    yt_dlp["stdout"] = '{"duration": 1201}'
+    settings.limits.max_video_length_minutes = None
+    billing_routes.video_duration("https://youtube.com/watch?v=1")
+
+    settings.limits.max_video_length_minutes = 20
+
+    assert duration_error() == 413
+    assert len(yt_dlp["commands"]) == 1
+
+
+@pytest.mark.parametrize("stdout", ["not json", '{"duration": 0}', subprocess.TimeoutExpired("yt-dlp", 60)])
+def test_failed_video_check_is_not_reused(yt_dlp, stdout):
+    yt_dlp["stdout"] = stdout
+    assert duration_error() == 422
+
+    yt_dlp["stdout"] = '{"duration": 90}'
+
+    assert billing_routes.video_duration("https://youtube.com/watch?v=1") == 90.0
+
+
+@pytest.fixture
+def real_check(yt_dlp, api_context, monkeypatch):
+    """Submissions run the real video check, with yt-dlp faked."""
+    from app.api.routes import transcriptions
+
+    monkeypatch.setattr(transcriptions, "check_video", billing_routes.check_video)
+    yt_dlp["stdout"] = json.dumps({"duration": 90, "title": "Nocturne", "channel": "Chopin", "formats": []})
+    return yt_dlp
+
+
+def submit(client):
+    return client.post("/api/transcriptions", json={"source_url": "https://youtube.com/watch?v=1"})
+
+
+def test_cost_then_submit_asks_the_site_once(real_check, api_context):
+    client, _, _ = api_context
+
+    assert client.get("/api/billing/cost", params={"source_url": "https://youtube.com/watch?v=1"}).status_code == 200
+    assert submit(client).status_code == 202
+
+    assert len(real_check["commands"]) == 1
+
+
+def test_submit_saves_the_video_info_for_the_worker(real_check, api_context):
+    client, settings, _ = api_context
+
+    job_id = submit(client).json()["job_id"]
+
+    info_path = Path(settings.service.data_dir) / "jobs" / job_id / video_info.VIDEO_INFO_FILE_NAME
+    assert json.loads(info_path.read_text())["title"] == "Nocturne"
+    assert video_info.saved_video_info(info_path.parent) == info_path
+
+
+def test_title_is_shown_while_the_job_waits(real_check, api_context):
+    client, _, _ = api_context
+
+    job_id = submit(client).json()["job_id"]
+    status = client.get(f"/api/transcriptions/{job_id}").json()
+
+    assert status["status"] == "queued"
+    assert status["title"] == "Nocturne"
+    assert status["metadata"]["author"] == "Chopin"
+    assert status["metadata"]["duration"] == 90
+
+
+def test_refused_submit_removes_the_saved_info(real_check, api_context):
+    client, settings, _ = api_context
+    settings.billing.provider = "google_play"
+    settings.billing.free_minutes = 0
+
+    response = client.post(
+        "/api/transcriptions",
+        json={"source_url": "https://youtube.com/watch?v=1"},
+        headers={"Authorization": "Bearer poor"},
+    )
+
+    assert response.status_code == 402
+    jobs = Path(settings.service.data_dir) / "jobs"
+    assert not jobs.exists() or list(jobs.iterdir()) == []

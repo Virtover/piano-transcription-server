@@ -11,11 +11,11 @@ from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
 from redis.exceptions import WatchError
 
-from app import job_limits, maintenance
+from app import job_limits, maintenance, video_info
 from app.maintenance import NoticeResponse
 from app.config import settings
 from app.billing import Billing, cancelled_cost, transcription_cost, InsufficientMinutes
-from app.api.routes.billing import ensure_allowed_length, video_duration
+from app.api.routes.billing import check_video, ensure_allowed_length
 from app.auth import AuthenticatedUser, current_user
 from app.media import UnsupportedMedia, probe_audio
 from app.outsource import routing
@@ -243,18 +243,21 @@ def create_transcription(
     user_id = user.user_id if user else "anonymous"
     # The place is held during the video check too, which runs yt-dlp.
     hold_place(job_id, user_id, "preparing")
+    job_dir = Path(settings.service.data_dir) / "jobs" / job_id
     try:
-        duration = video_duration(request.source_url)
+        video = check_video(request.source_url)
         source_url = str(request.source_url)
-        return queue_job(
-            job_id,
-            user,
-            duration,
-            {"source_url": source_url},
-            (source_url,),
-        )
+        # The worker downloads with this info instead of asking the site again.
+        video_info.save_video_info(job_dir, video.info, video.checked_at)
+        fields = {"source_url": source_url}
+        # Clients see the title while the job waits; the download updates it.
+        metadata = video_info.video_metadata(video.info, source_url)
+        if metadata["title"]:
+            fields.update(title=metadata["title"], metadata=json.dumps(metadata))
+        return queue_job(job_id, user, video.duration, fields, (source_url,))
     except BaseException:
         give_back_place(job_id, user_id)
+        shutil.rmtree(job_dir, ignore_errors=True)
         raise
 
 

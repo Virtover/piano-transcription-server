@@ -4,6 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import job_limits
+from app.api.routes import billing as billing_routes
 from app.api.routes import transcriptions
 from app.worker import tasks
 
@@ -102,13 +103,13 @@ def test_place_is_held_while_the_video_is_checked(api_context, monkeypatch):
     settings.limits.max_active_jobs = 1
     seen = {}
 
-    def video_duration(url):
+    def check_video(url):
         [key] = [key for key in tasks.redis.scan_iter("transcription:*")]
         seen["status"] = tasks.redis.hget(key, "status")
         seen["second"] = submit(client).status_code
-        return 130.0
+        return billing_routes.CheckedVideo(130.0, {"title": "Nocturne", "duration": 130}, 0)
 
-    monkeypatch.setattr(transcriptions, "video_duration", video_duration)
+    monkeypatch.setattr(transcriptions, "check_video", check_video)
 
     assert submit(client).status_code == 202
     assert seen == {"status": "preparing", "second": 429}
@@ -118,10 +119,10 @@ def test_failed_video_check_gives_the_place_back(api_context, monkeypatch):
     client, settings, _ = api_context
     settings.limits.max_active_jobs = 1
 
-    def video_duration(url):
+    def check_video(url):
         raise HTTPException(status_code=422, detail="Unable to read video metadata")
 
-    monkeypatch.setattr(transcriptions, "video_duration", video_duration)
+    monkeypatch.setattr(transcriptions, "check_video", check_video)
 
     assert submit(client).status_code == 422
     assert list(tasks.redis.scan_iter("transcription:*")) == []

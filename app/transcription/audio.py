@@ -2,6 +2,7 @@
 can use it without GPU libraries."""
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -15,6 +16,15 @@ from app.transcription.cancellation import TranscriptionCancelled
 from app.transcription.device import cpu_thread_count
 from app.media import probe_audio
 from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url
+from app.video_info import (  # noqa: F401  (format_upload_date is re-exported)
+    VIDEO_INFO_FILE_NAME,
+    format_upload_date,
+    saved_video_info,
+    video_metadata,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 ProgressCallback = Callable[[float], None]
@@ -58,42 +68,22 @@ def download_audio(
     cancellation_callback: CancellationCallback | None = None,
     max_seconds: float | None = None,
 ) -> DownloadedAudio:
-    output_template = str(
-        output_dir / "download.%(ext)s"
-    )
-
+    """Download with the info the API saved when it checked the video, so
+    the site is asked once per job. Without recent info, or if its links no
+    longer work, yt-dlp asks the site again."""
     safe_url = ensure_safe_source_url(str(source_url))
+    info_path = saved_video_info(output_dir)
 
-    result = run_process(
-        [
-            "yt-dlp",
-            *YT_DLP_SAFETY_OPTIONS,
-            "--js-runtimes",
-            "deno",
-            "--extractor-args",
-            "youtube:player_client=web,android",
-            "--format",
-            "bestaudio/best",
-            "--socket-timeout",
-            "30",
-            "--retries",
-            "3",
-            "--fragment-retries",
-            "3",
-            "--extractor-retries",
-            "3",
-            "--max-filesize",
-            MAX_DOWNLOAD_SIZE,
-            # Conversion is left to convert_to_wav, which never lets ffmpeg
-            # open anything but the downloaded file.
-            "--print-json",
-            "-o",
-            output_template,
-            "--",
-            safe_url,
-        ],
-        cancellation_callback=cancellation_callback,
-    )
+    result = None
+    if info_path is not None:
+        try:
+            result = run_yt_dlp(["--load-info-json", str(info_path)], output_dir, cancellation_callback)
+        except subprocess.CalledProcessError as error:
+            logger.warning("Download from the saved video info failed, asking the site again: %s", error.stderr)
+            info_path.unlink(missing_ok=True)
+            remove_downloads(output_dir)
+    if result is None:
+        result = run_yt_dlp(["--", safe_url], output_dir, cancellation_callback)
 
     json_lines = [
         line
@@ -143,20 +133,50 @@ def download_audio(
 
     return DownloadedAudio(
         path=wav_path,
-        metadata={
-            "title": title,
-            "author": info.get("uploader") or info.get("channel"),
-            "channel": info.get("channel"),
-            "channel_id": info.get("channel_id"),
-            "channel_url": info.get("channel_url"),
-            "upload_date": format_upload_date(info.get("upload_date")),
-            "duration": info.get("duration"),
-            "thumbnail": info.get("thumbnail"),
-            "webpage_url": info.get("webpage_url") or source_url,
-            "view_count": info.get("view_count"),
-            "like_count": info.get("like_count"),
-        },
+        metadata=video_metadata(info, source_url),
     )
+
+
+def run_yt_dlp(
+    source: list[str],
+    output_dir: Path,
+    cancellation_callback: CancellationCallback | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Download source, a URL or saved info, to output_dir/download.*."""
+    return run_process(
+        [
+            "yt-dlp",
+            *YT_DLP_SAFETY_OPTIONS,
+            "--js-runtimes",
+            "deno",
+            "--extractor-args",
+            "youtube:player_client=web,android",
+            "--format",
+            "bestaudio/best",
+            "--socket-timeout",
+            "30",
+            "--retries",
+            "3",
+            "--fragment-retries",
+            "3",
+            "--extractor-retries",
+            "3",
+            "--max-filesize",
+            MAX_DOWNLOAD_SIZE,
+            # Conversion is left to convert_to_wav, which never lets ffmpeg
+            # open anything but the downloaded file.
+            "--print-json",
+            "-o",
+            str(output_dir / "download.%(ext)s"),
+            *source,
+        ],
+        cancellation_callback=cancellation_callback,
+    )
+
+
+def remove_downloads(output_dir: Path) -> None:
+    for path in output_dir.glob("download.*"):
+        path.unlink(missing_ok=True)
 
 
 def convert_to_wav(
@@ -227,16 +247,9 @@ def prepare_upload(
     )
 
 
-def format_upload_date(value: str | None) -> str | None:
-    if not value or len(value) != 8 or not value.isdigit():
-        return None
-
-    return f"{value[:4]}-{value[4:6]}-{value[6:]}"
-
-
 def remove_audio_files(output_dir: Path, keep_upload: bool = False) -> None:
     """Delete downloaded and converted audio. With keep_upload, the user's
-    uploaded file stays for another attempt."""
+    uploaded file, or the saved video info, stays for another attempt."""
     if not output_dir.is_dir():
         return
     for path in output_dir.iterdir():
@@ -246,6 +259,8 @@ def remove_audio_files(output_dir: Path, keep_upload: bool = False) -> None:
             if not keep_upload:
                 path.unlink(missing_ok=True)
         elif path.name.startswith("download.") or path.suffix.lower() in AUDIO_FILE_SUFFIXES:
+            path.unlink(missing_ok=True)
+        elif path.name == VIDEO_INFO_FILE_NAME and not keep_upload:
             path.unlink(missing_ok=True)
 
 

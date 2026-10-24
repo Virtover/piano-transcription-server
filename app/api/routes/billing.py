@@ -1,7 +1,10 @@
+import hashlib
 import json
 import logging
 import subprocess
 import threading
+import time
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,7 +13,7 @@ from redis import Redis
 
 from app.billing import Billing, transcription_cost
 from app.config import settings
-from app import google_play, maintenance
+from app import google_play, maintenance, video_info
 from app.maintenance import NoticeResponse
 from app.auth import AuthenticatedUser, current_user, google_oauth_client_ids
 from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url, UnsafeSourceUrl
@@ -25,6 +28,9 @@ billing = Billing()
 METADATA_SLOTS = 4
 METADATA_WAIT = 10
 metadata_slots = threading.BoundedSemaphore(METADATA_SLOTS)
+# Recent video checks, by URL. A video's info is a few KB.
+VIDEO_CHECK_KEY = "video_check:"
+VIDEO_CHECK_TTL = 300
 
 
 class CostResponse(BaseModel):
@@ -70,11 +76,33 @@ class BalanceResponse(BaseModel):
     free_minutes_next_grant_at: int | None = None
 
 
-def video_duration(source_url: HttpUrl) -> float:
+@dataclass
+class CheckedVideo:
+    duration: float
+    info: dict[str, Any]
+    checked_at: float
+
+
+def check_video(source_url: HttpUrl) -> CheckedVideo:
+    """Read a video's info with yt-dlp, and check its length. A check is
+    reused for VIDEO_CHECK_TTL, so asking the cost and then submitting the
+    video asks the site once."""
     try:
         safe_url = ensure_safe_source_url(str(source_url))
     except UnsafeSourceUrl as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    key = VIDEO_CHECK_KEY + hashlib.sha256(safe_url.encode()).hexdigest()
+    cached = redis.get(key)
+    if cached:
+        checked = json.loads(cached)
+        info, checked_at = checked["info"], checked["checked_at"]
+    else:
+        info, checked_at = read_video_info(safe_url), time.time()
+        redis.set(key, json.dumps({"info": info, "checked_at": checked_at}), ex=VIDEO_CHECK_TTL)
+    return CheckedVideo(ensure_allowed_length(float(info["duration"])), info, checked_at)
+
+
+def read_video_info(safe_url: str) -> dict[str, Any]:
     if not metadata_slots.acquire(timeout=METADATA_WAIT):
         raise HTTPException(
             status_code=503,
@@ -100,14 +128,19 @@ def video_duration(source_url: HttpUrl) -> float:
             text=True,
             timeout=60,
         )
-        duration = json.loads(result.stdout).get("duration")
+        info = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         raise HTTPException(status_code=422, detail="Unable to read video metadata") from error
     finally:
         metadata_slots.release()
+    duration = info.get("duration") if isinstance(info, dict) else None
     if not isinstance(duration, (int, float)) or duration <= 0:
         raise HTTPException(status_code=422, detail="Video duration is unavailable")
-    return ensure_allowed_length(float(duration))
+    return video_info.slim(info)
+
+
+def video_duration(source_url: HttpUrl) -> float:
+    return check_video(source_url).duration
 
 
 def ensure_allowed_length(duration: float) -> float:

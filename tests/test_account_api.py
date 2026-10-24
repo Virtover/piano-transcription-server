@@ -53,7 +53,7 @@ def test_delete_account_removes_user_data_jobs_and_files(api_context):
     assert created.status_code == 202
     job_id = created.json()["job_id"]
     job_dir = Path(settings.service.data_dir) / "jobs" / job_id
-    job_dir.mkdir(parents=True)
+    job_dir.mkdir(parents=True, exist_ok=True)
     (job_dir / "transcription.mid").write_bytes(b"MThd")
 
     other = client.post(

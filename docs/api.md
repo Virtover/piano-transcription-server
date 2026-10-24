@@ -26,7 +26,7 @@ curl -X POST http://localhost:8000/api/transcriptions \
   -d '{"source_url":"https://example.com/video"}'
 ```
 
-The endpoint returns `202 Accepted`, a `job_id`, and `queued` status. PowerShell keeps the response in `$job`, which the examples below use. With curl, keep the ID for them: `JOB_ID=<job_id from the response>`.
+The endpoint returns `202 Accepted`, a `job_id`, and `queued` status. The job's title and metadata are available from the start, read when the link is checked. PowerShell keeps the response in `$job`, which the examples below use. With curl, keep the ID for them: `JOB_ID=<job_id from the response>`.
 
 ### 📁 Uploading a file
 
@@ -127,7 +127,7 @@ The server limits how many transcriptions are in progress at once: uploading, be
 
 A transcription stops counting when it completes, fails, or is cancelled.
 
-Checking a link's length runs a video download tool, and only a few checks run at once. When they are all busy for 10 seconds, `POST /api/transcriptions` and `GET /api/billing/cost?source_url=...` answer `503` with `Retry-After: 5`.
+Checking a link's length runs a video download tool, and only a few checks run at once. When they are all busy for 10 seconds, `POST /api/transcriptions` and `GET /api/billing/cost?source_url=...` answer `503` with `Retry-After: 5`. A check is reused for 5 minutes, so submitting a link right after asking its cost does not run it again.
 
 ## 🔁 Planned restarts and shutdowns
 

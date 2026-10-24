@@ -62,7 +62,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_worker_tasks.py` | Worker job lifecycle, billing reconciliation, restart handling, and file cleanup. |
 | `test_auth.py` | Google token checks: audience, expiry, verified email, userinfo fallback, caching, and outages. |
 | `test_url_safety.py` | Source URL validation: allowed hosts, schemes, ports, credentials, and private addresses. |
-| `test_server_api.py` | Health and readiness, server info offers, and `yt-dlp` duration handling. |
+| `test_server_api.py` | Health and readiness, server info offers, `yt-dlp` duration handling, reused video checks, and the video information saved for the worker. |
 | `test_upload_api.py` | File uploads: storage, size and length limits, title handling, billing, cleanup on errors, and cost by duration. |
 | `test_media.py` | `ffprobe` checks: accepted and rejected formats, files without audio, and playlist files. Real-file tests need `ffmpeg`. |
 | `test_pipeline_upload.py` | Converting uploaded audio and video to the WAV format the model needs. Needs the worker image. |
@@ -75,6 +75,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_outsource_capacity.py` | `OUTSOURCE_MAX_CONCURRENCY`: the default, fixed values, and `auto` from RunPod's max workers and the reported requests per worker. |
 | `test_outsource_clients.py` | The RunPod client, S3 storage, and the handler's input checks and download limits. |
 | `test_runpod_handler.py` | The RunPod handler with the real model: concurrent requests share one batch, and bad requests fail alone. Needs the RunPod image (see below). |
+| `test_video_info.py` | One request to the video site per job: the saved video information, its age limit, the retry when its links fail, and real `yt-dlp` downloading from saved information. |
 | `test_audio_download.py` | The yt-dlp and ffmpeg commands: no generic extractor, conversion only by the restricted ffmpeg, and audio cut at the charged duration. |
 | `test_errors.py` | Job errors as users see them: no command lines or paths, and yt-dlp's reason when it gives one. |
 | `test_job_limits.py` | `MAX_ACTIVE_JOBS` and `MAX_ACTIVE_JOBS_PER_USER`: places taken during uploads and video checks, given back when jobs end or fail. |

@@ -125,7 +125,7 @@ def test_completed_midi_can_be_downloaded(api_context):
     client, settings, _ = api_context
     job_id = create_job(client)
     result = Path(settings.service.data_dir) / "jobs" / job_id / "transcription.mid"
-    result.parent.mkdir(parents=True)
+    result.parent.mkdir(parents=True, exist_ok=True)
     result.write_bytes(b"MThd-data")
     complete_job(job_id, result)
 
