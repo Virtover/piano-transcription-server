@@ -9,7 +9,7 @@ Optional. When the local GPU is busy, jobs run on [RunPod Serverless](https://do
 
 This page describes only this server. What you must create at each provider, with the values and the reasons, comes from the server itself, so it always matches your configuration:
 
-```powershell
+```shell
 docker compose run --rm api python -m app.config requirements
 ```
 
@@ -23,20 +23,20 @@ It lists the storage bucket, the image registry, the GPU endpoint, and the API k
 3. **Build and push the image**, as in [Building the image](#-building-the-image).
 4. **Verify everything** against the real services:
 
-   ```powershell
+   ```shell
    docker compose run --rm api python -m app.config check --online
    ```
 
    It uploads a small object to the bucket, downloads it through a signed link the way the GPU endpoint does, and deletes it. It checks the endpoint's health, and compares the endpoint's settings with the requirements. Every warning and failure names the likely fix. Repeat until nothing fails.
 5. **Start the stack with the remote worker.** It starts only with the `outsource` profile; without it, jobs sent to RunPod wait forever:
 
-   ```powershell
+   ```shell
    docker compose --profile outsource up -d --build
    ```
 
 6. **Send one job to RunPod.** Stop the local worker, so local capacity counts as zero, submit a short video (see the [API guide](api.md)), then start the worker again. The job status shows `"backend": "remote"`, and the bucket is empty again afterwards.
 
-   ```powershell
+   ```shell
    docker compose stop worker
    # submit a job and poll its status
    docker compose start worker
@@ -44,7 +44,9 @@ It lists the storage bucket, the image registry, the GPU endpoint, and the API k
 
 ## ⚙️ Configuration
 
-Save the three secrets as files in `secrets\`:
+Save the three secrets as files in `secrets`:
+
+**Windows (PowerShell)**
 
 ```powershell
 Set-Content -Path secrets\outsource_storage_access_key -Value '<access key ID>' -NoNewline
@@ -52,14 +54,30 @@ Set-Content -Path secrets\outsource_storage_secret_key -Value '<secret access ke
 Set-Content -Path secrets\runpod_api_key -Value '<RunPod API key>' -NoNewline
 ```
 
+**macOS and Linux**
+
+```bash
+printf '%s' '<access key ID>' > secrets/outsource_storage_access_key
+printf '%s' '<secret access key>' > secrets/outsource_storage_secret_key
+printf '%s' '<RunPod API key>' > secrets/runpod_api_key
+```
+
 Optionally, a fourth: a RunPod key with read-only access to the account. The key above is restricted to the endpoint, and RunPod does not let restricted keys read endpoint settings. With the read key, `check --online` verifies the endpoint's settings, and `OUTSOURCE_MAX_CONCURRENCY=auto` follows the endpoint's maximum workers; without it, use a number. The read key cannot change anything.
+
+**Windows (PowerShell)**
 
 ```powershell
 Set-Content -Path secrets\runpod_read_api_key -Value '<RunPod read-only API key>' -NoNewline
 ```
 
+**macOS and Linux**
+
+```bash
+printf '%s' '<RunPod read-only API key>' > secrets/runpod_read_api_key
+```
+
 > [!WARNING]
-> Always name the parameters as above. The short form `Set-Content -NoNewline <file> <value>` swaps them in Windows PowerShell 5.1 and creates a file **named after your secret** in the current folder. If that happens, delete the file; if it was ever committed, replace the key.
+> In PowerShell, always name the parameters as above. The short form `Set-Content -NoNewline <file> <value>` swaps them in Windows PowerShell 5.1 and creates a file **named after your secret** in the current folder. If that happens, delete the file; if it was ever committed, replace the key.
 
 Add to `.env`:
 
@@ -82,7 +100,7 @@ All settings are in [Configuration](configuration.md#outsourcing).
 
 ## 📦 Building the image
 
-```powershell
+```shell
 docker login -u <registry-user>
 docker build -f Dockerfile.runpod -t <registry-user>/piano-transcription-runpod:<tag> .
 docker push <registry-user>/piano-transcription-runpod:<tag>
@@ -136,6 +154,8 @@ Test outsourcing without RunPod or R2 accounts. [SeaweedFS](https://github.com/s
 
 1. Start the storage with a test key, and create the bucket:
 
+**Windows (PowerShell)**
+
 ```powershell
 docker network create piano-test
 Set-Content -Path s3.json -Value '{"identities":[{"name":"test","credentials":[{"accessKey":"test-access","secretKey":"test-secret"}],"actions":["Admin","Read","Write","List"]}]}' -NoNewline
@@ -144,13 +164,35 @@ docker run -d --name seaweed --network piano-test -v "${PWD}\s3.json:/etc/s3.jso
 docker run --rm --network piano-test yt-piano-to-midi-server-api python -c "import boto3; boto3.client('s3', endpoint_url='http://seaweed:8333', region_name='us-east-1', aws_access_key_id='test-access', aws_secret_access_key='test-secret').create_bucket(Bucket='piano-audio')"
 ```
 
+**macOS and Linux**
+
+```bash
+docker network create piano-test
+printf '%s' '{"identities":[{"name":"test","credentials":[{"accessKey":"test-access","secretKey":"test-secret"}],"actions":["Admin","Read","Write","List"]}]}' > s3.json
+docker run -d --name seaweed --network piano-test -v "$PWD/s3.json:/etc/s3.json:ro" \
+  chrislusf/seaweedfs server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/s3.json
+docker run --rm --network piano-test yt-piano-to-midi-server-api python -c "import boto3; boto3.client('s3', endpoint_url='http://seaweed:8333', region_name='us-east-1', aws_access_key_id='test-access', aws_secret_access_key='test-secret').create_bucket(Bucket='piano-audio')"
+```
+
 2. Build and start the handler with the local test server:
+
+**Windows (PowerShell)**
 
 ```powershell
 docker build -f Dockerfile.runpod -t piano-transcription-runpod:local .
 docker run -d --name runpod-local --network piano-test `
   -e CUDA_VISIBLE_DEVICES= -e OUTSOURCE_STORAGE_ENDPOINT=http://seaweed:8333 `
   piano-transcription-runpod:local `
+  python3 -u handler.py --rp_serve_api --rp_api_host 0.0.0.0 --rp_api_port 8010
+```
+
+**macOS and Linux**
+
+```bash
+docker build -f Dockerfile.runpod -t piano-transcription-runpod:local .
+docker run -d --name runpod-local --network piano-test \
+  -e CUDA_VISIBLE_DEVICES= -e OUTSOURCE_STORAGE_ENDPOINT=http://seaweed:8333 \
+  piano-transcription-runpod:local \
   python3 -u handler.py --rp_serve_api --rp_api_host 0.0.0.0 --rp_api_port 8010
 ```
 
@@ -169,7 +211,7 @@ OUTSOURCE_MAX_CONCURRENCY=1
 
 4. Start the stack with the remote worker, and connect it to the test network:
 
-```powershell
+```shell
 docker compose --profile outsource up -d --build
 docker network connect piano-test yt-piano-to-midi-server-remote-worker-1
 ```
@@ -183,7 +225,7 @@ The local test server differs from RunPod in two ways:
 
 Afterwards, remove the test setup and the outsourcing lines from `.env`:
 
-```powershell
+```shell
 docker rm -f seaweed runpod-local
 docker network rm piano-test
 ```

@@ -16,7 +16,7 @@ The Google account ID becomes the user's billing identity. Client IDs are public
 
 What you must create in Google Cloud, with the reasons, comes from the server itself:
 
-```powershell
+```shell
 docker compose run --rm api python -m app.config requirements
 ```
 
@@ -34,14 +34,22 @@ See the **Google sign-in** section of its output: the consent screen, one Androi
 
 3. **Verify.** `check --online` checks the client IDs' format; Google can only confirm a client ID with a signed-in user's token, so it catches typos and pasted client secrets, not a missing client:
 
-   ```powershell
+   ```shell
    docker compose run --rm api python -m app.config check --online
    ```
 
    Then sign in from the app and call the balance endpoint with its token. It returns your Google account ID and minutes:
 
+   **Windows (PowerShell)**
+
    ```powershell
    Invoke-RestMethod http://localhost:8000/api/billing/balance -Headers @{ Authorization = "Bearer $token" }
+   ```
+
+   **macOS and Linux**
+
+   ```bash
+   curl http://localhost:8000/api/billing/balance -H "Authorization: Bearer $TOKEN"
    ```
 
 ### SHA-1 fingerprints
@@ -50,7 +58,7 @@ Each Android client needs the SHA-1 fingerprint of one signing certificate:
 
 | Certificate | SHA-1 from |
 | --- | --- |
-| Debug | `keytool -list -v -keystore "$env:USERPROFILE\.android\debug.keystore" -alias androiddebugkey -storepass android`, or `.\gradlew signingReport` |
+| Debug | Windows: `keytool -list -v -keystore "$env:USERPROFILE\.android\debug.keystore" -alias androiddebugkey -storepass android`, or `.\gradlew signingReport`. macOS and Linux: `keytool -list -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android`, or `./gradlew signingReport` |
 | Upload key | `keytool -list -v -keystore <upload-keystore>.jks -alias <alias>` |
 | Play app signing | Play Console, which holds this key: the app signing key certificate, not the upload key |
 

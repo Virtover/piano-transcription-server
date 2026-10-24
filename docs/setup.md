@@ -10,20 +10,23 @@ The basic stack runs with Docker alone. The other parts are optional and each ne
 | Google Play billing | Paid minutes, free minutes | [Google Play billing](google-play-billing.md) | about 1 hour, plus up to a day for Google permissions |
 | RunPod outsourcing | Extra GPUs when this machine is busy | [Outsourcing to RunPod](runpod.md) | about 1 hour |
 
+> [!NOTE]
+> Where commands differ by system, the docs show a **Windows (PowerShell)** block and a **macOS and Linux** block (bash or zsh): run the one for yours. All other commands run the same in any terminal. On macOS and Linux, type `python3` where the docs say `python` if `python` is not found.
+
 For the optional parts, `python -m app.config requirements` prints what to create at each provider, calculated from your configuration, and `python -m app.config check --online` verifies it. With an AI coding agent, `/setup-google` and `/setup-runpod` guide you through both.
 
 ## 📋 Requirements
 
 * Docker Desktop with Docker Compose and Linux containers enabled.
-* NVIDIA drivers and NVIDIA Container Toolkit for GPU transcription.
+* NVIDIA drivers and NVIDIA Container Toolkit for GPU transcription, on Windows or Linux. Docker on macOS cannot use the GPU, so the worker runs on the CPU there.
 * A public video URL containing an audio or piano performance.
 
 The worker image includes `ffmpeg`, Transkun, and the Python dependencies. Redis and shared job storage are provided by Compose.
 
 ## 🚀 Run the stack
 
-```powershell
-Copy-Item .env.example .env
+```shell
+cp .env.example .env
 docker compose run --rm api python -m app.config check
 docker compose up --build
 ```
@@ -32,12 +35,14 @@ The `check` command validates `.env` and the secrets and prints the resolved con
 
 The API is available at `http://localhost:8000` and its interactive OpenAPI documentation is at `http://localhost:8000/docs`.
 
-Check the service state from PowerShell:
+Check the service state:
 
-```powershell
-Invoke-RestMethod http://localhost:8000/health
-Invoke-RestMethod http://localhost:8000/ready
+```shell
+curl http://localhost:8000/health
+curl http://localhost:8000/ready
 ```
+
+In Windows PowerShell 5.1, type `curl.exe`: plain `curl` there is a different command.
 
 Do not commit `.env`, the `secrets` folder, or any machine-specific values.
 
@@ -47,12 +52,27 @@ To update a running server, use `python scripts/server.py restart 5m`: it announ
 
 Optional. Without it, anyone who can reach port 8000 can use the server. For a server that only you, or people you share a password with, use from the internet, create one password and restart the API:
 
+**Windows (PowerShell)**
+
 ```powershell
 New-Item -ItemType Directory -Force secrets | Out-Null
 $bytes = New-Object byte[] 18
 [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
 Set-Content -Path secrets\server_password -Value ([Convert]::ToBase64String($bytes)) -NoNewline
 Get-Content secrets\server_password
+```
+
+**macOS and Linux**
+
+```bash
+mkdir -p secrets
+openssl rand -base64 18 | tr -d '\n' > secrets/server_password
+cat secrets/server_password; echo
+```
+
+Then, on any system:
+
+```shell
 docker compose run --rm api python -m app.config check
 docker compose restart api
 ```
@@ -73,7 +93,7 @@ Requests without the correct password get `401` with `{"detail": "Server passwor
 
 Verify GPU access before starting the stack:
 
-```powershell
+```shell
 docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
 ```
 
@@ -106,14 +126,14 @@ Each build of the worker or RunPod image is 7 to 8 GB, and Docker keeps every ol
 
 **See what uses the space:**
 
-```powershell
+```shell
 docker system df
 docker image ls
 ```
 
 **Remove old images and the build cache.** Docker Desktop must be running:
 
-```powershell
+```shell
 # One image, for example an old RunPod tag that is already on Docker Hub:
 docker image rm <dockerhub-username>/piano-transcription-runpod:<old-tag>
 
@@ -125,6 +145,8 @@ docker builder prune -a
 ```
 
 Never add `--volumes` to these commands: the `data` volume holds job files. Billing data is in `billing-data\` on the host and is not affected either way.
+
+On Linux, pruning gives the space back to the disk right away. The rest of this section is for Windows.
 
 **Give the space back to Windows.** After pruning, Docker reuses the freed space, but the `.vhdx` file keeps its size. To shrink it, quit Docker Desktop, then in an **administrator** PowerShell:
 

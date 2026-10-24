@@ -6,23 +6,33 @@ The test suite uses an in-memory Redis substitute and temporary SQLite databases
 
 Create a virtual environment and install the test dependencies:
 
-```powershell id="vznqyw"
+**Windows (PowerShell)**
+
+```powershell
 py -3.12 -m venv .venv
-
 .\.venv\Scripts\Activate.ps1
-
 python -m pip install -r requirements.test.txt
 ```
 
+**macOS and Linux**
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.test.txt
+```
+
+The commands below expect the environment to be active.
+
 ## ✅ Run tests
 
-```powershell id="nbxv8g"
+```shell
 python -m pytest -q
 ```
 
 Run one file or one test while working on a feature:
 
-```powershell
+```shell
 python -m pytest -q tests/test_account_api.py
 python -m pytest -q -k cancellation
 ```
@@ -70,15 +80,32 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 
 Some tests need PyTorch, Transkun, or `ffmpeg`, which are only in the worker image. They are skipped in the API test environment. Run them in the worker image:
 
+**Windows (PowerShell)**
+
 ```powershell
 docker compose run --rm --no-deps -v "${PWD}\tests:/app/tests:ro" worker sh -c "pip install -q pytest && python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_media.py tests/test_pipeline_upload.py tests/test_gpu_batcher.py tests/test_device_selection.py tests/test_device_capacity.py"
 ```
 
+**macOS and Linux**
+
+```bash
+docker compose run --rm --no-deps -v "$PWD/tests:/app/tests:ro" worker sh -c "pip install -q pytest && python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_media.py tests/test_pipeline_upload.py tests/test_gpu_batcher.py tests/test_device_selection.py tests/test_device_capacity.py"
+```
+
 Run the handler tests in the RunPod image, on the CPU (`CUDA_VISIBLE_DEVICES=`) or with `--gpus all`:
+
+**Windows (PowerShell)**
 
 ```powershell
 docker build -f Dockerfile.runpod -t piano-transcription-runpod:local .
 docker run --rm -e CUDA_VISIBLE_DEVICES= -v "${PWD}\tests:/app/tests:ro" -v "${PWD}\runpod:/app/runpod:ro" piano-transcription-runpod:local sh -c "pip install -q pytest && cd /app && PYTHONPATH=/app python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_runpod_handler.py"
+```
+
+**macOS and Linux**
+
+```bash
+docker build -f Dockerfile.runpod -t piano-transcription-runpod:local .
+docker run --rm -e CUDA_VISIBLE_DEVICES= -v "$PWD/tests:/app/tests:ro" -v "$PWD/runpod:/app/runpod:ro" piano-transcription-runpod:local sh -c "pip install -q pytest && cd /app && PYTHONPATH=/app python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_runpod_handler.py"
 ```
 
 The tests replace Google, Google Play, `yt-dlp`, DNS, and the transcription pipeline with fakes, so they never use the network or a model.
@@ -87,7 +114,7 @@ The tests replace Google, Google Play, `yt-dlp`, DNS, and the transcription pipe
 
 Run the application syntax check:
 
-```powershell id="y6e1gz"
+```shell
 python -m compileall -q app
 ```
 

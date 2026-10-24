@@ -8,11 +8,12 @@ Piano Transcription Server accepts a public video URL or an uploaded audio or vi
 
 ## 🚀 Start here
 
-```powershell
-Copy-Item .env.example .env
-
+```shell
+cp .env.example .env
 docker compose up --build
 ```
+
+`cp` works in PowerShell too. Other docs show commands for **Windows (PowerShell)** and for **macOS and Linux** where they differ.
 
 The API is available at `http://localhost:8000`; interactive documentation is at `http://localhost:8000/docs`.
 

@@ -54,7 +54,7 @@ Billing backups are pruned by the API after each backup, using `BILLING_BACKUP_R
 
 Restart or stop the stack with `scripts/server.py` on the host instead of running `docker compose` directly. It announces the restart or shutdown to clients first, and needs only Python 3 and the docker CLI:
 
-```powershell
+```shell
 python scripts/server.py restart 5m                  # restart in 5 minutes, for example to update
 python scripts/server.py restart 5m --outsource      # the same, with the outsource profile
 python scripts/server.py restart 10m --reason "Faster transcription" --grace 10m

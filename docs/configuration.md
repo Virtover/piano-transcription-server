@@ -11,7 +11,7 @@ All settings are validated when a service starts. An invalid value stops the ser
 
 ### ✅ Checking the configuration
 
-```powershell
+```shell
 docker compose run --rm api python -m app.config check
 ```
 
@@ -19,7 +19,7 @@ The command validates everything, prints the resolved configuration with secrets
 
 It works offline, so it cannot tell whether a key is *correct*. Add `--online` to test each configured service with the real credentials:
 
-```powershell
+```shell
 docker compose run --rm api python -m app.config check --online
 ```
 
@@ -34,7 +34,7 @@ Each result is `OK`, `WARN`, `FAIL`, or `SKIP`, and every warning or failure nam
 
 ### 📋 External service requirements
 
-```powershell
+```shell
 docker compose run --rm api python -m app.config requirements
 ```
 
@@ -272,7 +272,7 @@ For billing configuration, uncomment the billing section of [.env.example](../.e
 
 To manually add transcription minutes to an existing billed user, run the command in the API container:
 
-```powershell
+```shell
 docker compose exec api python -m app.admin_credit --user user@example.com --minutes 30
 ```
 
@@ -280,7 +280,7 @@ The email must belong to a user who has authenticated with the API at least once
 
 To delete a user's account and data, for example after a deletion request by email or through a web form, run:
 
-```powershell
+```shell
 docker compose exec api python -m app.admin_delete --user user@example.com
 ```
 
@@ -306,6 +306,8 @@ The database is in WAL mode, so `billing.sqlite3-wal` and `billing.sqlite3-shm` 
 
 To restore a backup, stop the stack so nothing writes to the database, replace the live file, and remove the leftover WAL files:
 
+**Windows (PowerShell)**
+
 ```powershell
 docker compose down
 Remove-Item billing-data\billing.sqlite3-wal, billing-data\billing.sqlite3-shm -ErrorAction SilentlyContinue
@@ -313,9 +315,18 @@ Copy-Item billing-data\backups\<backup-file>.sqlite3 billing-data\billing.sqlite
 docker compose up -d
 ```
 
+**macOS and Linux**
+
+```bash
+docker compose down
+rm -f billing-data/billing.sqlite3-wal billing-data/billing.sqlite3-shm
+cp billing-data/backups/<backup-file>.sqlite3 billing-data/billing.sqlite3
+docker compose up -d
+```
+
 Check a backup before relying on it:
 
-```powershell
+```shell
 docker compose exec api python -c "import sqlite3; d=sqlite3.connect('file:/billing/backups/<backup-file>.sqlite3?mode=ro', uri=True); print(d.execute('PRAGMA integrity_check').fetchone())"
 ```
 
@@ -338,7 +349,7 @@ Rules when opening files:
 
 Some viewers, especially online and older ones, report that a WAL-mode file is "not a database". The file is valid. To make a copy that any viewer can open, without stopping the API:
 
-```powershell
+```shell
 docker compose exec -T api python -c "
 import os, sqlite3
 src = sqlite3.connect(os.environ.get('BILLING_DATABASE_PATH', '/billing/billing.sqlite3'), timeout=30)
@@ -347,7 +358,7 @@ src.backup(dst)
 print(dst.execute('PRAGMA journal_mode=DELETE').fetchone())
 dst.close(); src.close()
 "
-docker compose cp api:/tmp/view.sqlite3 .\view.sqlite3
+docker compose cp api:/tmp/view.sqlite3 view.sqlite3
 docker compose exec api rm /tmp/view.sqlite3
 ```
 
@@ -355,9 +366,18 @@ It should print `('delete',)`. Open `view.sqlite3` and delete it afterwards. The
 
 To convert a copy of an existing backup file instead:
 
+**Windows (PowerShell)**
+
 ```powershell
 Copy-Item billing-data\backups\<backup-file>.sqlite3 view.sqlite3
 python -c "import sqlite3; d=sqlite3.connect('view.sqlite3'); print(d.execute('PRAGMA journal_mode=DELETE').fetchone()); d.close()"
+```
+
+**macOS and Linux**
+
+```bash
+cp billing-data/backups/<backup-file>.sqlite3 view.sqlite3
+python3 -c "import sqlite3; d=sqlite3.connect('view.sqlite3'); print(d.execute('PRAGMA journal_mode=DELETE').fetchone()); d.close()"
 ```
 
 Never run `PRAGMA journal_mode=DELETE` on the live database or on a backup you plan to keep as is. Do it on a copy.

@@ -2,11 +2,13 @@
 
 The API base URL is `http://localhost:8000`. FastAPI's generated reference is available at `/docs`.
 
-If the server has a [password](setup.md#-password-protection), add it to every request except `/health` and `/ready`, for example `-Headers @{ 'X-Server-Password' = $password }` in PowerShell. HTTP Basic auth with any user name works too. Without it, requests get `401` with `{"detail": "Server password required"}` and a `WWW-Authenticate: Basic` header. When billing is enabled, send both this header and the Google `Authorization` header.
+If the server has a [password](setup.md#-password-protection), add it to every request except `/health` and `/ready`, for example `-Headers @{ 'X-Server-Password' = $password }` in PowerShell or `-H "X-Server-Password: $PASSWORD"` with curl. HTTP Basic auth with any user name works too. Without it, requests get `401` with `{"detail": "Server password required"}` and a `WWW-Authenticate: Basic` header. When billing is enabled, send both this header and the Google `Authorization` header.
 
 ## 🎹 Transcriptions
 
 Create a job with an HTTP(S) video URL:
+
+**Windows (PowerShell)**
 
 ```powershell
 $job = Invoke-RestMethod `
@@ -16,11 +18,21 @@ $job = Invoke-RestMethod `
   -Body '{"source_url":"https://example.com/video"}'
 ```
 
-The endpoint returns `202 Accepted`, a `job_id`, and `queued` status.
+**macOS and Linux**
+
+```bash
+curl -X POST http://localhost:8000/api/transcriptions \
+  -H 'Content-Type: application/json' \
+  -d '{"source_url":"https://example.com/video"}'
+```
+
+The endpoint returns `202 Accepted`, a `job_id`, and `queued` status. PowerShell keeps the response in `$job`, which the examples below use. With curl, keep the ID for them: `JOB_ID=<job_id from the response>`.
 
 ### 📁 Uploading a file
 
 Send an audio or video file as the raw request body, and its original name as `filename`:
+
+**Windows (PowerShell)**
 
 ```powershell
 $job = Invoke-RestMethod `
@@ -29,6 +41,8 @@ $job = Invoke-RestMethod `
   -ContentType 'application/octet-stream' `
   -InFile .\Nocturne.mp3
 ```
+
+**macOS and Linux**
 
 ```bash
 curl -X POST "http://localhost:8000/api/transcriptions/upload?filename=Nocturne.mp3" \
@@ -58,28 +72,46 @@ To show the cost before uploading, read the duration on the device and call `GET
 
 Poll the job:
 
+**Windows (PowerShell)**
+
 ```powershell
-$status = Invoke-RestMethod `
-  "http://localhost:8000/api/transcriptions/$($job.job_id)"
-$status
+Invoke-RestMethod "http://localhost:8000/api/transcriptions/$($job.job_id)"
+```
+
+**macOS and Linux**
+
+```bash
+curl "http://localhost:8000/api/transcriptions/$JOB_ID"
 ```
 
 Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens. `maintenance` announces a planned restart or shutdown; see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns).
 
 Cancel a queued or processing job:
 
+**Windows (PowerShell)**
+
 ```powershell
-Invoke-RestMethod `
-  -Method Delete `
-  -Uri "http://localhost:8000/api/transcriptions/$($job.job_id)"
+Invoke-RestMethod -Method Delete -Uri "http://localhost:8000/api/transcriptions/$($job.job_id)"
+```
+
+**macOS and Linux**
+
+```bash
+curl -X DELETE "http://localhost:8000/api/transcriptions/$JOB_ID"
 ```
 
 After the status is `completed`, download the MIDI:
 
+**Windows (PowerShell)**
+
 ```powershell
-Invoke-WebRequest `
-  -Uri "http://localhost:8000/api/transcriptions/$($job.job_id)/midi" `
-  -OutFile transcription.mid
+Invoke-WebRequest -Uri "http://localhost:8000/api/transcriptions/$($job.job_id)/midi" -OutFile transcription.mid
+```
+
+**macOS and Linux**
+
+```bash
+curl -o transcription.mid "http://localhost:8000/api/transcriptions/$JOB_ID/midi"
 ```
 
 The MIDI can contain piano notes, velocities, onset and offset information, sustain-pedal events (`CC64`), and other detected MIDI control events. The download returns `409` while processing, `404` for an unknown or missing result, and `500` for invalid stored result metadata.
@@ -138,11 +170,20 @@ Jobs survive both: running jobs get time to finish first, and queued jobs stay q
 
 When billing is enabled, a signed-in user can delete their account and data:
 
+**Windows (PowerShell)**
+
 ```powershell
 Invoke-RestMethod `
   -Method Delete `
   -Uri http://localhost:8000/api/account `
   -Headers @{ Authorization = "Bearer $googleIdToken" }
+```
+
+**macOS and Linux**
+
+```bash
+curl -X DELETE http://localhost:8000/api/account \
+  -H "Authorization: Bearer $GOOGLE_ID_TOKEN"
 ```
 
 The endpoint returns `204 No Content`. It removes:

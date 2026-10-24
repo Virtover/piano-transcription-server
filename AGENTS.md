@@ -5,7 +5,7 @@ Piano Transcription Server: a FastAPI API, Dramatiq workers, and Redis, run with
 ## Commands
 
 ```powershell
-.\.venv\Scripts\python -m pytest -q                              # all tests; no Docker, GPU, or credentials needed
+.\.venv\Scripts\python -m pytest -q                              # all tests; no Docker, GPU, or credentials needed (.venv/bin/python on macOS/Linux)
 docker compose run --rm api python -m app.config check           # validate .env and secrets, offline
 docker compose run --rm api python -m app.config check --online  # also test storage, RunPod, Google Play for real
 docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents
@@ -35,6 +35,7 @@ python scripts/server.py restart 5m [--outsource]                # announced res
 - **Secrets are files** in `secrets/` (mounted at `/run/secrets`), never `.env` values. `.env` holds only choices; container paths are in `docker-compose.yml`.
 - **Every setting is documented** in `docs/configuration.md`; a test fails otherwise. Durations use units (`30s`, `2m`, `1d`).
 - **Docs and skills describe only this project.** What a provider must offer lives in `app/requirements.py`, stated as an intent with its reason ("signed links must work from any IP address"), with values calculated from settings and code. Never add provider menu paths or setting names to docs or skills: they go stale. Where a provider's API can read a setting, verify it in `app/online_check.py`.
+- **Docs serve every OS.** A command that runs the same everywhere (`docker`, `python`, `curl`) goes in one ```` ```shell ```` block. One that differs gets a `**Windows (PowerShell)**` block followed by a `**macOS and Linux**` block (bash, also valid in zsh). Give the user the commands for their OS.
 - Match the surrounding code's style and comment density. Add or update tests with every change.
 
 ## Setup tasks
