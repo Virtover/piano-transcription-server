@@ -2,13 +2,19 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# yt-dlp runs deno for YouTube. A fixed version, checked against its
+# published checksum. To update: change both, from the release's .sha256sum file.
+ARG DENO_VERSION=2.9.8
+ARG DENO_SHA256=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
+
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		ca-certificates \
 		ffmpeg \
 		unzip \
 		wget \
-	&& wget -qO /tmp/deno.zip https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
+	&& wget -qO /tmp/deno.zip "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \
+	&& echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c - \
 	&& unzip -p /tmp/deno.zip deno > /usr/local/bin/deno \
 	&& chmod +x /usr/local/bin/deno \
 	&& rm -f /tmp/deno.zip \
@@ -18,6 +24,15 @@ COPY requirements.api.txt .
 
 RUN pip install --no-cache-dir -r requirements.api.txt
 
+# The services run as this user, not root. New volumes mounted at /data and
+# /billing take the ownership below; see "Running as a non-root user" in
+# docs/setup.md for volumes created by earlier versions.
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin app \
+	&& mkdir -p /data /billing \
+	&& chown app:app /data /billing
+
 COPY app ./app
+
+USER app
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

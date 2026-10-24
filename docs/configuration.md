@@ -55,6 +55,8 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 | --- | --- | --- |
 | `MAX_VIDEO_LENGTH_MINUTES` | unset | Maximum video or uploaded file length; unset means no limit. |
 | `MAX_UPLOAD_SIZE_MB` | `200` | Maximum size of an uploaded file. |
+| `MAX_ACTIVE_JOBS` | `50` | Transcriptions being uploaded, checked, queued, or run at once, from all users. Further requests get `429`. Bounds disk use: each upload can take `MAX_UPLOAD_SIZE_MB`. |
+| `MAX_ACTIVE_JOBS_PER_USER` | `5` | The same for one signed-in user. Only applies with billing; without it, all clients are one anonymous user and only `MAX_ACTIVE_JOBS` applies. |
 | `SOURCE_URL_ALLOWED_HOSTS` | see below | JSON list of hosts accepted as transcription sources. Subdomains match too. |
 | `CLEANUP_INTERVAL` | `10m` | How often the cleanup service deletes expired job files. |
 
@@ -82,6 +84,7 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 | `BILLING_JOB_DIAGNOSTICS_RETENTION` | `30d` | Age after which job diagnostics records are deleted. See [Job diagnostics](architecture.md#-job-diagnostics). |
 | `GOOGLE_OAUTH_CLIENT_IDS` | `[]` | Public OAuth client IDs whose Google ID tokens are accepted. Required for billing. |
 | `GOOGLE_PLAY_PACKAGE_NAME` | unset | Android package name used for Google Play verification. Required for billing. |
+| `GOOGLE_PLAY_VOIDED_PURCHASES_INTERVAL` | `1h` | How often refunded and charged-back purchases are read from Google Play, and their minutes taken back. See [Refunds](google-play-billing.md#-refunds-and-chargebacks). |
 
 `BILLING_PROVIDER=google_play` also requires the secret `google_play_service_account.json`. The API refuses to start if the package name, the OAuth client IDs, or the secret is missing. See the [Google Play billing guide](google-play-billing.md).
 
@@ -127,6 +130,8 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 | `BILLING_DATABASE_PATH` | `/billing/billing.sqlite3` | same | SQLite database for balances, purchases, and reservations. |
 | `BILLING_BACKUP_DIR` | `/billing/backups` | same | Directory for billing database backups. |
 
+`API_BIND_ADDRESS` in `.env` is read by Docker Compose, not by the server: the network address the API's port `8000` is published on. The default `0.0.0.0` accepts connections on every network interface, which phones on the same network need. Set `127.0.0.1` when an HTTPS proxy or tunnel on the same machine forwards to the API, so it cannot be reached around the proxy. See [Password protection](setup.md#-password-protection).
+
 Default for `SOURCE_URL_ALLOWED_HOSTS`:
 
 ```env
@@ -151,6 +156,8 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `server_password` | Optional. When present, every request except `/health` and `/ready` needs this password, as the `X-Server-Password` header or HTTP Basic auth with any user name. At least 12 characters; the API refuses to start otherwise. See [Password protection](setup.md#-password-protection). |
 
 Secrets are only read from these files: a variable with the same name in `.env` or the environment is ignored. Never commit the `secrets` folder.
+
+The services run as user ID `10001`, not root. On Linux, the secret files must be readable by that user: files created with the commands in these docs are, unless your `umask` is strict. If `check` reports a secret as missing although the file exists, run `sudo chown 10001 secrets/*`.
 
 ## 🕰️ Deprecated names
 

@@ -80,6 +80,10 @@ class Billing:
                     finished_at INTEGER,
                     updated_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS billing_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS job_diagnostics_user_index ON job_diagnostics (user_id);
                 CREATE INDEX IF NOT EXISTS job_diagnostics_created_index ON job_diagnostics (created_at);
                 """
@@ -91,6 +95,8 @@ class Billing:
             purchase_columns = {row[1] for row in connection.execute("PRAGMA table_info(purchases)")}
             if "order_id" not in purchase_columns:
                 connection.execute("ALTER TABLE purchases ADD COLUMN order_id TEXT")
+            if "voided_at" not in purchase_columns:
+                connection.execute("ALTER TABLE purchases ADD COLUMN voided_at INTEGER")
 
     def _open(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=30)
@@ -150,6 +156,10 @@ class Billing:
             ).fetchone()
             if now - user["free_grant_at"] < period_seconds():
                 return 0
+            if user["minutes"] < 0:
+                # Minutes owed for a refunded purchase are not paid off with
+                # free minutes; the grant waits until the balance is positive.
+                return 0
             grant = max(0, free_minutes - user["minutes"])
             connection.execute(
                 "UPDATE users SET minutes = minutes + ?, free_grant_at = ? WHERE user_id = ?",
@@ -158,6 +168,8 @@ class Billing:
             return grant
 
     def get_balance(self, user_id: str) -> int:
+        """Available minutes. Negative after a refunded purchase whose minutes
+        were already used."""
         if settings.billing.provider == "none":
             return 0
         with self._connect() as connection:
@@ -172,7 +184,7 @@ class Billing:
                     WHERE u.user_id = ?""",
                 (user_id, user_id),
             ).fetchone()
-            return max(0, int(user["available_minutes"])) if user else 0
+            return int(user["available_minutes"]) if user else 0
 
     def free_minutes_status(self, user_id: str) -> dict[str, int | None]:
         if settings.billing.provider == "none" or (settings.billing.free_minutes or 0) <= 0:
@@ -215,7 +227,7 @@ class Billing:
                    VALUES (?, ?, ?, 'reserved')""",
                 (job_id, user_id, cost),
             )
-            return max(0, int(user["minutes"] - reserved - cost))
+            return int(user["minutes"] - reserved - cost)
 
     def settle_success(self, job_id: str) -> None:
         self._settle(job_id, None)
@@ -286,6 +298,44 @@ class Billing:
                 (minutes, user_id),
             )
             return minutes
+
+    def void_purchase(self, token: str) -> tuple[str, int] | None:
+        """Take back the minutes of a refunded or charged-back purchase, once.
+        The balance can go below zero when they were already used. Returns
+        (user ID, minutes taken), or None if the token is unknown, already
+        voided, or belonged to a deleted account."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            purchase = connection.execute(
+                "SELECT rowid, user_id, minutes FROM purchases WHERE purchase_token = ? AND voided_at IS NULL",
+                (token,),
+            ).fetchone()
+            if purchase is None:
+                return None
+            connection.execute(
+                "UPDATE purchases SET voided_at = ? WHERE rowid = ?",
+                (int(time.time()), purchase["rowid"]),
+            )
+            if purchase["user_id"] == DELETED_USER_ID:
+                return None
+            connection.execute(
+                "UPDATE users SET minutes = minutes - ? WHERE user_id = ?",
+                (purchase["minutes"], purchase["user_id"]),
+            )
+            return purchase["user_id"], purchase["minutes"]
+
+    def get_state(self, key: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT value FROM billing_state WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_state(self, key: str, value: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO billing_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
 
     def user_id_by_email(self, email: str) -> str | None:
         with self._connect() as connection:
@@ -373,7 +423,7 @@ class Billing:
                     duration,
                     cost,
                     status,
-                    job.get("error"),
+                    job.get("error_detail") or job.get("error"),
                     job.get("backend"),
                     1 if job.get("outsourced") == "1" else 0,
                     job.get("requeue_reason"),

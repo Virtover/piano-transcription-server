@@ -8,11 +8,13 @@ A request is any object with `result` (a Future), `progress_callback`,
 import logging
 from typing import Any, Callable, Sequence
 
+from app.errors import UserFacingError
+
 
 logger = logging.getLogger(__name__)
 
 
-class GpuOutOfMemory(RuntimeError):
+class GpuOutOfMemory(UserFacingError, RuntimeError):
     """A single request does not fit in GPU memory, even on its own."""
 
     def __init__(self) -> None:

@@ -75,7 +75,8 @@ def test_failed_job_keeps_its_error_after_the_redis_job_expires(worker, monkeypa
 
     record = diagnostics(settings, job_id)
     assert record["status"] == "failed"
-    assert record["error"] == "download failed"
+    # Diagnostics keep the full error for operators; users see a plain message.
+    assert record["error"] == "RuntimeError: download failed"
     assert record["started_at"] is not None
     assert record["finished_at"] >= record["started_at"]
 

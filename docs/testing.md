@@ -75,6 +75,11 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_outsource_capacity.py` | `OUTSOURCE_MAX_CONCURRENCY`: the default, fixed values, and `auto` from RunPod's max workers and the reported requests per worker. |
 | `test_outsource_clients.py` | The RunPod client, S3 storage, and the handler's input checks and download limits. |
 | `test_runpod_handler.py` | The RunPod handler with the real model: concurrent requests share one batch, and bad requests fail alone. Needs the RunPod image (see below). |
+| `test_audio_download.py` | The yt-dlp and ffmpeg commands: no generic extractor, conversion only by the restricted ffmpeg, and audio cut at the charged duration. |
+| `test_errors.py` | Job errors as users see them: no command lines or paths, and yt-dlp's reason when it gives one. |
+| `test_job_limits.py` | `MAX_ACTIVE_JOBS` and `MAX_ACTIVE_JOBS_PER_USER`: places taken during uploads and video checks, given back when jobs end or fail. |
+| `test_voided_purchases.py` | Refunds and chargebacks: minutes taken back once, negative balances, free minutes, and reading every page from Google Play. |
+| `test_deployment.py` | The images: pinned requirements and deno, services not running as root, and the startup check for root-owned volumes. |
 | `test_device_capacity.py` | GPU capacity calculation, including the `nvidia-smi` free memory check used under WSL. |
 | `test_device_selection.py` | GPU and CPU device selection for transcription jobs. Needs the worker dependencies, so it is skipped in the API test environment. |
 
@@ -83,13 +88,13 @@ Some tests need PyTorch, Transkun, or `ffmpeg`, which are only in the worker ima
 **Windows (PowerShell)**
 
 ```powershell
-docker compose run --rm --no-deps -v "${PWD}\tests:/app/tests:ro" worker sh -c "pip install -q pytest && python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_media.py tests/test_pipeline_upload.py tests/test_gpu_batcher.py tests/test_device_selection.py tests/test_device_capacity.py"
+docker compose run --rm --no-deps -v "${PWD}\tests:/app/tests:ro" worker sh -c "pip install -q --user pytest && python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_media.py tests/test_pipeline_upload.py tests/test_gpu_batcher.py tests/test_device_selection.py tests/test_device_capacity.py"
 ```
 
 **macOS and Linux**
 
 ```bash
-docker compose run --rm --no-deps -v "$PWD/tests:/app/tests:ro" worker sh -c "pip install -q pytest && python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_media.py tests/test_pipeline_upload.py tests/test_gpu_batcher.py tests/test_device_selection.py tests/test_device_capacity.py"
+docker compose run --rm --no-deps -v "$PWD/tests:/app/tests:ro" worker sh -c "pip install -q --user pytest && python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_media.py tests/test_pipeline_upload.py tests/test_gpu_batcher.py tests/test_device_selection.py tests/test_device_capacity.py"
 ```
 
 Run the handler tests in the RunPod image, on the CPU (`CUDA_VISIBLE_DEVICES=`) or with `--gpus all`:

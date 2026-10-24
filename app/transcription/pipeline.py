@@ -27,8 +27,10 @@ def transcribe_source(
     cancellation_callback: CancellationCallback | None = None,
     upload_path: Path | None = None,
     upload_title: str | None = None,
+    max_seconds: float | None = None,
 ) -> Path:
-    """Transcribe source_url, or upload_path when it is given."""
+    """Transcribe source_url, or upload_path when it is given, at most about
+    max_seconds of it: the duration the job was charged for."""
     from app.transcription.piano_transcription import transcribe_piano
 
     try:
@@ -40,6 +42,7 @@ def transcribe_source(
             progress_callback=progress_callback,
             metadata_callback=metadata_callback,
             cancellation_callback=cancellation_callback,
+            max_seconds=max_seconds,
         )
 
         midi_path = output_dir / "transcription.mid"

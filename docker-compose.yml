@@ -13,7 +13,10 @@ services:
       context: .
       dockerfile: Dockerfile.api
     ports:
-      - "8000:8000"
+      # 0.0.0.0 accepts connections on every network interface. Set
+      # API_BIND_ADDRESS=127.0.0.1 in .env when an HTTPS proxy on this machine
+      # forwards to the API, so only the proxy can reach it.
+      - "${API_BIND_ADDRESS:-0.0.0.0}:8000:8000"
     env_file:
       - .env
     environment: *wiring
@@ -44,14 +47,13 @@ services:
     restart: unless-stopped
 
   # Sends jobs to the outsourcing provider when local GPUs are overloaded.
-  # Start with: docker compose --profile outsource up -d
-  # It downloads and converts audio here and needs no GPU, so it runs on the
-  # API image. See docs/runpod.md.
+  # Always started: with OUTSOURCE_PROVIDER=none it only idles, so .env is the
+  # one switch. It downloads and converts audio here and needs no GPU, so it
+  # runs on the API image. See docs/runpod.md.
   remote-worker:
     build:
       context: .
       dockerfile: Dockerfile.api
-    profiles: ["outsource"]
     env_file:
       - .env
     environment: *wiring

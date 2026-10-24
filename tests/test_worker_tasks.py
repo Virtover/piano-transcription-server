@@ -60,6 +60,24 @@ def test_successful_job_completes_and_charges(worker, monkeypatch):
     assert billing.get_balance("user") == 6
 
 
+@pytest.mark.parametrize(("stored", "expected"), [({"duration": "130.5"}, 130.5), ({}, None), ({"duration": "x"}, None)])
+def test_audio_is_cut_at_the_charged_duration(worker, monkeypatch, stored, expected):
+    _, billing = worker
+    queue_job(billing, **stored)
+    seen = {}
+
+    def transcribe_source(output_dir, max_seconds, **kwargs):
+        seen["max_seconds"] = max_seconds
+        midi = output_dir / "transcription.mid"
+        midi.write_bytes(b"MThd")
+        return midi
+
+    install_pipeline(monkeypatch, transcribe_source)
+    tasks.transcribe_job.fn("job", "https://example.com/video")
+
+    assert seen["max_seconds"] == expected
+
+
 def test_failed_job_releases_reservation(worker, monkeypatch):
     _, billing = worker
     queue_job(billing)
@@ -71,7 +89,8 @@ def test_failed_job_releases_reservation(worker, monkeypatch):
     tasks.transcribe_job.fn("job", "https://example.com/video")
 
     assert job()["status"] == "failed"
-    assert job()["error"] == "download failed"
+    assert job()["error"] == "Transcription failed"
+    assert job()["error_detail"] == "RuntimeError: download failed"
     assert billing.get_balance("user") == 10
 
 

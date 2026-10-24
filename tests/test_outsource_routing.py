@@ -164,7 +164,7 @@ def test_api_outsources_uploads_with_their_title(api_context, outsourcing, sent,
     from app.api.routes import transcriptions
 
     client, _, _ = api_context
-    monkeypatch.setattr(transcriptions, "probe_audio", lambda path: 130.0)
+    monkeypatch.setattr(transcriptions, "probe_audio", lambda path, measure=True, max_seconds=None: 130.0)
 
     response = client.post("/api/transcriptions/upload", params={"filename": "Song.mp3"}, content=b"audio")
 

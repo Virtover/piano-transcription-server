@@ -104,6 +104,7 @@ def transcribe_remotely(
     upload_title: str | None = None,
     provider: RemoteProvider | None = None,
     storage: AudioStorage | None = None,
+    max_seconds: float | None = None,
 ) -> Path:
     """Fetch and convert audio, transcribe it remotely, and write the MIDI.
 
@@ -119,6 +120,7 @@ def transcribe_remotely(
         progress_callback=context.progress,
         metadata_callback=context.metadata,
         cancellation_callback=context.is_cancelled,
+        max_seconds=max_seconds,
     )
     context.progress(0.07)
     flac = convert_to_flac(audio.path, output_dir, context.is_cancelled)

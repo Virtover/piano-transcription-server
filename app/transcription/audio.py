@@ -10,10 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app.errors import UserFacingError
 from app.transcription.cancellation import TranscriptionCancelled
 from app.transcription.device import cpu_thread_count
 from app.media import probe_audio
-from app.url_safety import ensure_safe_source_url
+from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url
 
 
 ProgressCallback = Callable[[float], None]
@@ -31,6 +32,14 @@ AUDIO_FILE_SUFFIXES = {
     ".wav",
     ".webm",
 }
+# Audio is converted up to the paid duration plus this, so a file or video
+# whose stated length is too short cannot be transcribed for longer.
+DURATION_TOLERANCE = 5.0
+# yt-dlp stops a download above this size. A long video in the "best"
+# fallback format is large, so this only stops runaway downloads.
+MAX_DOWNLOAD_SIZE = "4G"
+# Partial files yt-dlp leaves while it downloads.
+PARTIAL_SUFFIXES = {".part", ".ytdl", ".temp"}
 
 
 @dataclass
@@ -47,6 +56,7 @@ def download_audio(
     source_url: str,
     output_dir: Path,
     cancellation_callback: CancellationCallback | None = None,
+    max_seconds: float | None = None,
 ) -> DownloadedAudio:
     output_template = str(
         output_dir / "download.%(ext)s"
@@ -57,7 +67,7 @@ def download_audio(
     result = run_process(
         [
             "yt-dlp",
-            "--no-playlist",
+            *YT_DLP_SAFETY_OPTIONS,
             "--js-runtimes",
             "deno",
             "--extractor-args",
@@ -72,12 +82,14 @@ def download_audio(
             "3",
             "--extractor-retries",
             "3",
+            "--max-filesize",
+            MAX_DOWNLOAD_SIZE,
+            # Conversion is left to convert_to_wav, which never lets ffmpeg
+            # open anything but the downloaded file.
             "--print-json",
-            "-x",
-            "--audio-format",
-            "wav",
             "-o",
             output_template,
+            "--",
             safe_url,
         ],
         cancellation_callback=cancellation_callback,
@@ -90,40 +102,41 @@ def download_audio(
     ]
 
     if not json_lines:
-        raise RuntimeError(
+        raise UserFacingError(
             "yt-dlp did not return video metadata"
         )
 
     try:
         info = json.loads(json_lines[-1])
     except json.JSONDecodeError as error:
-        raise RuntimeError(
+        raise UserFacingError(
             "yt-dlp returned invalid video metadata"
         ) from error
 
     title = info.get("title")
 
     if not title:
-        raise RuntimeError(
+        raise UserFacingError(
             "yt-dlp did not return a video title"
         )
 
     downloaded_path = None
 
-    for path in output_dir.glob("download.*"):
-        if path.suffix.lower() == ".wav":
+    for path in sorted(output_dir.glob("download.*")):
+        if path.suffix.lower() not in PARTIAL_SUFFIXES:
             downloaded_path = path
             break
 
     if downloaded_path is None:
-        raise RuntimeError(
-            "yt-dlp did not produce a WAV file"
+        raise UserFacingError(
+            "yt-dlp did not produce an audio file"
         )
 
     wav_path = convert_to_wav(
         downloaded_path,
         output_dir,
         cancellation_callback,
+        max_seconds,
     )
 
     downloaded_path.unlink()
@@ -150,7 +163,10 @@ def convert_to_wav(
     input_path: Path,
     output_dir: Path,
     cancellation_callback: CancellationCallback | None = None,
+    max_seconds: float | None = None,
 ) -> Path:
+    """Convert to 44.1 kHz mono WAV, stopping DURATION_TOLERANCE past
+    max_seconds, the duration the job was charged for."""
     wav_path = output_dir / "audio.wav"
 
     ffmpeg_threads = ffmpeg_thread_count()
@@ -171,6 +187,8 @@ def convert_to_wav(
     ]
     if ffmpeg_threads is not None:
         ffmpeg_command.extend(["-threads", str(ffmpeg_threads)])
+    if max_seconds is not None:
+        ffmpeg_command.extend(["-t", f"{max_seconds + DURATION_TOLERANCE:.3f}"])
     ffmpeg_command.append(str(wav_path))
 
     run_process(
@@ -185,13 +203,18 @@ def prepare_upload(
     title: str | None,
     output_dir: Path,
     cancellation_callback: CancellationCallback | None = None,
+    max_seconds: float | None = None,
 ) -> DownloadedAudio:
-    # Checked again here because the worker runs ffmpeg on the file.
-    duration = probe_audio(upload_path)
+    # The format is checked again here because the worker runs ffmpeg on the
+    # file. The API already measured its length; conversion stops there.
+    duration = probe_audio(upload_path, measure=False)
+    if max_seconds is not None:
+        duration = min(duration, max_seconds)
     wav_path = convert_to_wav(
         upload_path,
         output_dir,
         cancellation_callback,
+        max_seconds,
     )
     # The upload is kept until the job ends, so a job moved between local
     # and remote can be converted again.
@@ -309,8 +332,10 @@ def fetch_audio(
     progress_callback: ProgressCallback | None = None,
     metadata_callback: MetadataCallback | None = None,
     cancellation_callback: CancellationCallback | None = None,
+    max_seconds: float | None = None,
 ) -> DownloadedAudio:
-    """Download source_url, or convert upload_path, to 44.1 kHz mono WAV.
+    """Download source_url, or convert upload_path, to 44.1 kHz mono WAV,
+    at most about max_seconds long: the duration the job was charged for.
 
     Progress range: 0.03 - 0.05 before the download starts.
     """
@@ -333,12 +358,14 @@ def fetch_audio(
             upload_title,
             output_dir,
             cancellation_callback=cancellation_callback,
+            max_seconds=max_seconds,
         )
     else:
         downloaded = download_audio(
             source_url,
             output_dir,
             cancellation_callback=cancellation_callback,
+            max_seconds=max_seconds,
         )
 
     if metadata_callback:
@@ -348,13 +375,13 @@ def fetch_audio(
 
 def check_midi(midi_path: Path) -> Path:
     if not midi_path.exists():
-        raise RuntimeError(
+        raise UserFacingError(
             "Piano transcription did not "
             "produce a MIDI file"
         )
 
     if midi_path.stat().st_size == 0:
-        raise RuntimeError(
+        raise UserFacingError(
             "Piano transcription produced "
             "an empty MIDI file"
         )

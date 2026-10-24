@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
 from redis.exceptions import WatchError
 
-from app import maintenance
+from app import job_limits, maintenance
 from app.maintenance import NoticeResponse
 from app.config import settings
 from app.billing import Billing, cancelled_cost, transcription_cost, InsufficientMinutes
@@ -126,6 +126,43 @@ def ensure_no_maintenance_pending() -> None:
     )
 
 
+def max_length_seconds() -> float | None:
+    minutes = settings.limits.max_video_length_minutes
+    return minutes * 60 if minutes else None
+
+
+def hold_place(job_id: str, user_id: str, status: str) -> None:
+    """Store a placeholder for a job that is not queued yet and count it
+    against the job limits. The placeholder expires if the API stops first."""
+    key = job_key(job_id)
+    redis.hset(key, mapping={"status": status, "user_id": user_id})
+    redis.expire(key, JOB_TTL)
+    try:
+        job_limits.acquire(redis, job_id, user_id, job_key)
+    except job_limits.TooManyJobs as error:
+        redis.delete(key)
+        raise HTTPException(status_code=429, detail=str(error), headers={"Retry-After": "60"}) from error
+
+
+def give_back_place(job_id: str, user_id: str) -> None:
+    redis.delete(job_key(job_id))
+    job_limits.release(redis, job_id, user_id)
+
+
+def ensure_minimum_balance(user: AuthenticatedUser | None) -> None:
+    """Refuse a user who could not pay for even the shortest job, before
+    their upload is read."""
+    if user is None:
+        return
+    billing.grant_free_minutes(user.user_id, user.email)
+    required = transcription_cost(0)
+    if billing.get_balance(user.user_id) < required:
+        raise HTTPException(
+            status_code=402,
+            detail={"message": "Insufficient transcription minutes", "required_minutes": required},
+        )
+
+
 def current_notice() -> NoticeResponse | None:
     notice = maintenance.current(redis)
     return notice.as_response() if notice else None
@@ -202,16 +239,23 @@ def create_transcription(
 ):
     ensure_submissions_enabled()
     ensure_no_maintenance_pending()
-    duration = video_duration(request.source_url)
     job_id = str(uuid.uuid4())
-    source_url = str(request.source_url)
-    return queue_job(
-        job_id,
-        user,
-        duration,
-        {"source_url": source_url},
-        (source_url,),
-    )
+    user_id = user.user_id if user else "anonymous"
+    # The place is held during the video check too, which runs yt-dlp.
+    hold_place(job_id, user_id, "preparing")
+    try:
+        duration = video_duration(request.source_url)
+        source_url = str(request.source_url)
+        return queue_job(
+            job_id,
+            user,
+            duration,
+            {"source_url": source_url},
+            (source_url,),
+        )
+    except BaseException:
+        give_back_place(job_id, user_id)
+        raise
 
 
 def title_from_filename(filename: str) -> str:
@@ -247,17 +291,17 @@ async def upload_transcription(
     content_length = request.headers.get("content-length", "")
     if content_length.isdigit() and int(content_length) > size_limit:
         raise too_large
+    await run_in_threadpool(ensure_minimum_balance, user)
 
     job_id = str(uuid.uuid4())
-    key = job_key(job_id)
+    user_id = user.user_id if user else "anonymous"
     job_dir = Path(settings.service.data_dir) / "jobs" / job_id
     upload_path = job_dir / UPLOAD_FILE_NAME
     title = title_from_filename(filename)
 
     # The placeholder keeps the cleanup service from removing the directory
-    # during the upload, and expires if the API stops before the job is queued.
-    redis.hset(key, mapping={"status": "uploading", "user_id": user.user_id if user else "anonymous"})
-    redis.expire(key, JOB_TTL)
+    # during the upload, and counts the upload against the job limits.
+    await run_in_threadpool(hold_place, job_id, user_id, "uploading")
     try:
         job_dir.mkdir(parents=True, exist_ok=True)
         size = 0
@@ -271,7 +315,8 @@ async def upload_transcription(
             raise HTTPException(status_code=422, detail="The uploaded file is empty")
 
         try:
-            duration = await run_in_threadpool(probe_audio, upload_path)
+            # Measured by decoding, not read from the header, which can understate it.
+            duration = await run_in_threadpool(probe_audio, upload_path, True, max_length_seconds())
         except UnsupportedMedia as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         ensure_allowed_length(duration)
@@ -286,7 +331,7 @@ async def upload_transcription(
             {"upload_title": title},
         )
     except BaseException:
-        redis.delete(key)
+        give_back_place(job_id, user_id)
         shutil.rmtree(job_dir, ignore_errors=True)
         raise
 

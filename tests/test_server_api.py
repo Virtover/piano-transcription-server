@@ -65,9 +65,10 @@ def test_server_info_without_billing_lists_configured_offers(api_context):
 
 @pytest.fixture
 def yt_dlp(api_context, monkeypatch):
-    output = {"stdout": '{"duration": 90}'}
+    output = {"stdout": '{"duration": 90}', "commands": []}
 
     def fake_run(command, **kwargs):
+        output["commands"].append(command)
         if isinstance(output["stdout"], Exception):
             raise output["stdout"]
         assert command[0] == "yt-dlp"
@@ -106,6 +107,60 @@ def test_video_duration_enforces_maximum_length(yt_dlp, api_context):
     assert duration_error() == 413
     settings.limits.max_video_length_minutes = None
     assert billing_routes.video_duration("https://youtube.com/watch?v=1") == 1201.0
+
+
+def test_video_check_cannot_reach_other_sites_through_yt_dlp(yt_dlp):
+    billing_routes.video_duration("https://youtube.com/watch?v=1")
+
+    command = yt_dlp["commands"][0]
+    # The generic extractor would fetch any URL a site's page links to.
+    assert command[command.index("--use-extractors") + 1] == "default,-generic"
+    assert "--ignore-config" in command
+    assert "--no-playlist" in command
+
+
+def test_video_checks_at_once_are_limited(yt_dlp, monkeypatch):
+    slots = billing_routes.threading.BoundedSemaphore(1)
+    monkeypatch.setattr(billing_routes, "metadata_slots", slots)
+    monkeypatch.setattr(billing_routes, "METADATA_WAIT", 0.01)
+    slots.acquire()
+
+    with pytest.raises(HTTPException) as error:
+        billing_routes.video_duration("https://youtube.com/watch?v=1")
+
+    assert error.value.status_code == 503
+    assert error.value.headers["Retry-After"] == "5"
+    assert yt_dlp["commands"] == []
+    slots.release()
+    assert billing_routes.video_duration("https://youtube.com/watch?v=1") == 90.0
+
+
+@pytest.mark.parametrize("stdout", ['{"duration": 90}', "not json", subprocess.TimeoutExpired("yt-dlp", 60)])
+def test_video_check_gives_its_slot_back(yt_dlp, monkeypatch, stdout):
+    slots = billing_routes.threading.BoundedSemaphore(1)
+    monkeypatch.setattr(billing_routes, "metadata_slots", slots)
+    yt_dlp["stdout"] = stdout
+
+    try:
+        billing_routes.video_duration("https://youtube.com/watch?v=1")
+    except HTTPException:
+        pass
+
+    assert slots.acquire(blocking=False)
+
+
+def test_cost_needs_sign_in_when_billing(api_context, monkeypatch):
+    client, settings, _ = api_context
+    settings.billing.provider = "google_play"
+    monkeypatch.setattr(billing_routes, "video_duration", lambda url: pytest.fail("yt-dlp ran"))
+
+    response = client.get("/api/billing/cost", params={"source_url": "https://youtube.com/watch?v=1"})
+
+    assert response.status_code == 401
+    signed_in = client.get(
+        "/api/billing/cost", params={"duration_seconds": 300}, headers={"Authorization": "Bearer user"}
+    )
+    assert signed_in.json()["cost_minutes"] == 5
 
 
 def test_unsafe_urls_are_rejected_before_yt_dlp(api_context, monkeypatch):

@@ -17,7 +17,7 @@ cleanup service: deletes expired job files and stale routing entries
 
 * `api` accepts requests and uploaded files, serves status and MIDI files, and decides whether each job runs locally or remotely. It checks uploads with `ffprobe`.
 * `worker` consumes the `default` queue: it downloads audio, or reads the uploaded file, and runs the model on this machine's GPU or CPU.
-* `remote-worker` (optional, Compose profile `outsource`) consumes the `remote` queue. It downloads and converts audio here, then runs the model on RunPod. It runs on the API image and never loads torch or the model.
+* `remote-worker` consumes the `remote` queue when `OUTSOURCE_PROVIDER` is set; with `none` it only idles. It always starts, so `.env` is the one switch. It downloads and converts audio here, then runs the model on RunPod. It runs on the API image and never loads torch or the model.
 * `cleanup` removes files whose Redis job state has expired.
 * `redis` stores job state and queues work.
 * The shared `data` volume stores job files. Billing SQLite data and its periodic backups are stored in the host-mounted `billing-data` directory, available only to the API and the workers.
@@ -56,10 +56,9 @@ Restart or stop the stack with `scripts/server.py` on the host instead of runnin
 
 ```shell
 python scripts/server.py restart 5m                  # restart in 5 minutes, for example to update
-python scripts/server.py restart 5m --outsource      # the same, with the outsource profile
 python scripts/server.py restart 10m --reason "Faster transcription" --grace 10m
 python scripts/server.py stop 10m --back-in 2h       # shut down in 10 minutes, back in about 2 hours
-python scripts/server.py start --outsource           # start again and wait until ready
+python scripts/server.py start                       # start again and wait until ready
 python scripts/server.py status
 python scripts/server.py cancel                      # also stops a waiting script
 ```
@@ -70,10 +69,10 @@ python scripts/server.py cancel                      # also stops a waiting scri
 2. **Build while serving.** The new images are built during the countdown, and the current version keeps serving. If the build fails, the restart is cancelled and the notice removed. If the build takes longer than the countdown, the restart waits for it.
 3. **Refuse jobs that would not finish.** New jobs whose estimated wait and run time ends after the planned time are refused with `503`, without charge; in the last minute, all are.
 4. **Drain.** At the planned time, running jobs get up to `--grace` (default `5m`) to finish. Queued jobs wait and are queued again after the restart.
-5. **Restart** with `docker compose up -d --build`, which recreates only services whose image or configuration changed. Profiles given with `--profile` or `--outsource` apply to the build and the restart. `--command` replaces the restart command; then nothing is built before the countdown ends.
+5. **Restart** with `docker compose up -d --build`, which recreates only services whose image or configuration changed. Profiles given with `--profile` apply to the build and the restart; none are needed for outsourcing. `--command` replaces the restart command; then nothing is built before the countdown ends.
 6. **Clear** the notice once the API answers `/ready`. If it does not within 3 minutes, the script stops with an error and the notice expires on its own.
 
-**Shutdown** (`stop`) announces, refuses late jobs, and drains the same way, without building. Then it stops every service with `docker compose --profile "*" stop`, so services from any profile stop too. With `--down`, the containers are removed as well; volumes and the billing data are kept either way. `--back-in` tells clients when the server is expected back. Queued jobs stay in Redis and run after `start`, whose command line, with the profiles that were running, the script prints. The notice stays in Redis while the server is off, and the API removes it when it starts.
+**Shutdown** (`stop`) announces, refuses late jobs, and drains the same way, without building. Then it stops every service with `docker compose --profile "*" stop`, so services from any profile stop too. With `--down`, the containers are removed as well; volumes and the billing data are kept either way. `--back-in` tells clients when the server is expected back. Queued jobs stay in Redis and run after `python scripts/server.py start`. The notice stays in Redis while the server is off, and the API removes it when it starts.
 
 Ctrl+C during a countdown cancels it and removes the notice. The script runs `python -m app.maintenance` in the `api` container, so the stack must be running, with a version that includes it.
 
@@ -83,7 +82,7 @@ Redis job state disappears an hour after a job ends, so each job also has a reco
 
 * job ID, user ID, source (`url` or `upload`), and the source URL (none for uploads; the file name is not stored),
 * audio duration and reserved cost,
-* status, error message, backend, whether the job was outsourced, and why it was last moved between backends,
+* status, the full error (the type, message, and a failed command's output; users only see a short message), backend, whether the job was outsourced, and why it was last moved between backends,
 * times queued, first started, first finished, and last updated (Unix seconds).
 
 Records older than `BILLING_JOB_DIAGNOSTICS_RETENTION` (default `30d`) are deleted before each backup. Deleting an account deletes its records. Writing a record never fails a job; errors are logged.

@@ -73,9 +73,17 @@ def remote_env(api_context, monkeypatch):
     settings.outsource.fallback_local = True
     billing.credit_purchase("user", "starter", "token", "order")
 
-    state = {"provider": FakeProvider([completed()]), "storage": FakeStorage(), "progress": [], "local_sent": [], "remote_sent": []}
+    state = {
+        "provider": FakeProvider([completed()]),
+        "storage": FakeStorage(),
+        "progress": [],
+        "local_sent": [],
+        "remote_sent": [],
+        "fetched": [],
+    }
 
     def fake_fetch(output_dir, progress_callback=None, metadata_callback=None, **kwargs):
+        state["fetched"].append(kwargs)
         output_dir.mkdir(parents=True, exist_ok=True)
         progress_callback(0.05)
         metadata_callback({"title": "Nocturne", "duration": 130.0})
@@ -131,6 +139,14 @@ def reservation(settings):
 
 def run_remote():
     tasks.transcribe_remote_job.fn("job", URL)
+
+
+def test_remote_job_audio_is_cut_at_the_charged_duration(remote_env):
+    queue(remote_env["billing"], duration="245.0")
+
+    run_remote()
+
+    assert remote_env["fetched"][0]["max_seconds"] == 245.0
 
 
 def test_successful_remote_job(remote_env):

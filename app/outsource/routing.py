@@ -129,7 +129,7 @@ def prune_active(redis: Redis, job_key) -> int:
     removed = 0
     for key in ACTIVE_KEYS.values():
         for job_id in redis.sscan_iter(key):
-            if redis.hget(job_key(job_id), "status") not in {"queued", "processing", "uploading"}:
+            if redis.hget(job_key(job_id), "status") not in {"queued", "processing", "uploading", "preparing"}:
                 removed += redis.srem(key, job_id)
     return removed
 

@@ -34,6 +34,8 @@ SECRETS_DIR = "/run/secrets"
 # Unknown variables with these prefixes are reported as possible typos.
 CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "RUNPOD_", "GOOGLE_PLAY_")
 MIN_SERVER_PASSWORD_LENGTH = 12
+# Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
+COMPOSE_VARIABLES = {"API_BIND_ADDRESS"}
 
 
 class ConfigError(ValueError):
@@ -135,6 +137,10 @@ class LimitsSettings(BaseSettings):
 
     max_video_length_minutes: float | None = Field(default=None, gt=0)
     max_upload_size_mb: float = Field(default=200, gt=0)
+    # Jobs being uploaded, checked, queued, or transcribed at once.
+    max_active_jobs: int = Field(default=50, ge=1)
+    # The same per signed-in user; only applies with billing.
+    max_active_jobs_per_user: int = Field(default=5, ge=1)
     source_url_allowed_hosts: list[str] = [
         "youtube.com", "youtu.be", "youtube-nocookie.com",
         "vimeo.com", "soundcloud.com", "bandcamp.com", "dailymotion.com",
@@ -189,6 +195,8 @@ class GooglePlaySettings(BaseSettings):
     model_config = _group_config("GOOGLE_PLAY_")
 
     package_name: str | None = None
+    # How often refunded and charged-back purchases are read from Google Play.
+    voided_purchases_interval: Duration = 60 * 60.0
     # Deprecated: a file name in SECRETS_DIR, or an absolute path.
     service_account_file: str | None = None
 
@@ -478,9 +486,33 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
     return problems
 
 
+CONTAINER_UID = 10001
+OWNERSHIP_FIX = f"docker compose run --rm --no-deps -u root api chown -R {CONTAINER_UID}:{CONTAINER_UID} /data /billing"
+
+
+def unwritable_directories(config: "Settings | None" = None, role: str = "all") -> list[str]:
+    """Problems with directories the role writes to. The services run as a
+    non-root user; volumes created by older versions belong to root."""
+    config = config or settings
+    directories = [config.service.data_dir]
+    if role in ("api", "worker", "remote", "all"):
+        directories.append(str(Path(config.billing.database_path).parent))
+    if role in ("api", "all"):
+        directories.append(config.billing.backup_dir)
+    problems = []
+    for directory in dict.fromkeys(directories):
+        if Path(directory).is_dir() and not os.access(directory, os.W_OK):
+            uid = getattr(os, "getuid", lambda: "?")()
+            problems.append(
+                f"{directory} is not writable by this service (user ID {uid}). "
+                f"If it was created by an earlier version, run once: {OWNERSHIP_FIX}"
+            )
+    return problems
+
+
 def ensure_valid(role: str) -> None:
     """Fail fast at process startup."""
-    problems = validate_settings(settings, role)
+    problems = validate_settings(settings, role) + unwritable_directories(settings, role)
     if problems:
         raise ConfigError(problems)
 

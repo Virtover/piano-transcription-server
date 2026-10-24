@@ -329,9 +329,18 @@ def example_keys() -> set[str]:
 
 
 def test_every_env_example_key_is_a_known_setting():
-    unknown = example_keys() - set(config.known_variables())
+    unknown = example_keys() - set(config.known_variables()) - config.COMPOSE_VARIABLES
 
     assert unknown == set()
+
+
+def test_compose_variables_are_used_and_documented():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    documentation = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
+
+    for name in config.COMPOSE_VARIABLES:
+        assert "${" + name in compose
+        assert f"`{name}`" in documentation
 
 
 def test_env_example_has_no_inline_comments_or_wiring():

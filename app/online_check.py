@@ -327,6 +327,20 @@ def check_google_play(config, service_factory: Callable | None = None) -> Result
             hint = "Enable the Google Play Android Developer API in the service account's Google Cloud project."
         return Result("Google Play", "fail", f"Listing products: {type(error).__name__}", hint)
 
+    try:
+        service.purchases().voidedpurchases().list(
+            packageName=config.google_play.package_name, maxResults=1
+        ).execute()
+    except Exception as error:
+        status = getattr(getattr(error, "resp", None), "status", None)
+        return Result(
+            "Google Play",
+            "fail",
+            f"Reading voided purchases: {f'HTTP {status}' if status is not None else type(error).__name__}",
+            "The service account cannot read refunds and chargebacks, so refunded minutes are never taken back. "
+            "It needs access to this app's orders and financial data; new permissions can take up to 24 hours.",
+        )
+
     configured = set(config.billing.products)
     missing = sorted(configured - products)
     unused = sorted(products - configured)

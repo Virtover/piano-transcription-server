@@ -1,14 +1,17 @@
-fastapi
-uvicorn[standard]
-pydantic
-pydantic-settings
-redis
-cachetools
-dramatiq[redis]
-google-api-python-client
-google-auth
+# Exact versions, so every build installs what was tested. Update them on
+# purpose: change a version, rebuild, and run the tests.
+fastapi==0.159.1
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+pydantic-settings==2.16.1
+redis==8.1.0
+cachetools==7.2.4
+dramatiq[redis]==2.2.1
+google-api-python-client==2.201.0
+google-auth==2.62.0
+requests==2.34.2
+boto3==1.43.117
+# Not pinned: video sites change often, and an old yt-dlp stops working.
+# Every image build installs the newest release.
 yt-dlp
 yt-dlp-ejs
-requests
-boto3
-

@@ -87,7 +87,19 @@ Every request then needs the password, except `/health` and `/ready`:
 
 Requests without the correct password get `401` with `{"detail": "Server password required"}`.
 
-**Use HTTPS when the server is reachable from the internet.** Over plain `http://`, the password and the transcriptions are readable by anyone on the network path. Put the API behind a reverse proxy or tunnel that terminates HTTPS and forwards to port 8000, and expose only that.
+**Use HTTPS when the server is reachable from the internet.** Over plain `http://`, the password and the transcriptions are readable by anyone on the network path. Put the API behind a reverse proxy or tunnel that terminates HTTPS and forwards to port 8000, and expose only that. If the proxy runs on the same machine, set `API_BIND_ADDRESS=127.0.0.1` in `.env` so port 8000 cannot be reached around it.
+
+## 👤 Running as a non-root user
+
+The API, workers, and cleanup service run as user ID `10001`, not root, so a bug in a video download tool or in ffmpeg cannot reach the rest of the container as root.
+
+New installations need nothing extra. An installation from before this change has a `data` volume and a `billing-data` folder that belong to root. The services then refuse to start, and their log names the directory and this command. Run it once, on any system:
+
+```shell
+docker compose run --rm --no-deps -u root api chown -R 10001:10001 /data /billing
+```
+
+On Linux, this also changes the owner of `billing-data` on the host: its files stay readable, but changing them there, for example to restore a backup, needs `sudo`. Admin commands such as `docker compose exec api python -m app.admin_credit` run as the same user, so files they create stay usable by the services.
 
 ## 🎮 GPU and CPU execution
 

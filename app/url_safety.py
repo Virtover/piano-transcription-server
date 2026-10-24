@@ -3,13 +3,20 @@ import socket
 from urllib.parse import urlsplit
 
 from app.config import settings
+from app.errors import UserFacingError
 
 MAX_URL_LENGTH = 2048
 ALLOWED_PORTS = {None, 80, 443}
 BLOCKED_SUFFIXES = (".local", ".localhost", ".internal", ".lan", ".home.arpa")
 
+# Options for every yt-dlp call. The checks below only see the submitted URL;
+# a site's extractor can hand yt-dlp another URL (a Reddit link post does),
+# and the generic extractor would then fetch any address, including private
+# ones. Without it, only extractors for known sites run.
+YT_DLP_SAFETY_OPTIONS = ["--ignore-config", "--use-extractors", "default,-generic", "--no-playlist"]
 
-class UnsafeSourceUrl(ValueError):
+
+class UnsafeSourceUrl(UserFacingError, ValueError):
     """The URL must not be passed to yt-dlp."""
 
 

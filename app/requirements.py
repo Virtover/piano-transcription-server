@@ -307,7 +307,8 @@ def google_sections(config) -> list[Section]:
                 "Play Console access",
                 f"the service account invited, with access to {package}: read app information, read orders and "
                 "financial data, manage orders",
-                "To list products, and to read and consume purchases. New permissions can take up to 24 hours.",
+                "To list products, to read and consume purchases, and to read refunds and chargebacks so their minutes "
+                "are taken back. New permissions can take up to 24 hours.",
                 True,
             ),
             Requirement(

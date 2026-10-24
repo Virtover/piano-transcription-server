@@ -18,7 +18,7 @@ COPY requirements.runpod.txt .
 # image's CUDA version. Install torch for that version, not the PyPI default
 # (CUDA 13), or it fails on hosts whose driver supports only 12.8.
 RUN python3 -m pip install --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch torchaudio \
+    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch==2.11.0 torchaudio==2.11.0 \
     && pip install --no-cache-dir -r requirements.runpod.txt
 
 RUN python3 -c "import torch; assert torch.version.cuda.startswith('12.8'), f'torch is built for CUDA {torch.version.cuda}, need 12.8'"

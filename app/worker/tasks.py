@@ -11,8 +11,10 @@ from dramatiq.brokers.redis import RedisBroker
 from redis import Redis
 from redis.exceptions import WatchError
 
+from app import job_limits
 from app.config import settings
 from app.billing import Billing, cancelled_cost
+from app.errors import detail, public_message
 from app.outsource import routing
 from app.transcription.audio import remove_audio_files
 from app.transcription.cancellation import TranscriptionCancelled
@@ -150,6 +152,7 @@ def delete_user_jobs(user_id: str) -> None:
             / key.removeprefix("transcription:"),
             ignore_errors=True,
         )
+    job_limits.forget_user(redis, user_id)
 
 
 def delete_account(user_id: str) -> bool:
@@ -252,10 +255,18 @@ class JobContext:
     the job already showed, so a job moved between backends does not appear
     to restart."""
 
-    def __init__(self, job_id: str, output_dir: Path, progress_floor: float = 0.0):
+    def __init__(
+        self,
+        job_id: str,
+        output_dir: Path,
+        progress_floor: float = 0.0,
+        max_seconds: float | None = None,
+    ):
         self.job_id = job_id
         self.output_dir = output_dir
         self.progress_floor = progress_floor
+        # The duration the job was charged for; audio past it is not transcribed.
+        self.max_seconds = max_seconds
 
     def is_cancelled(self) -> bool:
         return is_job_cancelled(self.job_id)
@@ -319,11 +330,16 @@ def run_job(
         record_job(job_id)
         started = time.monotonic()
         output_dir.mkdir(parents=True, exist_ok=True)
+        stored = redis.hgetall(job_key(job_id))
         try:
-            floor = float(redis.hget(job_key(job_id), "progress") or 0)
+            floor = float(stored.get("progress") or 0)
         except ValueError:
             floor = 0.0
-        context = JobContext(job_id, output_dir, floor)
+        try:
+            max_seconds = float(stored["duration"]) if stored.get("duration") else None
+        except ValueError:
+            max_seconds = None
+        context = JobContext(job_id, output_dir, floor, max_seconds)
 
         midi_path = transcribe(context)
 
@@ -352,10 +368,12 @@ def run_job(
             return
         if job.get("user_id"):
             billing.release(job_id)
+        logger.warning("Job %s failed", job_id, exc_info=e)
         update_job(
             job_id,
             status="failed",
-            error=str(e),
+            error=public_message(e),
+            error_detail=detail(e),
         )
         record_job(job_id)
         remove_audio_files(output_dir)
@@ -484,6 +502,7 @@ def transcribe_job(
             progress_callback=context.progress,
             metadata_callback=context.metadata,
             cancellation_callback=context.is_cancelled,
+            max_seconds=context.max_seconds,
         )
 
     run_job(job_id, "local", transcribe)
@@ -510,6 +529,7 @@ def transcribe_remote_job(
             source_url=source_url,
             upload_path=None if source_url else context.output_dir / UPLOAD_FILE_NAME,
             upload_title=upload_title,
+            max_seconds=context.max_seconds,
         )
 
     run_job(job_id, "remote", transcribe)

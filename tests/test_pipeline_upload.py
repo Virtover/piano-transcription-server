@@ -39,6 +39,17 @@ def test_upload_is_converted_to_mono_44100_wav(tmp_path, source):
     assert upload.exists()
 
 
+def test_upload_is_cut_at_the_charged_duration(tmp_path):
+    upload = tmp_path / "upload.input"
+    ffmpeg("-f", "lavfi", "-i", "sine=duration=20", "-f", "wav", str(upload))
+
+    audio = pipeline.prepare_upload(upload, "Song", tmp_path, max_seconds=3)
+
+    with wave.open(str(audio.path)) as wav:
+        assert wav.getnframes() / 44100 == pytest.approx(3 + 5, abs=0.1)
+    assert audio.metadata["duration"] == 3
+
+
 def test_upload_without_title_gets_default(tmp_path):
     upload = tmp_path / "upload.input"
     ffmpeg("-f", "lavfi", "-i", "sine=duration=1", "-f", "wav", str(upload))

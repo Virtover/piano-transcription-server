@@ -28,10 +28,10 @@ It lists the storage bucket, the image registry, the GPU endpoint, and the API k
    ```
 
    It uploads a small object to the bucket, downloads it through a signed link the way the GPU endpoint does, and deletes it. It checks the endpoint's health, and compares the endpoint's settings with the requirements. Every warning and failure names the likely fix. Repeat until nothing fails.
-5. **Start the stack with the remote worker.** It starts only with the `outsource` profile; without it, jobs sent to RunPod wait forever:
+5. **Restart the stack** so the remote worker reads the new `.env`. It is always part of the stack and idles while `OUTSOURCE_PROVIDER=none`; `.env` is the only switch:
 
    ```shell
-   docker compose --profile outsource up -d --build
+   docker compose up -d --build
    ```
 
 6. **Send one job to RunPod.** Stop the local worker, so local capacity counts as zero, submit a short video (see the [API guide](api.md)), then start the worker again. The job status shows `"backend": "remote"`, and the bucket is empty again afterwards.
@@ -117,7 +117,7 @@ Run `check --online` first: it identifies most configuration problems directly, 
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Jobs with `"backend": "remote"` stay queued | `remote-worker` is not running | Start the stack with `--profile outsource`. |
+| Jobs with `"backend": "remote"` stay queued | `remote-worker` is not running, or still idles from before `OUTSOURCE_PROVIDER` was set | Run `docker compose up -d`, then check `docker compose logs remote-worker`. |
 | Remote jobs fail and run locally instead | A remote failure with `OUTSOURCE_FALLBACK_LOCAL=true` | `docker compose logs remote-worker` shows the RunPod error. |
 | A remote job fails with an error about the audio URL or host | `OUTSOURCE_STORAGE_ENDPOINT` differs between `.env` and the endpoint | `check --online` reports it; use the exact same value in both. |
 
@@ -212,7 +212,7 @@ OUTSOURCE_MAX_CONCURRENCY=1
 4. Start the stack with the remote worker, and connect it to the test network:
 
 ```shell
-docker compose --profile outsource up -d --build
+docker compose up -d --build
 docker network connect piano-test yt-piano-to-midi-server-remote-worker-1
 ```
 

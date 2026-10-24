@@ -1,6 +1,7 @@
 import json
 import logging
 import subprocess
+import threading
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -12,13 +13,18 @@ from app.config import settings
 from app import google_play, maintenance
 from app.maintenance import NoticeResponse
 from app.auth import AuthenticatedUser, current_user, google_oauth_client_ids
-from app.url_safety import ensure_safe_source_url, UnsafeSourceUrl
+from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url, UnsafeSourceUrl
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/billing", tags=["billing"])
 redis = Redis.from_url(settings.service.redis_url, decode_responses=True)
 billing = Billing()
+# Each video check runs yt-dlp for up to a minute. This bounds the CPU and the
+# requests this server's IP sends to video sites, whoever calls.
+METADATA_SLOTS = 4
+METADATA_WAIT = 10
+metadata_slots = threading.BoundedSemaphore(METADATA_SLOTS)
 
 
 class CostResponse(BaseModel):
@@ -69,12 +75,17 @@ def video_duration(source_url: HttpUrl) -> float:
         safe_url = ensure_safe_source_url(str(source_url))
     except UnsafeSourceUrl as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    if not metadata_slots.acquire(timeout=METADATA_WAIT):
+        raise HTTPException(
+            status_code=503,
+            detail="Too many videos are being checked; try again in a moment",
+            headers={"Retry-After": "5"},
+        )
     try:
         result = subprocess.run(
             [
                 "yt-dlp",
-                "--ignore-config",
-                "--no-playlist",
+                *YT_DLP_SAFETY_OPTIONS,
                 "--js-runtimes",
                 "deno",
                 "--extractor-args",
@@ -92,6 +103,8 @@ def video_duration(source_url: HttpUrl) -> float:
         duration = json.loads(result.stdout).get("duration")
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         raise HTTPException(status_code=422, detail="Unable to read video metadata") from error
+    finally:
+        metadata_slots.release()
     if not isinstance(duration, (int, float)) or duration <= 0:
         raise HTTPException(status_code=422, detail="Video duration is unavailable")
     return ensure_allowed_length(float(duration))
@@ -150,6 +163,8 @@ def balance(user: AuthenticatedUser | None = Depends(current_user)) -> BalanceRe
 def cost(
     source_url: HttpUrl | None = None,
     duration_seconds: float | None = Query(default=None, gt=0),
+    # Only to require sign-in when billing is on: checking a URL runs yt-dlp.
+    user: AuthenticatedUser | None = Depends(current_user),
 ) -> CostResponse:
     """Cost of a video URL, or of a file of the given duration before it is uploaded."""
     if (source_url is None) == (duration_seconds is None):

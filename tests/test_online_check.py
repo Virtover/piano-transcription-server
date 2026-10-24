@@ -90,10 +90,32 @@ def runpod(*responses):
     return RunPodProvider("https://api.runpod.ai/v2", "endpoint-1", "key", session=Session(*responses))
 
 
+class Voided:
+    def __init__(self, error=None):
+        self.error = error
+        self.arguments = None
+
+    def voidedpurchases(self):
+        return self
+
+    def list(self, **arguments):
+        self.arguments = arguments
+        return self
+
+    def execute(self):
+        if self.error:
+            raise self.error
+        return {"voidedPurchases": []}
+
+
 class Products:
-    def __init__(self, pages=None, error=None):
+    def __init__(self, pages=None, error=None, voided_error=None):
         self.pages = list(pages or [])
         self.error = error
+        self.voided = Voided(voided_error)
+
+    def purchases(self):
+        return self.voided
 
     def monetization(self):
         return self
@@ -340,6 +362,24 @@ def test_google_play_errors_explain_the_fix(settings, status, hint):
 
     assert result.status == "fail"
     assert hint in result.hint
+
+
+def test_google_play_reads_voided_purchases(settings):
+    service = Products([{"oneTimeProducts": [{"productId": "minutes_60"}]}])
+
+    assert check_google_play(settings, lambda config: service).status == "ok"
+    assert service.voided.arguments == {"packageName": "com.example.app", "maxResults": 1}
+
+
+@pytest.mark.parametrize("error, shown", [(play_error(403), "HTTP 403"), (TimeoutError(), "TimeoutError")])
+def test_google_play_without_access_to_voided_purchases_fails(settings, error, shown):
+    service = Products([{"oneTimeProducts": [{"productId": "minutes_60"}]}], voided_error=error)
+
+    result = check_google_play(settings, lambda config: service)
+
+    assert result.status == "fail"
+    assert f"Reading voided purchases: {shown}" == result.detail
+    assert "refunded minutes are never taken back" in result.hint
 
 
 # --- Running ----------------------------------------------------------------

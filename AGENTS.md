@@ -9,8 +9,8 @@ Piano Transcription Server: a FastAPI API, Dramatiq workers, and Redis, run with
 docker compose run --rm api python -m app.config check           # validate .env and secrets, offline
 docker compose run --rm api python -m app.config check --online  # also test storage, RunPod, Google Play for real
 docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents
-docker compose up -d --build                                     # the stack; add --profile outsource for RunPod
-python scripts/server.py restart 5m [--outsource]                # announced restart; also: stop 10m, start, status, cancel
+docker compose up -d --build                                     # the stack; OUTSOURCE_PROVIDER in .env switches RunPod on
+python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start, status, cancel
 ```
 
 `check --online` is the way to confirm a setup step worked. Code changes reach the containers only after a rebuild, for example `docker compose build api`.
@@ -50,5 +50,6 @@ For guided setup, use the skills in `.claude/skills/`: `setup-runpod` for outsou
 
 - `Set-Content -NoNewline <file> <value>` swaps its arguments in Windows PowerShell 5.1 and creates a file named after the secret. Always use `Set-Content -Path <file> -Value <value> -NoNewline`.
 - Only `secrets/` is git-ignored for secrets: check `git status` for stray files after writing one.
+- The services run as user ID 10001. Volumes from older versions belong to root, and the services then refuse to start: the fix is in "Running as a non-root user" in `docs/setup.md`.
 - The RunPod image installs PyTorch for a fixed CUDA version, `RUNPOD_CUDA_VERSION` in `app/requirements.py`; a test keeps `Dockerfile.runpod` in sync with it. pip's default PyTorch targets a newer CUDA and fails on hosts whose driver does not support it.
 - Every image build is about 8 GB. When Docker Desktop's disk fills up, builds fail with `error reading from server: EOF` and Docker stops starting. See "Freeing disk space" in `docs/setup.md`.

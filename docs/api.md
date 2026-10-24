@@ -55,6 +55,7 @@ The body is the file itself, not a multipart form. This lets the server stop rea
 * Accepted formats: MP3, WAV, FLAC, Ogg/Opus, AAC, M4A, AIFF, WMA, MP4, MOV, MKV, and WebM. Video files are fine; only their audio is used. The server checks the content, not the file name.
 * `filename` is only used as the title (without the extension). It never decides where the file is stored.
 * The size limit is `MAX_UPLOAD_SIZE_MB` (default 200 MB), and the length limit is `MAX_VIDEO_LENGTH_MINUTES`, the same as for links. `GET /api/server-info` returns both.
+* The length is measured by decoding the audio, not read from the file's header, which can be wrong. The job is charged for the measured length, and only that much is transcribed.
 * The response is the same as for a link, and the job is polled, cancelled, and downloaded the same way. Its metadata contains only the title and duration.
 * The uploaded file is deleted when the job completes, fails, or is cancelled. It is kept until then so the job can be retried on another backend.
 
@@ -64,7 +65,8 @@ Upload errors:
 | --- | --- |
 | `413` | The file exceeds the size limit or the maximum length. |
 | `422` | The file is empty, is not a supported audio or video file, has no audio, or `filename` is missing. |
-| `402` | Not enough transcription minutes (billing enabled). |
+| `402` | Not enough transcription minutes (billing enabled). A balance below one minute is refused before the file is read. |
+| `429` | Too many transcriptions in progress; see [Limits](#-limits). |
 
 To show the cost before uploading, read the duration on the device and call `GET /api/billing/cost?duration_seconds=...`.
 
@@ -84,7 +86,7 @@ Invoke-RestMethod "http://localhost:8000/api/transcriptions/$($job.job_id)"
 curl "http://localhost:8000/api/transcriptions/$JOB_ID"
 ```
 
-Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens. `maintenance` announces a planned restart or shutdown; see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns).
+Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. The `error` is written for users, for example `The video could not be downloaded: Video unavailable. This video is private`; the full technical error is only in the server's logs and [job diagnostics](architecture.md#-job-diagnostics). `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens. `maintenance` announces a planned restart or shutdown; see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns).
 
 Cancel a queued or processing job:
 
@@ -115,6 +117,17 @@ curl -o transcription.mid "http://localhost:8000/api/transcriptions/$JOB_ID/midi
 ```
 
 The MIDI can contain piano notes, velocities, onset and offset information, sustain-pedal events (`CC64`), and other detected MIDI control events. The download returns `409` while processing, `404` for an unknown or missing result, and `500` for invalid stored result metadata.
+
+## 🚦 Limits
+
+The server limits how many transcriptions are in progress at once: uploading, being checked, queued, or running. When a limit is reached, new submissions get `429 Too Many Requests` with `Retry-After: 60` and a `detail` message for the user:
+
+* `MAX_ACTIVE_JOBS` (default 50): all users together.
+* `MAX_ACTIVE_JOBS_PER_USER` (default 5): one signed-in user, when billing is enabled.
+
+A transcription stops counting when it completes, fails, or is cancelled.
+
+Checking a link's length runs a video download tool, and only a few checks run at once. When they are all busy for 10 seconds, `POST /api/transcriptions` and `GET /api/billing/cost?source_url=...` answer `503` with `Retry-After: 5`.
 
 ## 🔁 Planned restarts and shutdowns
 
@@ -161,8 +174,8 @@ Jobs survive both: running jobs get time to finish first, and queued jobs stay q
 ## 💳 Billing endpoints
 
 * `GET /api/server-info` returns billing provider, available offers, cleanup interval, free-minute policy, maximum video length, the upload size limit (`max_upload_size_mb`), and a pending restart or shutdown (`maintenance`, see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns)).
-* `GET /api/billing/cost?source_url=...` reads video duration and returns the transcription cost before submission. For a file, use `?duration_seconds=...` instead. Pass exactly one of the two.
-* `GET /api/billing/balance` returns the authenticated user's balance and free-minute timing.
+* `GET /api/billing/cost?source_url=...` reads video duration and returns the transcription cost before submission. For a file, use `?duration_seconds=...` instead. Pass exactly one of the two. When billing is enabled, it needs the `Authorization` header like other requests.
+* `GET /api/billing/balance` returns the authenticated user's balance and free-minute timing. `minutes` is negative when a refunded purchase's minutes were already used; see [Refunds and chargebacks](google-play-billing.md#-refunds-and-chargebacks). Show the user that they owe minutes, and offer to buy more.
 * `POST /api/billing/google-play/verify` verifies and credits a completed Google Play purchase.
 * `DELETE /api/account` deletes the authenticated user's account and data (see below).
 

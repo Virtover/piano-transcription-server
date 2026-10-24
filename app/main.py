@@ -19,6 +19,7 @@ from app.api.routes.transcriptions import (
 from app.api.routes.account import router as account_router
 from app.api.routes.billing import router as billing_router, server_info
 from app.config import ensure_valid, settings
+from app import google_play
 from app.google_play import sync_products
 from app.worker.tasks import reconcile_billing, recover_active_jobs
 from app.billing import Billing, prune_backups
@@ -45,6 +46,21 @@ def backup_billing_database() -> None:
         except Exception:
             logger.exception("Could not back up billing database")
         time.sleep(settings.billing.backup_interval)
+
+def sync_voided_purchases() -> None:
+    """Take back refunded minutes, at startup and then periodically."""
+    billing = Billing(settings.billing.database_path)
+    while True:
+        try:
+            google_play.sync_voided_purchases(billing)
+        except Exception:
+            logger.exception("Could not read voided Google Play purchases")
+        time.sleep(settings.google_play.voided_purchases_interval)
+
+
+def voided_purchases_enabled() -> bool:
+    return settings.billing.provider == "google_play" and google_play.is_configured()
+
 
 app = FastAPI(
     title="Piano Transcription Server",
@@ -95,6 +111,8 @@ def sync_billing_catalog() -> None:
     sync_products()
     enable_transcription_submissions()
     threading.Thread(target=backup_billing_database, daemon=True).start()
+    if voided_purchases_enabled():
+        threading.Thread(target=sync_voided_purchases, daemon=True).start()
 
 
 @app.get("/health")

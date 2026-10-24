@@ -11,9 +11,10 @@ from app.worker import tasks
 def upload(api_context, monkeypatch):
     """Upload helper with ffprobe and the worker queue replaced by fakes."""
     client, settings, billing = api_context
-    state = {"duration": 130.0, "probe_error": None, "sent": [], "probed": []}
+    state = {"duration": 130.0, "probe_error": None, "sent": [], "probed": [], "measured": []}
 
-    def fake_probe(path):
+    def fake_probe(path, measure=True, max_seconds=None):
+        state["measured"].append((measure, max_seconds))
         state["probed"].append(Path(path).read_bytes())
         if state["probe_error"]:
             raise state["probe_error"]
@@ -217,6 +218,28 @@ def test_upload_with_insufficient_minutes_is_removed(api_context, upload):
     assert_nothing_left(settings)
 
 
+def test_upload_without_minutes_is_refused_before_reading(api_context, upload):
+    _, settings, _ = api_context
+    settings.billing.provider = "google_play"
+
+    response = upload["post"](headers={"Authorization": "Bearer user"})
+
+    assert response.status_code == 402
+    assert response.json()["detail"]["required_minutes"] == 1
+    assert upload["probed"] == []
+    assert_nothing_left(settings)
+
+
+def test_upload_length_is_measured_up_to_the_limit(api_context, upload):
+    _, settings, _ = api_context
+
+    assert upload["post"]().status_code == 202
+    settings.limits.max_video_length_minutes = None
+    assert upload["post"]().status_code == 202
+
+    assert upload["measured"] == [(True, 20 * 60), (True, None)]
+
+
 def test_upload_with_unavailable_worker_is_removed(api_context, upload, monkeypatch):
     _, settings, billing = api_context
     settings.billing.provider = "google_play"
@@ -245,7 +268,7 @@ def test_upload_is_rejected_until_startup_finishes(api_context, upload):
 def test_cleanup_does_not_remove_file_during_upload(api_context, upload, monkeypatch):
     _, settings, _ = api_context
 
-    def probe_while_cleanup_runs(path):
+    def probe_while_cleanup_runs(path, measure=True, max_seconds=None):
         job = tasks.redis.hgetall(tasks.job_key(Path(path).parent.name))
         assert job["status"] == "uploading"
         assert 0 < tasks.redis.ttl(tasks.job_key(Path(path).parent.name)) <= tasks.JOB_TTL

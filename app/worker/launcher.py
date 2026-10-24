@@ -1,6 +1,8 @@
 import os
 import shutil
+import signal
 import sys
+import time
 from dataclasses import dataclass
 
 from app.config import ensure_valid, settings
@@ -96,6 +98,18 @@ def remote_plan() -> WorkerPlan:
     )
 
 
+def idle(reason: str) -> None:
+    """Wait without doing anything until the container is stopped. The
+    remote-worker service always runs, so that OUTSOURCE_PROVIDER in .env is
+    the only switch; exiting instead would keep it from coming back when
+    Docker restarts."""
+    print(reason, flush=True)
+    # As PID 1 in a container, Python ignores SIGTERM unless it handles it.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
+    while True:
+        time.sleep(3600)
+
+
 def main(arguments: list[str] | None = None) -> None:
     """Start Dramatiq for a role: `local` (default) runs the model on this
     machine and consumes the default queue; `remote` dispatches to the
@@ -106,9 +120,11 @@ def main(arguments: list[str] | None = None) -> None:
         raise SystemExit(f"Unknown worker role {role!r}; use local or remote")
 
     if role == "remote":
-        ensure_valid("remote")
         if settings.outsource.provider == "none":
-            raise SystemExit("The remote worker needs OUTSOURCE_PROVIDER to be set")
+            idle("Outsourcing is off (OUTSOURCE_PROVIDER=none): the remote worker is idle. "
+                 "Set OUTSOURCE_PROVIDER in .env and run `docker compose up -d` to turn it on.")
+            return
+        ensure_valid("remote")
         plan = remote_plan()
         queue = REMOTE_QUEUE
     else:

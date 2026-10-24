@@ -86,6 +86,19 @@ curl -X POST http://localhost:8000/api/billing/google-play/verify \
 
 The server verifies the purchase with Google Play, credits the configured minutes once per purchase token, and consumes the purchase. Repeating the same token returns `credited_minutes: 0`.
 
+## ↩️ Refunds and chargebacks
+
+When a purchase is refunded, charged back, or cancelled, Google Play reports it as voided. The API reads voided purchases when it starts and then every `GOOGLE_PLAY_VOIDED_PURCHASES_INTERVAL` (default `1h`), and takes each one's minutes back once.
+
+* **The balance can go below zero** when the minutes were already used. The user then cannot start transcriptions until a purchase brings the balance back above zero, and `GET /api/billing/balance` returns the negative `minutes`.
+* **Free minutes do not pay off a negative balance.** The free top-up waits until the balance is zero or more, so "buy, use, refund" cannot be repeated for free.
+* Each voided purchase is logged as a warning with the order ID, the minutes taken back, and the user ID.
+* A voided purchase stays recorded, so its token can never be credited again.
+* Google keeps voided purchases for 30 days. If the API was stopped for longer, older ones are missed, and the API logs a warning.
+* Purchases of deleted accounts are marked voided without changing any balance.
+
+Reading voided purchases needs the service account's access to orders and financial data, which `requirements` lists and `check --online` verifies.
+
 ## ⏱️ Transcription charges
 
 For a video lasting $d$ seconds, the full cost in minutes is:
