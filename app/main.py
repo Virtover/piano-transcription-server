@@ -6,9 +6,11 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from redis import Redis
 
 from app import maintenance
+from app.auth import server_password_matches, server_password_required
 from app.api.routes import transcriptions as transcription_routes
 from app.api.routes.transcriptions import (
     enable_transcription_submissions,
@@ -69,6 +71,18 @@ async def maintenance_headers(request: Request, call_next):
         response.headers["X-Server-Maintenance"] = notice.action
         response.headers["X-Server-Maintenance-At"] = str(int(notice.at))
     return response
+
+
+# Added last, so it runs first: without the password, nothing else is reached.
+@app.middleware("http")
+async def server_password(request: Request, call_next):
+    if server_password_required(request.url.path) and not server_password_matches(request.headers):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Server password required"},
+            headers={"WWW-Authenticate": 'Basic realm="Piano Transcription Server", charset="UTF-8"'},
+        )
+    return await call_next(request)
 
 
 @app.on_event("startup")

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 SECRETS_DIR = "/run/secrets"
 # Unknown variables with these prefixes are reported as possible typos.
 CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "RUNPOD_", "GOOGLE_PLAY_")
+MIN_SERVER_PASSWORD_LENGTH = 12
 
 
 class ConfigError(ValueError):
@@ -208,6 +209,8 @@ class SecretSettings(BaseSettings):
     runpod_read_api_key: SecretStr | None = None
     outsource_storage_access_key: SecretStr | None = None
     outsource_storage_secret_key: SecretStr | None = None
+    # Optional. When present, every request except /health and /ready needs it.
+    server_password: SecretStr | None = None
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
@@ -432,6 +435,14 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
     """Cross-setting checks for a process role: api, worker, remote, cleanup, or all."""
     config = config or settings
     problems = []
+    password = config.secrets.server_password
+    if role in ("api", "all") and password is not None:
+        # Nothing slows down guessing, so the length is the only protection.
+        if len(password.get_secret_value()) < MIN_SERVER_PASSWORD_LENGTH:
+            problems.append(
+                f"The secret file {config.secrets_dir}/server_password must hold at least "
+                f"{MIN_SERVER_PASSWORD_LENGTH} characters"
+            )
     if role in ("api", "remote", "all") and config.outsource.provider == "runpod":
         required = {
             "RUNPOD_ENDPOINT_ID": config.runpod.endpoint_id,

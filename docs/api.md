@@ -2,6 +2,8 @@
 
 The API base URL is `http://localhost:8000`. FastAPI's generated reference is available at `/docs`.
 
+If the server has a [password](setup.md#-password-protection), add it to every request except `/health` and `/ready`, for example `-Headers @{ 'X-Server-Password' = $password }` in PowerShell. HTTP Basic auth with any user name works too. Without it, requests get `401` with `{"detail": "Server password required"}` and a `WWW-Authenticate: Basic` header. When billing is enabled, send both this header and the Google `Authorization` header.
+
 ## 🎹 Transcriptions
 
 Create a job with an HTTP(S) video URL:

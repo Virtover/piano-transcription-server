@@ -1,3 +1,6 @@
+import base64
+import binascii
+import hmac
 import logging
 import time
 from dataclasses import dataclass
@@ -22,6 +25,39 @@ USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 # Avoids a call to Google on every API request. Worst-case delay before a
 # revoked token is noticed is the TTL.
 _token_cache: TTLCache = TTLCache(maxsize=10_000, ttl=300)
+
+
+SERVER_PASSWORD_HEADER = "X-Server-Password"
+# Probes from Docker and scripts/server.py, which do not know the password.
+PASSWORD_FREE_PATHS = {"/health", "/ready"}
+
+
+def server_password_required(path: str) -> bool:
+    return settings.secrets.server_password is not None and path not in PASSWORD_FREE_PATHS
+
+
+def _basic_auth_password(authorization: str | None) -> str | None:
+    scheme, _, encoded = (authorization or "").partition(" ")
+    if scheme.lower() != "basic":
+        return None
+    try:
+        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return None
+    # The username is ignored.
+    return decoded.partition(":")[2]
+
+
+def server_password_matches(headers) -> bool:
+    """The password from the X-Server-Password header, which works next to a
+    Google bearer token, or from HTTP Basic auth with any username, which
+    makes browsers prompt for it."""
+    expected = settings.secrets.server_password.get_secret_value().encode("utf-8")
+    candidates = [headers.get(SERVER_PASSWORD_HEADER), _basic_auth_password(headers.get("authorization"))]
+    return any(
+        candidate is not None and hmac.compare_digest(candidate.encode("utf-8"), expected)
+        for candidate in candidates
+    )
 
 
 @dataclass(frozen=True)

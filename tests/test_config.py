@@ -235,6 +235,22 @@ def test_google_play_requirements(tmp_path, env, secrets, message):
     assert re.search(message, problems[0])
 
 
+def test_server_password_is_read_from_file_and_masked(tmp_path):
+    settings = load(tmp_path, secrets={"server_password": "correct-horse-battery\n"})
+
+    assert settings.secrets.server_password.get_secret_value() == "correct-horse-battery"
+    assert "correct-horse-battery" not in "\n".join(config.describe(settings))
+    assert validate_settings(settings, "api") == []
+
+
+def test_short_server_password_stops_the_api_only(tmp_path):
+    settings = load(tmp_path, secrets={"server_password": "short"})
+
+    assert validate_settings(settings, "worker") == []
+    [problem] = validate_settings(settings, "api")
+    assert "server_password must hold at least 12 characters" in problem
+
+
 def test_worker_and_cleanup_do_not_need_google_play_secrets(tmp_path):
     settings = load(tmp_path, "BILLING_PROVIDER=google_play\n")
 

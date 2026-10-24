@@ -5,6 +5,7 @@ The basic stack runs with Docker alone. The other parts are optional and each ne
 | Part | Needed for | Guide | Time |
 | --- | --- | --- | --- |
 | Basic stack | Transcribing on this machine | [Run the stack](#-run-the-stack) | 15 min |
+| Server password | A private server reachable from the internet | [Password protection](#-password-protection) | 5 min |
 | Google sign-in | Accounts; required for billing | [Google sign-in](google-sign-in.md) | about 30 min |
 | Google Play billing | Paid minutes, free minutes | [Google Play billing](google-play-billing.md) | about 1 hour, plus up to a day for Google permissions |
 | RunPod outsourcing | Extra GPUs when this machine is busy | [Outsourcing to RunPod](runpod.md) | about 1 hour |
@@ -41,6 +42,32 @@ Invoke-RestMethod http://localhost:8000/ready
 Do not commit `.env`, the `secrets` folder, or any machine-specific values.
 
 To update a running server, use `python scripts/server.py restart 5m`: it announces the restart to clients, builds while the current version keeps serving, and lets running jobs finish. `python scripts/server.py stop 10m` shuts the server down the same way. See [Planned restarts and shutdowns](architecture.md#-planned-restarts-and-shutdowns).
+
+## 🔒 Password protection
+
+Optional. Without it, anyone who can reach port 8000 can use the server. For a server that only you, or people you share a password with, use from the internet, create one password and restart the API:
+
+```powershell
+New-Item -ItemType Directory -Force secrets | Out-Null
+$bytes = New-Object byte[] 18
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+Set-Content -Path secrets\server_password -Value ([Convert]::ToBase64String($bytes)) -NoNewline
+Get-Content secrets\server_password
+docker compose run --rm api python -m app.config check
+docker compose restart api
+```
+
+This writes a random 24-character password and prints it once so you can save it in a password manager. You can also write your own; it must be at least 12 characters, because the server does not slow down repeated guesses. The API reads it when it starts, so restart the API after changing it (`python scripts/server.py restart 1m` while others are using the server). To turn protection off, delete the file and restart.
+
+Every request then needs the password, except `/health` and `/ready`:
+
+* **Browser:** opening `/docs` or any other address asks for a user name and password. The user name can be anything.
+* **Apps and scripts:** send the header `X-Server-Password: <password>`. It works next to the `Authorization` header of [Google sign-in](google-sign-in.md).
+* **curl:** `curl -u any:<password> ...`, or `-H "X-Server-Password: <password>"`.
+
+Requests without the correct password get `401` with `{"detail": "Server password required"}`.
+
+**Use HTTPS when the server is reachable from the internet.** Over plain `http://`, the password and the transcriptions are readable by anyone on the network path. Put the API behind a reverse proxy or tunnel that terminates HTTPS and forwards to port 8000, and expose only that.
 
 ## 🎮 GPU and CPU execution
 

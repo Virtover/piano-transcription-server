@@ -157,3 +157,80 @@ def test_token_without_email_is_rejected(google, api_context):
     response = client.get("/api/billing/balance", headers={"Authorization": "Bearer token"})
 
     assert response.status_code == 401
+
+
+# --- Server password ----------------------------------------------------------
+
+PASSWORD = "correct-horse-battery"
+
+
+@pytest.fixture
+def password_protected(api_context):
+    from pydantic import SecretStr
+
+    client, settings, _ = api_context
+    settings.secrets.server_password = SecretStr(PASSWORD)
+    return client
+
+
+def basic(password, username="anyone"):
+    import base64
+
+    return {"Authorization": "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()}
+
+
+def test_no_password_file_leaves_the_server_open(api_context):
+    client, _, _ = api_context
+
+    assert client.get("/api/server-info").status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/api/server-info", "/api/billing/server-info", "/docs", "/openapi.json"])
+def test_password_is_required_everywhere(password_protected, path):
+    response = password_protected.get(path)
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Server password required"}
+    assert response.headers["WWW-Authenticate"].startswith("Basic ")
+
+
+def test_health_and_ready_need_no_password(password_protected, monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main.Redis, "from_url", lambda url: type("R", (), {"ping": lambda self: True})())
+
+    assert password_protected.get("/health").status_code == 200
+    assert password_protected.get("/ready").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{auth.SERVER_PASSWORD_HEADER: PASSWORD}, basic(PASSWORD), basic(PASSWORD, username="")],
+)
+def test_correct_password_is_accepted(password_protected, headers):
+    assert password_protected.get("/api/server-info", headers=headers).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {auth.SERVER_PASSWORD_HEADER: "wrong"},
+        {auth.SERVER_PASSWORD_HEADER: PASSWORD + " "},
+        basic("wrong"),
+        {"Authorization": "Basic not-base64!"},
+        {"Authorization": f"Bearer {PASSWORD}"},
+    ],
+)
+def test_wrong_password_is_rejected(password_protected, headers):
+    assert password_protected.get("/api/server-info", headers=headers).status_code == 401
+
+
+def test_password_header_works_next_to_google_sign_in(password_protected, api_context):
+    _, settings, _ = api_context
+    settings.billing.provider = "google_play"
+    headers = {auth.SERVER_PASSWORD_HEADER: PASSWORD, "Authorization": "Bearer user-1"}
+
+    response = password_protected.get("/api/billing/balance", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["user_id"] == "user-1"

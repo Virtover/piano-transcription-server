@@ -25,7 +25,7 @@ See [Local setup](docs/setup.md) for requirements, GPU checks, health checks, an
 
 ### 🛠️ Getting started
 
-* [Local setup](docs/setup.md) - run the Docker stack, check services, tune CPU/GPU workers, and free disk space.
+* [Local setup](docs/setup.md) - run the Docker stack, check services, protect a private server with a password, tune CPU/GPU workers, and free disk space.
 * [Outsourcing to RunPod](docs/runpod.md) - step by step: Cloudflare R2 storage, Docker Hub, the RunPod endpoint, and a free local test.
 * [Configuration and environment](docs/configuration.md) - environment variables, GPU memory and batching, secrets, and database backups.
 * [Testing](docs/testing.md) - install development dependencies and run checks.

@@ -148,6 +148,7 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `runpod_read_api_key` | Optional. A RunPod key with read-only access to the account. Restricted keys cannot read endpoint settings, so `OUTSOURCE_MAX_CONCURRENCY=auto` and the endpoint settings check of `check --online` use this one. Without it, `auto` allows 4 remote jobs. |
 | `outsource_storage_access_key` | Access key ID of the storage token. |
 | `outsource_storage_secret_key` | Secret access key of the storage token. |
+| `server_password` | Optional. When present, every request except `/health` and `/ready` needs this password, as the `X-Server-Password` header or HTTP Basic auth with any user name. At least 12 characters; the API refuses to start otherwise. See [Password protection](setup.md#-password-protection). |
 
 Secrets are only read from these files: a variable with the same name in `.env` or the environment is ignored. Never commit the `secrets` folder.
 
