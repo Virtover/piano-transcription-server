@@ -583,3 +583,98 @@ def test_admin_output_never_contains_secrets(billed, capsys, monkeypatch):
     for output in outputs:
         assert "a-long-password-123" not in output
         assert "secret-token" not in output
+
+
+# --- Data functions -----------------------------------------------------------
+# What a web page would call: plain dicts, the same checks and audit entries.
+
+def test_read_functions_return_plain_data(billed, monkeypatch):
+    from app.admin import audit, jobs, limits, report, status, users
+
+    client, _, _ = billed
+    job_id = submit(client)
+    fail(job_id, monkeypatch)
+    controls.block(tasks.redis, "user", "spam")
+
+    results = [
+        status.collect(),
+        jobs.list_jobs(status="failed"),
+        jobs.job_details(job_id[:8]),
+        users.account("user@example.com"),
+        report.billing_report(since=86400),
+        limits.current(),
+        audit.entries(),
+    ]
+
+    for result in results:
+        assert json.loads(json.dumps(result)) == result
+    assert results[1][0]["job_id"] == job_id
+    assert results[2]["record"]["error"] == "RuntimeError: download failed"
+    assert results[3]["purchases"] == [{"product_id": "starter", "order_id": "GPA.1", "minutes": 30, "voided_at": None}]
+    assert results[4]["minutes"]["total"]["purchase"] == 30
+    assert results[5]["blocked"] == [{"user_id": "user", "email": "user@example.com", "reason": "spam", "expires_in": None}]
+
+
+def test_plans_change_nothing(billed, monkeypatch):
+    from app.admin import jobs, users
+
+    client, _, billing = billed
+    queued = submit(client)
+    failed = submit(client)
+    fail(failed, monkeypatch)
+
+    assert jobs.cancel_plan(queued)["charge"] == 0
+    assert jobs.cancel_plan(queued, refund=True)["charge"] is None
+    assert jobs.requeue_plan(failed)["charged"] is True
+    assert users.credit_plan("user", -40)["balance_after"] == -10
+    assert users.delete_plan("user")["email"] == "user@example.com"
+
+    assert tasks.redis.hget(tasks.job_key(queued), "status") == "queued"
+    assert tasks.redis.hget(tasks.job_key(failed), "status") == "failed"
+    assert billing.read("SELECT minutes FROM users WHERE user_id = 'user'")[0]["minutes"] == 30
+    assert audit_rows(billing) == []
+
+
+def test_actions_without_the_command_line(billed, monkeypatch):
+    from app.admin import jobs, limits, users
+    from app.admin.common import AdminError
+
+    client, _, billing = billed
+    job_id = submit(client)
+
+    assert jobs.cancel(job_id, False, "web:sam", "stuck")["job_id"] == job_id
+    assert users.credit("user@example.com", 5, "web:sam")["balance_after"] == 35
+    assert limits.block("user", 3600, "web:sam", "abuse")["expires_in"] == 3600
+    assert limits.set_per_user_limit(None, None, "web:sam")["changed"] is False
+    with pytest.raises(AdminError, match="this one is cancelled"):
+        jobs.cancel(job_id, False, "web:sam")
+
+    assert [(row["actor"], row["action"]) for row in audit_rows(billing)] == [
+        ("web:sam", "job.cancel"),
+        ("web:sam", "user.credit"),
+        ("web:sam", "limits.block"),
+        ("web:sam", "limits.per_user"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [["jobs"], ["user", "user"], ["billing"], ["limits"], ["audit"], ["status"]],
+)
+def test_read_commands_print_json(billed, capsys, arguments):
+    client, _, _ = billed
+    submit(client)
+
+    code, output = admin(capsys, *arguments, "--json")
+
+    assert code == 0
+    json.loads(output)
+
+
+def test_job_show_prints_json(billed, capsys):
+    client, _, _ = billed
+    job_id = submit(client)
+
+    _, output = admin(capsys, "jobs", "show", job_id, "--json")
+
+    assert json.loads(output)["live"]["status"] == "queued"

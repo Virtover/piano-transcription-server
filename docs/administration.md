@@ -15,7 +15,7 @@ Every command that changes something:
 * shows what it will change and asks first when the change is destructive: cancelling a job, queueing one again, taking minutes away, and deleting an account. `--yes` skips the question, for scripts.
 * behaves like the matching action of a user or of the server: a cancelled job is charged like one the user cancels, and a job queued again is checked, reserved, and routed like a new one.
 
-No output contains secrets or purchase tokens.
+Commands that only read (`status`, `jobs`, `jobs show`, `user`, `billing`, `limits`, and `audit`) print JSON with `--json`, for scripts and monitoring. No output contains secrets or purchase tokens.
 
 ## 📊 Status
 
@@ -32,8 +32,6 @@ The first thing to look at when users say the server is slow:
 * **Disk:** space used by job files, and space free on the data volume.
 * **Maintenance:** a pending restart or shutdown, from `scripts/server.py`.
 * **Controls:** active [limits](#-limits).
-
-`--json` prints the same as JSON, for scripts and monitoring.
 
 ## 🧾 Jobs
 
@@ -114,6 +112,16 @@ docker compose exec api python -m app.admin audit
 ```
 
 Lists the latest admin actions (`--limit`, default 30) with their time, who acted (`--by`), the action, its target (a job or user ID), details, and the reason. The log is the `admin_actions` table of the billing database, so the billing backups include it.
+
+## 🧩 Using the commands from code
+
+Each command is a data function in `app/admin/` that returns plain data, with the command line printing it. Another tool, such as an admin web page, calls the same functions, so it behaves exactly like the commands, including the audit log:
+
+* Reading: `status.collect()`, `jobs.list_jobs()`, `jobs.job_details()`, `users.account()`, `report.billing_report()`, `limits.current()`, and `audit.entries()`.
+* Changing: `jobs.cancel()`, `jobs.requeue()`, `users.credit()`, `users.delete()`, and the functions in `limits`. Each takes the actor and an optional reason for the audit log.
+* Confirming: `jobs.cancel_plan()`, `jobs.requeue_plan()`, `users.credit_plan()`, and `users.delete_plan()` return what the matching change would do and change nothing. Show it before asking.
+
+A function that cannot do what was asked raises `AdminError` (in `app.admin.common`) with a message for the operator. Durations are in seconds. The functions need the billing database and Redis, so they run in the API container.
 
 ## 🗄️ What is recorded
 

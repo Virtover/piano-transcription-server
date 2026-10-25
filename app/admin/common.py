@@ -1,11 +1,17 @@
 """Helpers shared by the admin commands: formatting, confirmation, finding
-users and jobs, and the audit log."""
+users and jobs, and the audit log.
 
+Each command module has data functions, which return plain dicts that JSON
+can encode and raise AdminError, and `run_*` functions on top that print them
+for the command line. Anything else that operates the server, such as a web
+page, calls the data functions, so it behaves exactly like the commands."""
+
+import json
 import sqlite3
 import time
 from datetime import datetime, timezone
 
-from app.config import settings
+from app.config import duration_seconds, settings
 from app.worker import tasks
 
 
@@ -58,6 +64,23 @@ def shorten(text: str | None, length: int) -> str | None:
     return text[: length - 1] + "…"
 
 
+def parse_duration(text: str | None, name: str) -> float | None:
+    if not text:
+        return None
+    try:
+        return duration_seconds(text, name)
+    except ValueError as error:
+        raise AdminError(str(error)) from error
+
+
+def row_dict(row: sqlite3.Row | None) -> dict | None:
+    return dict(row) if row is not None else None
+
+
+def print_json(data) -> None:
+    print(json.dumps(data, indent=2))
+
+
 def confirm(question: str, assume_yes: bool) -> bool:
     if assume_yes:
         return True
@@ -68,7 +91,7 @@ def billing_enabled() -> bool:
     return settings.billing.provider != "none"
 
 
-def find_user(who: str) -> sqlite3.Row:
+def find_user(who: str) -> dict:
     """A billed user by email address or user ID."""
     if not billing_enabled():
         raise AdminError("Billing is off (BILLING_PROVIDER=none), so there are no user accounts")
@@ -78,7 +101,7 @@ def find_user(who: str) -> sqlite3.Row:
     )
     if not rows:
         raise AdminError(f"No user with the email address or ID {who.strip()}; users appear after they sign in")
-    return rows[0]
+    return dict(rows[0])
 
 
 def find_job(prefix: str) -> str:
@@ -102,5 +125,5 @@ def user_label(user_id: str | None, email: str | None = None) -> str:
     return email or user_id or "-"
 
 
-def audit(args, action: str, target: str | None = None, detail: str | None = None) -> None:
-    tasks.billing.log_admin_action(args.by, action, target, detail, getattr(args, "reason", None))
+def audit(actor: str, action: str, target: str | None = None, detail: str | None = None, reason: str | None = None) -> None:
+    tasks.billing.log_admin_action(actor, action, target, detail, reason)
