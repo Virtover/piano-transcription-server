@@ -2,6 +2,7 @@ import pytest
 
 # Needs the worker dependencies (requirements.worker.txt); skipped in an API-only environment.
 piano_transcription = pytest.importorskip("app.transcription.piano_transcription")
+from app.config import settings
 
 
 @pytest.fixture
@@ -28,6 +29,13 @@ def test_cpu_without_cuda(gpus):
 
 def test_cpu_when_no_gpu_has_capacity_at_first_job(gpus):
     gpus["capacities"] = [(0, 0, 512, 8192)]
+
+    assert piano_transcription.select_device() == "cpu"
+
+
+def test_enforce_cpu_ignores_available_gpu(gpus, monkeypatch):
+    monkeypatch.setattr(settings.worker, "enforce_cpu", True)
+    gpus["capacities"] = [(0, 4, 6 * 1024**3, 8 * 1024**3)]
 
     assert piano_transcription.select_device() == "cpu"
 

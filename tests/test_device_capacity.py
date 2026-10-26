@@ -89,6 +89,13 @@ def test_no_cuda(gpus):
     assert device.cuda_job_capacities() is None
 
 
+def test_enforce_cpu_ignores_cuda(default_settings, gpus):
+    default_settings.worker.enforce_cpu = True
+    gpus["available"] = True
+
+    assert device.cuda_job_capacities() is None
+
+
 def test_launcher_summary_shows_free_memory(gpus, monkeypatch):
     gpus["devices"] = [("aaaa-1", 7126 * MiB, 8 * GiB)]
     gpus["smi"] = "GPU-aaaa-1, 5812\n"

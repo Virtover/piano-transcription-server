@@ -71,6 +71,7 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 | Variable | Default | Description |
 | --- | --- | --- |
 | `WORKER_THREADS` | `auto` | CPU threads for PyTorch and ffmpeg. `auto` uses physical cores minus two; a number is capped at the physical core count. |
+| `WORKER_ENFORCE_CPU` | `false` | Ignore available CUDA GPUs and run the local worker on CPU. Useful for testing or when the GPU should be reserved for another workload. |
 | `WORKER_MODEL_MEMORY_GIB` | `1.0` | VRAM reserved on each GPU for the model and GPU libraries. See [GPU memory and batching](#-gpu-memory-and-batching). |
 | `WORKER_MEMORY_PER_JOB_GIB` | `1.1` | VRAM budget for each concurrent GPU job. |
 | `WORKER_BATCH_SIZE` | `auto` | Maximum jobs combined into one model batch. `auto` uses each GPU's job capacity, or `6` on CPU. A number is lowered to a GPU's capacity. In CPU mode, also the number of worker threads. See [below](#choosing-other-values). |

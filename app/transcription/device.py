@@ -117,6 +117,8 @@ def job_capacity(free_memory: float, config=None) -> int:
 
 
 def cuda_job_capacities() -> list[tuple[int, int, int, int]] | None:
+    if settings.worker.enforce_cpu:
+        return None
     try:
         import torch
 

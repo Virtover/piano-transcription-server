@@ -51,6 +51,8 @@ def gpu_capacity(capacities: list[tuple[int, int, int, int]] | None) -> tuple[in
 
 
 def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPlan:
+    if settings.worker.enforce_cpu:
+        capacities = None
     gpu = gpu_capacity(capacities)
     if gpu:
         device_count, gpu_jobs, gpu_summary = gpu

@@ -378,6 +378,10 @@ def test_settings_import_without_gpu_libraries():
     assert result.stdout.strip() == "ok"
 
 
+def test_worker_cpu_enforcement(tmp_path):
+    assert load(tmp_path, "WORKER_ENFORCE_CPU=true\n").worker.enforce_cpu is True
+
+
 # --- Outsourcing ------------------------------------------------------------
 
 RUNPOD_ENV = (

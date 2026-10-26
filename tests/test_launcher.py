@@ -51,6 +51,16 @@ def test_gpu_mode_threads_follow_vram_capacity(default_settings, cores):
     assert "2 GPU(s), up to 5 job(s) by VRAM" in plan.summary
 
 
+def test_enforce_cpu_ignores_gpu_capacity(default_settings, cores):
+    default_settings.worker.enforce_cpu = True
+
+    plan = launcher.plan_worker(capacity(4))
+
+    assert plan.cpu_threads == 6
+    assert plan.threads == 6
+    assert "no CUDA GPU" in plan.summary
+
+
 def test_gpu_mode_respects_max_concurrency_and_cores(default_settings, cores):
     default_settings.worker.max_concurrency = 2
     assert launcher.plan_worker(capacity(5)).threads == 2

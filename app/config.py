@@ -184,6 +184,8 @@ class WorkerSettings(BaseSettings):
     model_config = _group_config("WORKER_")
 
     threads: AutoInt = None
+    # Ignore CUDA devices and run the local worker on CPU.
+    enforce_cpu: bool = False
     model_memory_gib: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     memory_per_job_gib: float = Field(default=1.1, gt=0, allow_inf_nan=False)
     # auto: each GPU's job capacity; 6 on CPU.
