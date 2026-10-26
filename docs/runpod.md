@@ -93,7 +93,7 @@ OUTSOURCE_MAX_CONCURRENCY=4
 | Setting | Meaning |
 | --- | --- |
 | `OUTSOURCE_STORAGE_ENDPOINT` | The storage's S3 endpoint URL. The GPU endpoint needs the same value as an environment variable, because the handler downloads only from this host. |
-| `OUTSOURCE_MAX_WAIT` | Default `30s`. Send a job to RunPod when its estimated local wait is longer than this. The estimate is a whole number of average local job durations (60 s until the worker has measured some), so any value below that average means "as soon as every local slot is busy". `30s` does that, and keeps short local queues local once jobs get faster. Set a few minutes to outsource only under heavy load. |
+| `OUTSOURCE_LOCAL_FIRST_MAX_WAIT` | Default `30s`. In `local_first` mode, send a job to RunPod when its estimated local wait is longer than this. Remote-first modes do not use a local wait threshold. `OUTSOURCE_MAX_WAIT` remains accepted as a deprecated alias. |
 | `OUTSOURCE_MAX_CONCURRENCY` | At most this many jobs on RunPod at once, which caps the cost. `auto` follows the endpoint's maximum workers; it needs the optional read key, and allows 4 jobs without it. |
 
 All settings are in [Configuration](configuration.md#outsourcing).
@@ -205,7 +205,7 @@ RUNPOD_API_BASE=http://runpod-local:8010
 OUTSOURCE_STORAGE_ENDPOINT=http://seaweed:8333
 OUTSOURCE_STORAGE_BUCKET=piano-audio
 OUTSOURCE_STORAGE_REGION=us-east-1
-OUTSOURCE_MAX_WAIT=0s
+OUTSOURCE_LOCAL_FIRST_MAX_WAIT=0s
 OUTSOURCE_MAX_CONCURRENCY=1
 ```
 
@@ -216,7 +216,7 @@ docker compose up -d --build
 docker network connect piano-test yt-piano-to-midi-server-remote-worker-1
 ```
 
-With `OUTSOURCE_MAX_WAIT=0s`, a job is outsourced as soon as every local slot is busy: submit one job more than the worker's capacity, which the worker log shows at startup. To send every job remote, stop the GPU worker with `docker compose stop worker`. Without its heartbeat, local capacity counts as zero. The job status shows `"backend": "remote"`, and the bucket is empty again after each job.
+With `OUTSOURCE_LOCAL_FIRST_MAX_WAIT=0s`, a job is outsourced as soon as every local slot is busy: submit one job more than the worker's capacity, which the worker log shows at startup. To send every job remote, use `OUTSOURCE_ROUTING=remote_first_fallback`; this does not depend on the local worker heartbeat. The job status shows `"backend": "remote"`, and the bucket is empty again after each job.
 
 The local test server differs from RunPod in two ways:
 

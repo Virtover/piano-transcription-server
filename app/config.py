@@ -263,13 +263,18 @@ class SecretSettings(BaseSettings):
 
 
 class OutsourceSettings(BaseSettings):
-    """Remote inference when local GPUs are overloaded."""
+    """Remote inference and routing when RunPod is configured."""
 
     model_config = _group_config("OUTSOURCE_")
 
     provider: Literal["none", "runpod"] = "none"
-    # Outsource a job when its estimated local wait is longer than this.
-    max_wait: DurationOrZero = 30.0
+    # local_first preserves the original wait-based routing. The two
+    # remote_first modes always target RunPod before deciding what local work
+    # may run.
+    routing: Literal["local_first", "remote_first_overflow", "remote_first_fallback"] = "local_first"
+    # In local_first mode, outsource a job when its estimated local wait is
+    # longer than this. Remote-first modes do not use a local wait threshold.
+    local_first_max_wait: DurationOrZero = 30.0
     # Maximum remote jobs at once. `auto`: the RunPod endpoint's max workers
     # times the requests one worker takes (see app/outsource/capacity.py).
     max_concurrency: AutoInt = 4
@@ -418,6 +423,7 @@ class Alias:
 ALIASES: dict[str, Alias] = {
     "CLEANUP_INTERVAL_SECONDS": Alias("CLEANUP_INTERVAL", _seconds_or_duration),
     "WORKER_BATCH_TIMEOUT_SECONDS": Alias("WORKER_BATCH_TIMEOUT", _seconds_or_duration),
+    "OUTSOURCE_MAX_WAIT": Alias("OUTSOURCE_LOCAL_FIRST_MAX_WAIT", str),
 }
 
 # Still supported, but replaced by another mechanism.

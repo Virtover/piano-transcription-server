@@ -10,6 +10,7 @@ import time
 from typing import Literal
 
 from redis import Redis
+from redis.exceptions import WatchError
 
 from app.config import settings
 
@@ -22,6 +23,7 @@ ACTIVE_KEYS: dict[str, str] = {
     "local": "jobs:active:local",
     "remote": "jobs:active:remote",
 }
+REMOTE_RUNNING_KEY = "jobs:running:remote"
 # Used for the wait estimate until the worker has finished a job.
 DEFAULT_JOB_SECONDS = 60.0
 
@@ -89,23 +91,67 @@ def reserve_remote_slot(redis: Redis, job_id: str) -> bool:
     from app.outsource.capacity import remote_job_limit
 
     key = ACTIVE_KEYS["remote"]
-    with redis.pipeline() as pipe:
-        pipe.sadd(key, job_id)
-        pipe.scard(key)
-        _, count = pipe.execute()
-    if count > remote_job_limit(redis):
-        redis.srem(key, job_id)
-        return False
-    return True
+    limit = remote_job_limit(redis)
+    while True:
+        try:
+            with redis.pipeline() as pipe:
+                pipe.watch(key)
+                if pipe.scard(key) >= limit:
+                    return False
+                pipe.multi()
+                pipe.sadd(key, job_id)
+                pipe.execute()
+                return True
+        except WatchError:
+            continue
 
 
 def choose_backend(redis: Redis, job_id: str) -> Backend:
     """Pick the backend for a newly queued job and count it as active there."""
-    if outsourcing_enabled() and estimated_local_wait(redis) > settings.outsource.max_wait:
+    mode = settings.outsource.routing
+    if outsourcing_enabled() and mode.startswith("remote_first"):
+        if mode == "remote_first_fallback" or reserve_remote_slot(redis, job_id):
+            redis.sadd(ACTIVE_KEYS["remote"], job_id)
+            return "remote"
+        redis.sadd(ACTIVE_KEYS["local"], job_id)
+        return "local"
+    if outsourcing_enabled() and estimated_local_wait(redis) > settings.outsource.local_first_max_wait:
         if reserve_remote_slot(redis, job_id):
             return "remote"
     redis.sadd(ACTIVE_KEYS["local"], job_id)
     return "local"
+
+
+def wait_for_remote_slot(redis: Redis, job_id: str, cancelled) -> bool:
+    """Wait until this remote job owns a provider-concurrency slot."""
+    while True:
+        if cancelled():
+            return False
+        with redis.pipeline() as pipe:
+            pipe.watch(REMOTE_RUNNING_KEY)
+            if pipe.sismember(REMOTE_RUNNING_KEY, job_id):
+                return True
+            if pipe.scard(REMOTE_RUNNING_KEY) >= _remote_limit(redis):
+                pipe.unwatch()
+            else:
+                pipe.multi()
+                pipe.sadd(REMOTE_RUNNING_KEY, job_id)
+                try:
+                    pipe.execute()
+                except WatchError:
+                    continue
+                return True
+        time.sleep(0.5)
+
+
+def release_remote_slot(redis: Redis, job_id: str) -> None:
+    redis.srem(REMOTE_RUNNING_KEY, job_id)
+
+
+def _remote_limit(redis: Redis) -> int:
+    from app.outsource.capacity import remote_job_limit
+
+    return remote_job_limit(redis)
 
 
 def mark_active(redis: Redis, backend: Backend, job_id: str) -> None:
@@ -131,8 +177,11 @@ def prune_active(redis: Redis, job_key) -> int:
         for job_id in redis.sscan_iter(key):
             if redis.hget(job_key(job_id), "status") not in {"queued", "processing", "uploading", "preparing"}:
                 removed += redis.srem(key, job_id)
+    for job_id in redis.sscan_iter(REMOTE_RUNNING_KEY):
+        if redis.hget(job_key(job_id), "status") != "processing":
+            removed += redis.srem(REMOTE_RUNNING_KEY, job_id)
     return removed
 
 
 def clear_active(redis: Redis) -> None:
-    redis.delete(*ACTIVE_KEYS.values())
+    redis.delete(*ACTIVE_KEYS.values(), REMOTE_RUNNING_KEY)

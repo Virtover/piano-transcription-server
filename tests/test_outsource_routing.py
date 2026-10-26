@@ -15,7 +15,7 @@ def fake_redis(api_context):
 def outsourcing(api_context):
     _, settings, _ = api_context
     settings.outsource.provider = "runpod"
-    settings.outsource.max_wait = 120
+    settings.outsource.local_first_max_wait = 120
     settings.outsource.max_concurrency = 2
     return settings
 
@@ -91,8 +91,30 @@ def test_remote_concurrency_cap(outsourcing):
     assert tasks.redis.scard(routing.ACTIVE_KEYS["remote"]) == 2
 
 
+@pytest.mark.parametrize("mode", ["remote_first_overflow", "remote_first_fallback"])
+def test_remote_first_modes_do_not_depend_on_local_wait(outsourcing, mode):
+    outsourcing.outsource.routing = mode
+
+    assert [routing.choose_backend(tasks.redis, f"job-{index}") for index in range(4)] == (
+        ["remote", "remote", "local", "local"]
+        if mode == "remote_first_overflow"
+        else ["remote", "remote", "remote", "remote"]
+    )
+
+
+def test_remote_first_fallback_waits_for_a_remote_slot(outsourcing):
+    outsourcing.outsource.routing = "remote_first_fallback"
+    outsourcing.outsource.max_concurrency = 1
+    tasks.redis.sadd(routing.ACTIVE_KEYS["remote"], "waiting")
+    tasks.redis.sadd(routing.REMOTE_RUNNING_KEY, "running")
+
+    assert routing.choose_backend(tasks.redis, "waiting") == "remote"
+    assert not routing.wait_for_remote_slot(tasks.redis, "waiting", lambda: True)
+    assert not tasks.redis.sismember(routing.ACTIVE_KEYS["local"], "waiting")
+
+
 def test_zero_max_wait_outsources_whenever_local_is_full(outsourcing):
-    outsourcing.outsource.max_wait = 0.001
+    outsourcing.outsource.local_first_max_wait = 0.001
     heartbeat(capacity=1)
 
     assert routing.choose_backend(tasks.redis, "first") == "local"

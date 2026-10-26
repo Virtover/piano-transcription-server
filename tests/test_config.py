@@ -397,16 +397,17 @@ def test_outsourcing_defaults(tmp_path):
     settings = load(tmp_path)
 
     assert settings.outsource.provider == "none"
-    assert settings.outsource.max_wait == 30
+    assert settings.outsource.local_first_max_wait == 30
     assert settings.outsource.max_concurrency == 4
     assert settings.outsource.timeout == 900
     assert settings.outsource.fallback_local is True
+    assert settings.outsource.routing == "local_first"
     assert settings.runpod.api_base == "https://api.runpod.ai/v2"
     assert validate_settings(settings, "all") == []
 
 
 def test_complete_runpod_configuration_is_valid(tmp_path):
-    settings = load(tmp_path, RUNPOD_ENV + "OUTSOURCE_MAX_WAIT=0s\n", RUNPOD_SECRETS)
+    settings = load(tmp_path, RUNPOD_ENV + "OUTSOURCE_LOCAL_FIRST_MAX_WAIT=0s\n", RUNPOD_SECRETS)
 
     assert validate_settings(settings, "remote") == []
     assert settings.secrets.runpod_api_key.get_secret_value() == "rp-key"
@@ -441,7 +442,24 @@ def test_runpod_secrets_cannot_come_from_env(tmp_path, monkeypatch):
     assert settings.secrets.outsource_storage_secret_key is None
 
 
-@pytest.mark.parametrize("line", ["OUTSOURCE_PROVIDER=aws", "OUTSOURCE_MAX_CONCURRENCY=0", "OUTSOURCE_TIMEOUT=15", "OUTSOURCE_FALLBACK_LOCAL=maybe"])
+def test_old_max_wait_name_is_supported_as_a_deprecated_alias(tmp_path, caplog):
+    with caplog.at_level("WARNING"):
+        settings = load(tmp_path, "OUTSOURCE_MAX_WAIT=0s\n")
+
+    assert settings.outsource.local_first_max_wait == 0
+    assert "OUTSOURCE_LOCAL_FIRST_MAX_WAIT" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "OUTSOURCE_PROVIDER=aws",
+        "OUTSOURCE_ROUTING=remote_only",
+        "OUTSOURCE_MAX_CONCURRENCY=0",
+        "OUTSOURCE_TIMEOUT=15",
+        "OUTSOURCE_FALLBACK_LOCAL=maybe",
+    ],
+)
 def test_invalid_outsourcing_values(tmp_path, line):
     with pytest.raises(ConfigError, match=line.split("=")[0]):
         load(tmp_path, line + "\n")

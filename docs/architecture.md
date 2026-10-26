@@ -127,7 +127,7 @@ Overload means a long **expected wait**, not low VRAM. The worker's thread count
 1. The GPU worker publishes a heartbeat to Redis every 15 seconds, with a 60-second TTL: its job capacity (thread count) and a rolling average job duration.
 2. Each backend keeps a Redis set of its queued and processing job IDs, so counting is cheap and no job keys are scanned per request. The cleanup service removes stale IDs, for example after a crash.
 3. When a job is queued, the API estimates its local wait from the active local jobs, the capacity, and the average duration. Without a heartbeat, local capacity counts as zero.
-4. If the wait is longer than `OUTSOURCE_MAX_WAIT` and fewer than `OUTSOURCE_MAX_CONCURRENCY` jobs are remote, the job goes to the `remote` queue. Otherwise it stays local.
+4. With `OUTSOURCE_ROUTING=local_first`, if the wait is longer than `OUTSOURCE_LOCAL_FIRST_MAX_WAIT` and fewer than `OUTSOURCE_MAX_CONCURRENCY` jobs are remote, the job goes to the `remote` queue. With `remote_first_overflow`, every new job tries RunPod and uses local capacity when RunPod is full. With `remote_first_fallback`, every new job enters the remote-pending queue and waits for a RunPod slot; local work is used only after a genuine remote failure or timeout when fallback is enabled.
 5. The job's `backend` field is `local` or `remote`, and the status endpoint returns it.
 
 A local job that does not fit in GPU memory even on its own is also sent remote, once, if outsourcing is enabled and a remote slot is free.
@@ -140,7 +140,7 @@ A local job that does not fit in GPU memory even on its own is also sent remote,
 4. The handler downloads only from the storage host and transcribes the audio in the same batcher as the local worker: one RunPod worker takes several requests at once and runs them as one batch, up to its GPU's job capacity. It returns the MIDI as base64.
 5. The dispatcher writes the MIDI to the job directory and completes the job. The storage object is deleted in every case.
 
-When the user cancels, the dispatcher calls RunPod `/cancel` and stops. When a remote job fails or exceeds `OUTSOURCE_TIMEOUT`, it is cancelled on RunPod; with `OUTSOURCE_FALLBACK_LOCAL=true` it is put back on the local queue with a flag that stops it from being sent remote again. Otherwise it fails. Short network errors while polling are retried up to five times. Download and conversion errors are not retried locally, because they would fail the same way.
+When the user cancels, the dispatcher calls RunPod `/cancel` and stops. A remote-pending job waits for a remote concurrency slot and can be cancelled while waiting. When a remote job fails or exceeds `OUTSOURCE_TIMEOUT`, it is cancelled on RunPod; with `OUTSOURCE_FALLBACK_LOCAL=true` it is put back on the local queue with a flag that stops it from being sent remote again. Otherwise it fails. Short network errors while polling are retried up to five times. Download and conversion errors are not retried locally, because they would fail the same way.
 
 ### Billing
 

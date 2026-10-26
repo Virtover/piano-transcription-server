@@ -661,13 +661,18 @@ def transcribe_remote_job(
     from app.outsource.remote import transcribe_remotely
 
     def transcribe(context: JobContext) -> Path:
-        return transcribe_remotely(
-            context,
-            source_url=source_url,
-            upload_path=None if source_url else context.output_dir / UPLOAD_FILE_NAME,
-            upload_title=upload_title,
-            max_seconds=context.max_seconds,
-        )
+        if not routing.wait_for_remote_slot(redis, job_id, context.is_cancelled):
+            raise TranscriptionCancelled()
+        try:
+            return transcribe_remotely(
+                context,
+                source_url=source_url,
+                upload_path=None if source_url else context.output_dir / UPLOAD_FILE_NAME,
+                upload_title=upload_title,
+                max_seconds=context.max_seconds,
+            )
+        finally:
+            routing.release_remote_slot(redis, job_id)
 
     run_job(job_id, "remote", transcribe)
 
