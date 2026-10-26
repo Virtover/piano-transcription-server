@@ -71,6 +71,21 @@ Upload errors:
 
 To show the cost before uploading, read the duration on the device and call `GET /api/billing/cost?duration_seconds=...`.
 
+### 🔂 Retrying a submission safely
+
+When the connection drops after a submission was sent, the client cannot tell whether the server queued it. A plain retry would queue, and charge, a second job, and the first one could not be found: there is no endpoint that lists a user's jobs.
+
+To avoid that, send an `Idempotency-Key` header with both submission endpoints: a random ID, such as a UUID, created once per submission and sent again unchanged with every retry of it. Store it until a response arrives, so a retry after the app restarts uses it too. A new submission, even of the same video, needs a new key.
+
+| A request with a key the server has seen | Answer |
+| --- | --- |
+| The first request queued the job | `202` with the same `job_id` and the job's current `status`. Nothing is queued or charged again, even while new submissions are paused. |
+| The first request is still checking the link or receiving the file | `409` with `Retry-After: 5`. Retry with the same key. |
+| The first request failed before queuing, for example with `402` or `503` | Handled as a new submission. |
+| The job finished and has expired (`RESULT_RETENTION`) | `409`: the submission was already processed. |
+
+A retried upload is answered before its body is read, so the file is not stored twice. Keys are per user, 1 to 200 printable characters; others are refused with `422`. Without the header, every request is a new job.
+
 ### 🔄 Following a job
 
 Poll the job:

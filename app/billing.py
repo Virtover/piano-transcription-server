@@ -285,6 +285,17 @@ class Billing:
                 (job_id,),
             )
 
+    def job_seen(self, job_id: str) -> bool:
+        """Whether a job with this ID was ever queued: it has a diagnostics
+        record or a reservation that was not given back, which outlive the
+        Redis job. A submission that failed before queuing has neither."""
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                """SELECT 1 FROM transcription_reservations WHERE job_id = ? AND status != 'released'
+                   UNION ALL SELECT 1 FROM job_diagnostics WHERE job_id = ? LIMIT 1""",
+                (job_id, job_id),
+            ).fetchone() is not None
+
     def reserved_job_ids(self) -> list[str]:
         with self._connect() as connection:
             reservations = connection.execute(

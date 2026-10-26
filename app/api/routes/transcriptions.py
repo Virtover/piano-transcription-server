@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, HttpUrl
@@ -30,6 +30,11 @@ from app.worker.tasks import (
 # A placeholder for a job being uploaded or checked expires after this, in
 # case the API stops before the job is queued.
 PLACEHOLDER_TTL = 60 * 60
+# Job IDs derived from a user and an Idempotency-Key.
+SUBMISSION_NAMESPACE = uuid.UUID("5d0c2f8e-3a51-4f6b-9a8e-7c1b2d4e6f10")
+IDEMPOTENCY_KEY_MAX_LENGTH = 200
+# Statuses of a submission that has not been queued yet.
+PLACEHOLDER_STATUSES = {"preparing", "uploading"}
 
 
 router = APIRouter(
@@ -135,17 +140,90 @@ def max_length_seconds() -> float | None:
     return minutes * 60 if minutes else None
 
 
+class SubmissionExists(Exception):
+    """A job with this ID already exists: the same submission was sent again."""
+
+
+def submission_job_id(user_id: str, idempotency_key: str | None) -> str:
+    """A new job ID, or with an Idempotency-Key the same ID every time this
+    user sends that key, so a retried submission finds its first job."""
+    if idempotency_key is None:
+        return str(uuid.uuid4())
+    if not 0 < len(idempotency_key) <= IDEMPOTENCY_KEY_MAX_LENGTH or not idempotency_key.isprintable():
+        raise HTTPException(
+            status_code=422,
+            detail=f"Idempotency-Key must be 1 to {IDEMPOTENCY_KEY_MAX_LENGTH} printable characters",
+        )
+    return str(uuid.uuid5(SUBMISSION_NAMESPACE, f"{user_id}\n{idempotency_key}"))
+
+
+def earlier_submission(job_id: str, user: AuthenticatedUser | None) -> CreateTranscriptionResponse | None:
+    """The response for a submission sent again with the same
+    Idempotency-Key: its job, without queuing or charging anything again.
+    None when there was no earlier submission, or it failed before queuing."""
+    job = redis.hgetall(job_key(job_id))
+    if job.get("status") in PLACEHOLDER_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="This submission is still being checked or uploaded; try again shortly",
+            headers={"Retry-After": "5"},
+        )
+    if job:
+        return CreateTranscriptionResponse(
+            job_id=job_id,
+            status=job.get("status", "unknown"),
+            minutes=current_user_balance(user.user_id if user else None),
+        )
+    if billing.job_seen(job_id):
+        raise HTTPException(
+            status_code=409,
+            detail="This submission was already processed and its result has expired; "
+            "send a new Idempotency-Key to transcribe it again",
+        )
+    return None
+
+
 def hold_place(job_id: str, user_id: str, status: str) -> None:
     """Store a placeholder for a job that is not queued yet and count it
-    against the job limits. The placeholder expires if the API stops first."""
+    against the job limits. The placeholder expires if the API stops first.
+    Raises SubmissionExists if the job already exists."""
     key = job_key(job_id)
-    redis.hset(key, mapping={"status": status, "user_id": user_id})
+    # Claimed atomically, so two copies of a submission cannot both queue it.
+    if not redis.hsetnx(key, "status", status):
+        raise SubmissionExists()
+    redis.hset(key, "user_id", user_id)
     redis.expire(key, PLACEHOLDER_TTL)
     try:
         job_limits.acquire(redis, job_id, user_id, job_key)
     except job_limits.TooManyJobs as error:
         redis.delete(key)
         raise HTTPException(status_code=429, detail=str(error), headers={"Retry-After": "60"}) from error
+
+
+def claim_submission(job_id: str, user: AuthenticatedUser | None, status: str) -> CreateTranscriptionResponse | None:
+    """Hold the place of a new submission. Returns the earlier job instead
+    when the same submission arrived at the same time."""
+    try:
+        hold_place(job_id, user.user_id if user else "anonymous", status)
+    except SubmissionExists:
+        # The same submission arrived twice at once.
+        earlier = earlier_submission(job_id, user)
+        if earlier is None:
+            raise HTTPException(
+                status_code=409,
+                detail="This submission is being sent twice at once; try again shortly",
+                headers={"Retry-After": "5"},
+            ) from None
+        return earlier
+    return None
+
+
+IDEMPOTENCY_KEY = Header(
+    default=None,
+    alias="Idempotency-Key",
+    description="A unique ID the client chooses for this submission and sends again when retrying it. "
+    "A retry then returns the first job instead of queuing and charging a second one.",
+)
 
 
 def give_back_place(job_id: str, user_id: str) -> None:
@@ -244,14 +322,20 @@ def queue_job(
 def create_transcription(
     request: CreateTranscriptionRequest,
     user: AuthenticatedUser | None = Depends(current_user),
+    idempotency_key: str | None = IDEMPOTENCY_KEY,
 ):
     ensure_submissions_enabled()
-    ensure_no_maintenance_pending()
     user_id = user.user_id if user else "anonymous"
+    job_id = submission_job_id(user_id, idempotency_key)
+    # A retry gets its job even if new submissions are refused meanwhile.
+    if idempotency_key is not None and (earlier := earlier_submission(job_id, user)) is not None:
+        return earlier
+    ensure_no_maintenance_pending()
     ensure_accepting(user_id, link=True)
-    job_id = str(uuid.uuid4())
     # The place is held during the video check too, which runs yt-dlp.
-    hold_place(job_id, user_id, "preparing")
+    earlier = claim_submission(job_id, user, "preparing")
+    if earlier is not None:
+        return earlier
     try:
         return submit_link(job_id, str(request.source_url), user)
     except BaseException:
@@ -302,9 +386,17 @@ async def upload_transcription(
         description="Original file name; used as the transcription title.",
     ),
     user: AuthenticatedUser | None = Depends(current_user),
+    idempotency_key: str | None = IDEMPOTENCY_KEY,
 ):
     """Transcribe an audio or video file sent as the raw request body."""
     ensure_submissions_enabled()
+    user_id = user.user_id if user else "anonymous"
+    job_id = submission_job_id(user_id, idempotency_key)
+    # Answered before the body is read: a retried upload is not stored twice.
+    if idempotency_key is not None:
+        earlier = await run_in_threadpool(earlier_submission, job_id, user)
+        if earlier is not None:
+            return earlier
     ensure_no_maintenance_pending()
     await run_in_threadpool(ensure_accepting, user.user_id if user else "anonymous", False)
 
@@ -318,15 +410,15 @@ async def upload_transcription(
         raise too_large
     await run_in_threadpool(ensure_minimum_balance, user)
 
-    job_id = str(uuid.uuid4())
-    user_id = user.user_id if user else "anonymous"
     job_dir = Path(settings.service.data_dir) / "jobs" / job_id
     upload_path = job_dir / UPLOAD_FILE_NAME
     title = title_from_filename(filename)
 
     # The placeholder keeps the cleanup service from removing the directory
     # during the upload, and counts the upload against the job limits.
-    await run_in_threadpool(hold_place, job_id, user_id, "uploading")
+    earlier = await run_in_threadpool(claim_submission, job_id, user, "uploading")
+    if earlier is not None:
+        return earlier
     try:
         job_dir.mkdir(parents=True, exist_ok=True)
         size = 0
