@@ -37,6 +37,69 @@ python -m pytest -q tests/test_account_api.py
 python -m pytest -q -k cancellation
 ```
 
+## ⚡ Benchmarking CPU versus GPU
+
+The repository includes [scripts/benchmark_transcription.py](../scripts/benchmark_transcription.py).
+It benchmarks the same `transcribe_piano` inference path used by the local worker and
+prints JSON timings. Run it with a representative piano recording; a synthetic tone
+only verifies that the command works.
+
+Mount the recording directly from its existing location; do not copy it into the
+repository or commit it. The first run loads Transkun and is reported separately as
+`warmup_seconds`; compare the `seconds.median` values for steady-state inference.
+
+**Windows (PowerShell)**
+
+```powershell
+$audio = "C:\path\to\representative-piano-recording.mp3"
+$scriptsMount = "${PWD}\scripts`:/app/scripts:ro"
+$audioMount = "${audio}`:/tmp/benchmark-input.mp3:ro"
+
+docker compose run --rm --no-deps -v $scriptsMount -v $audioMount `
+  worker python3 scripts/benchmark_transcription.py /tmp/benchmark-input.mp3 --device cpu --warmup --runs 3
+
+docker compose run --rm --no-deps -v $scriptsMount -v $audioMount `
+  worker python3 scripts/benchmark_transcription.py /tmp/benchmark-input.mp3 --device gpu --warmup --runs 3
+```
+
+**macOS and Linux**
+
+```bash
+audio="$HOME/path/to/representative-piano-recording.mp3"
+
+docker compose run --rm --no-deps \
+  -v "$PWD/scripts:/app/scripts:ro" \
+  -v "$audio:/tmp/benchmark-input.mp3:ro" \
+  worker python3 scripts/benchmark_transcription.py /tmp/benchmark-input.mp3 --device cpu --warmup --runs 3
+
+docker compose run --rm --no-deps \
+  -v "$PWD/scripts:/app/scripts:ro" \
+  -v "$audio:/tmp/benchmark-input.mp3:ro" \
+  worker python3 scripts/benchmark_transcription.py /tmp/benchmark-input.mp3 --device gpu --warmup --runs 3
+```
+
+The GPU command requires normal Compose `gpus: all` support. Results depend on GPU
+model, CPU, PyTorch, audio duration, and worker settings, so keep the complete JSON
+output with those details when comparing machines. The benchmark does not contact
+video sites or submit an API job.
+
+### Reference result
+
+On 2026-10-27, the supplied Chopin recording
+`gregorquendel-chopin-fantaisie-impromptu-op-66-227470.mp3` was benchmarked in
+fresh worker containers with `--warmup --runs 3` on an
+Intel Core i7-10700K CPU and an NVIDIA GeForce RTX 3060 Ti GPU:
+
+| Mode | Warm-up/model load | Timed range | Median |
+| --- | ---: | ---: | ---: |
+| CPU | 128.53 s | 116.46–120.56 s | 117.54 s |
+| GPU (`cuda:0`) | 21.92 s | 17.40–17.73 s | 17.44 s |
+
+On that machine and recording, GPU steady-state inference was approximately
+6.7x faster than CPU. These are reference measurements, not guaranteed
+performance: the result changes with the CPU, GPU, PyTorch version, audio
+duration, and worker settings.
+
 ## 🤖 Continuous integration
 
 GitHub Actions runs the tests on every push to `main` and every pull request ([.github/workflows/tests.yml](../.github/workflows/tests.yml)), on Linux with Python 3.12 and ffmpeg, from a clean checkout: no `.env`, no secrets. The model tests, which need the worker requirements and PyTorch, are skipped there. Run them locally after installing `requirements.worker.txt`.
