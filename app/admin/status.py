@@ -5,7 +5,7 @@ import shutil
 import time
 from pathlib import Path
 
-from app import backups, controls, job_limits, maintenance
+from app import backups, controls, job_limits, maintenance, video_sites
 from app.admin.common import ago, size, span
 from app.config import settings
 from app.outsource import routing
@@ -99,6 +99,7 @@ def collect() -> dict:
         "disk": disk,
         "backups": backup_state,
         "maintenance": notice.as_response().model_dump() if notice else None,
+        "video_sites": video_sites.state(),
         "controls": {
             "paused": paused.value if paused else None,
             "links_off": links_off.value if links_off else None,
@@ -175,6 +176,8 @@ def render(state: dict) -> str:
         reason = f" ({notice['reason']})" if notice.get("reason") else ""
         lines.append(f"Maintenance   {notice['message']}{reason}")
 
+    lines.append("Video sites   " + render_video_sites(state["video_sites"]))
+
     active = []
     controls_state = state["controls"]
     if controls_state["paused"]:
@@ -187,6 +190,23 @@ def render(state: dict) -> str:
         active.append(f"{controls_state['blocked_users']} blocked users")
     lines.append("Controls      " + (", ".join(active) + " (see: limits)" if active else "none"))
     return "\n".join(lines)
+
+
+def render_video_sites(sites: dict) -> str:
+    refused = sites["refused"]
+    if refused is not None:
+        left = f" for {span(refused['expires_in'])}" if refused["expires_in"] else ""
+        text = (
+            f"LINKS REFUSED{left}: a site refused this server ({refused['reason']}), "
+            f"incident {sites['incidents_in_a_row']} in a row"
+        )
+    elif sites["recovering"]:
+        text = "recovering: one link at a time until one is read"
+    else:
+        text = "answering"
+    if sites["last_incident_at"] is not None:
+        text += f"; incidents so far: {sites['incidents']}, last {ago(sites['last_incident_at'])}"
+    return text
 
 
 def run(args) -> None:

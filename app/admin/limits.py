@@ -3,8 +3,9 @@ API reads them on every submission; see app.controls. seconds, in the
 functions below, makes a control expire on its own; None keeps it until it
 is removed."""
 
-from app import controls
+from app import controls, video_sites
 from app.admin.common import AdminError, audit, billing_enabled, find_user, parse_duration, print_json, span
+from app.admin.status import render_video_sites
 from app.config import settings
 from app.worker import tasks
 
@@ -34,6 +35,7 @@ def current() -> dict:
         "per_user_limit": {"limit": int(per_user.value), "expires_in": per_user.expires_in} if per_user else None,
         "configured_per_user_limit": settings.limits.max_active_jobs_per_user,
         "blocked": blocked,
+        "video_sites": video_sites.state(),
     }
 
 
@@ -62,6 +64,14 @@ def links_off(message: str | None, seconds: float | None, actor: str, reason: st
 def links_on(actor: str, reason: str | None = None) -> dict:
     changed = controls.turn_links_on(tasks.redis)
     audit(actor, "limits.links_on", reason=reason)
+    return {"changed": changed}
+
+
+def reset_video_sites(actor: str, reason: str | None = None) -> dict:
+    """Accept links again after a video site refused this server, before its
+    cooldown ends, and start the next cooldown from VIDEO_SITE_COOLDOWN."""
+    changed = video_sites.reset()
+    audit(actor, "limits.sites_reset", reason=reason)
     return {"changed": changed}
 
 
@@ -117,6 +127,7 @@ def run_show(args) -> None:
         print(f"Per-user limit:  {per_user['limit']}{lasting(per_user['expires_in'])} (MAX_ACTIVE_JOBS_PER_USER is {configured})")
     else:
         print(f"Per-user limit:  {configured} (MAX_ACTIVE_JOBS_PER_USER)")
+    print(f"Video sites:     {render_video_sites(data['video_sites'])}")
     print(f"Blocked users:   {len(data['blocked']) or 'none'}")
     for user in data["blocked"]:
         print(f"  {user['email'] or user['user_id']}{lasting(user['expires_in'])}: {user['reason'] or 'no reason given'}")
@@ -139,6 +150,15 @@ def run_links(args) -> None:
     else:
         result = links_on(args.by, args.reason)
         print("Video links are accepted again" if result["changed"] else "Video links were not off")
+
+
+def run_sites(args) -> None:
+    result = reset_video_sites(args.by, args.reason)
+    print(
+        "Video links are accepted again; the next refusal starts a new cooldown"
+        if result["changed"]
+        else "No video site was refusing this server"
+    )
 
 
 def run_block(args) -> None:

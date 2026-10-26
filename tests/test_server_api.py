@@ -104,14 +104,22 @@ def test_video_duration_reads_metadata(yt_dlp):
     assert billing_routes.video_duration("https://youtube.com/watch?v=1") == 90.0
 
 
-@pytest.mark.parametrize(
-    "stdout",
-    ["not json", '{"duration": null}', '{"duration": 0}', subprocess.TimeoutExpired("yt-dlp", 60)],
-)
+@pytest.mark.parametrize("stdout", ["not json", '{"duration": null}', '{"duration": 0}'])
 def test_video_duration_rejects_unreadable_metadata(yt_dlp, stdout):
     yt_dlp["stdout"] = stdout
 
     assert duration_error() == 422
+
+
+def test_video_check_that_times_out_can_be_retried(yt_dlp):
+    yt_dlp["stdout"] = subprocess.TimeoutExpired("yt-dlp", 60)
+
+    with pytest.raises(HTTPException) as error:
+        billing_routes.video_duration("https://youtube.com/watch?v=1")
+
+    assert error.value.status_code == 503
+    assert error.value.detail["error_code"] == "source_temporarily_unavailable"
+    assert error.value.headers["Retry-After"] == "30"
 
 
 def test_video_duration_enforces_maximum_length(yt_dlp, api_context):
@@ -214,7 +222,7 @@ def test_reused_video_check_still_enforces_the_length_limit(yt_dlp, api_context)
 @pytest.mark.parametrize("stdout", ["not json", '{"duration": 0}', subprocess.TimeoutExpired("yt-dlp", 60)])
 def test_failed_video_check_is_not_reused(yt_dlp, stdout):
     yt_dlp["stdout"] = stdout
-    assert duration_error() == 422
+    assert duration_error() in {422, 503}
 
     yt_dlp["stdout"] = '{"duration": 90}'
 

@@ -33,7 +33,9 @@ The main implementation surfaces are `app/main.py`, `app/api/routes/`, `app/work
 4. Write the MIDI file.
 5. Serve the result from the API.
 
-The video site is asked once per job. When a link is submitted, the API reads the video's information with `yt-dlp` to check its length, and saves it in the job directory. The worker downloads with that information instead of asking the site again. It asks again only if the information is older than an hour or its audio links no longer work: they are signed and expire. A check is also reused for 5 minutes for the same URL, so asking the cost of a video and then submitting it is one request.
+The video site is asked once per job. When a link is submitted, the API reads the video's information with `yt-dlp` to check its length, and saves it in the job directory. The worker downloads with that information instead of asking the site again. It asks again only if the information is older than an hour or its audio links no longer work: they are signed and expire. It never asks again after the site refused the server or said the video cannot be read. A check is also reused for 5 minutes for the same URL, so asking the cost of a video and then submitting it is one request.
+
+Every request to a video site, from the API or a worker, goes through `app/video_sites.py`. Requests that read a link start `VIDEO_SITE_INTERVAL` apart. A rate limit or bot check opens a breaker kept in Redis, which the API and every worker obey: links are refused until a cooldown ends, then read one at a time until one succeeds. See [When a video site refuses the server](api.md#-when-a-video-site-refuses-the-server).
 
 The Transkun checkpoint detects sustain-pedal events separately instead of automatically extending note durations until pedal release. Progress during model execution is an estimate because the Transkun command does not expose exact per-segment progress.
 

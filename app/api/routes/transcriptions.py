@@ -86,6 +86,8 @@ class TranscriptionStatusResponse(BaseModel):
     title: str | None = None
     metadata: TranscriptionMetadataResponse | None = None
     error: str | None = None
+    # A stable code for the error, for clients to act on; see docs/api.md.
+    error_code: str | None = None
     minutes: int | None = None
     # Where the model runs: local or remote. Absent for jobs queued before
     # outsourcing existed.
@@ -241,7 +243,11 @@ def ensure_minimum_balance(user: AuthenticatedUser | None) -> None:
     if billing.get_balance(user.user_id) < required:
         raise HTTPException(
             status_code=402,
-            detail={"message": "Insufficient transcription minutes", "required_minutes": required},
+            detail={
+                "message": "Insufficient transcription minutes",
+                "error_code": "insufficient_minutes",
+                "required_minutes": required,
+            },
         )
 
 
@@ -273,7 +279,11 @@ def queue_job(
     except InsufficientMinutes as error:
         raise HTTPException(
             status_code=402,
-            detail={"message": "Insufficient transcription minutes", "required_minutes": cost},
+            detail={
+                "message": "Insufficient transcription minutes",
+                "error_code": "insufficient_minutes",
+                "required_minutes": cost,
+            },
         ) from error
 
     redis.hset(
@@ -489,6 +499,7 @@ def get_transcription(
         title=job.get("title"),
         metadata=metadata,
         error=job.get("error"),
+        error_code=job.get("error_code"),
         minutes=current_user_balance(job.get("user_id")),
         backend=job.get("backend"),
         maintenance=current_notice(),

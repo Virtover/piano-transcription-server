@@ -102,7 +102,7 @@ Invoke-RestMethod "http://localhost:8000/api/transcriptions/$($job.job_id)"
 curl "http://localhost:8000/api/transcriptions/$JOB_ID"
 ```
 
-Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. The `error` is written for users, for example `The video could not be downloaded: Video unavailable. This video is private`; the full technical error is only in the server's logs and [job diagnostics](architecture.md#-job-diagnostics). `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens. `maintenance` announces a planned restart or shutdown; see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns).
+Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. The `error` is written for users, for example `The video could not be downloaded: Video unavailable. This video is private`; the full technical error is only in the server's logs and [job diagnostics](architecture.md#-job-diagnostics). `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens. `maintenance` announces a planned restart or shutdown; see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns). A failed job also has an `error_code`, for the app to act on; see [Error codes](#-error-codes).
 
 Cancel a queued or processing job:
 
@@ -148,7 +148,18 @@ An administrator can also stop submissions for a while, without a restart (see [
 * `503` for every new transcription while submissions are paused, and for links and their cost while links are turned off; uploads are still accepted then. `Retry-After` is sent when the end is known.
 * `403` for a blocked account, on new transcriptions and link costs. Its jobs, balance, and account deletion still work.
 
-Checking a link's length runs a video download tool, and only a few checks run at once. When they are all busy for 10 seconds, `POST /api/transcriptions` and `GET /api/billing/cost?source_url=...` answer `503` with `Retry-After: 5`. A check is reused for 5 minutes, so submitting a link right after asking its cost does not run it again.
+Checking a link's length runs a video download tool. Only a few checks run at once, and they start at least `VIDEO_SITE_INTERVAL` (default 3 seconds) apart. When no check can start within 10 seconds, `POST /api/transcriptions` and `GET /api/billing/cost?source_url=...` answer `503` with `Retry-After` and the error code `source_busy`. A check is reused for 5 minutes, so submitting a link right after asking its cost does not run it again. Requests for a link that is being checked wait for that check, and a video the site says cannot be read is answered from memory for a minute.
+
+### 🛑 When a video site refuses the server
+
+A video site that receives too many requests from one address rate-limits it, asks it to prove it is not a bot, or blocks it. Asking again makes this worse, so the server stops asking:
+
+* The first such answer, to the API or a worker, turns video links off for every user for `VIDEO_SITE_COOLDOWN` (default 30 minutes). Each further incident in a row doubles the time, up to `VIDEO_SITE_MAX_COOLDOWN` (default 1 day).
+* Meanwhile, links and their cost are refused with `503`, `Retry-After` with the time left, and the error code `source_temporarily_unavailable`. Link jobs already queued fail with the same code without contacting the site, and their minutes are given back. Uploads work as usual.
+* When the time is up, links are read one at a time until one succeeds, so the users who waited do not reach the site all at once.
+* Failed jobs are never retried on their own. An administrator sees the state in `status`, and can end it early with `limits sites reset`; see [Administration](administration.md#-limits).
+
+In the app, offer an upload when you get `source_temporarily_unavailable`, and do not retry the link before `Retry-After`.
 
 ## 🔁 Planned restarts and shutdowns
 
@@ -191,6 +202,23 @@ Jobs survive both: running jobs get time to finish first, and queued jobs stay q
 * Before submitting a long recording, warn the user if a restart or shutdown is close.
 * After a restart: on `503` or a connection error, wait for `Retry-After` (or a few seconds) and retry instead of showing an error, and keep polling jobs: their `job_id` stays valid.
 * After a shutdown: show the server as offline, with `back_at` if known, and check again from time to time instead of retrying quickly.
+
+## 🏷️ Error codes
+
+A failed job has an `error_code` next to its `error`. Refusals of a link, and `402`, carry one in `detail`, as `{"message": "...", "error_code": "..."}`. Act on the code rather than the message, which can change. The status alone does not tell these apart: `402` and `429` are also this server's own limits, while a video site's rate limit is `source_temporarily_unavailable`.
+
+| `error_code` | Answer | Meaning | In the app |
+| --- | --- | --- | --- |
+| `source_temporarily_unavailable` | `503` with `Retry-After`, or a failed job | A video site refused this server, or did not answer in time; see [When a video site refuses the server](#-when-a-video-site-refuses-the-server). | Offer an upload. Do not retry the link before `Retry-After`. |
+| `source_busy` | `503` with `Retry-After`, or rarely a failed job | Too many links are being checked or downloaded. | Retry once after `Retry-After`. |
+| `source_video_unavailable` | `422`, or a failed job | The video is private, removed, restricted, not available in the server's country, or not out yet. | Ask the user to check the link, or upload the file. |
+| `source_unsupported` | `422` | The link is not one the server can read: a site it does not accept, or an address it must not open. | Ask for an upload. |
+| `source_failed` | `422`, or a failed job | The video could not be read for another reason. | Show the message; offer an upload. |
+| `insufficient_minutes` | `402` | Not enough minutes; `required_minutes` says how many the job needs. | Offer to buy minutes. |
+| `transcription_failed` | a failed job | Converting or transcribing the audio failed. | Show the message. |
+| `transcription_interrupted` | a failed job | A restart or a stopped worker interrupted the job. | Submit it again. |
+
+A failed job's minutes are always given back. A request the API cannot parse gets FastAPI's own `422`, whose `detail` is a list, without a code.
 
 ## 💳 Billing endpoints
 

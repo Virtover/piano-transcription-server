@@ -57,6 +57,7 @@ def test_transcription_validation_and_insufficient_balance(api_context):
     assert insufficient.status_code == 402
     assert insufficient.json()["detail"] == {
         "message": "Insufficient transcription minutes",
+        "error_code": "insufficient_minutes",
         "required_minutes": 2,
     }
 

@@ -22,8 +22,19 @@ def default_settings(tmp_path):
     config.settings.secrets_dir = config.SECRETS_DIR
 
 
+@pytest.fixture(autouse=True)
+def video_sites(default_settings, monkeypatch):
+    """The video site breaker on a Redis of its own, without pacing, which
+    would make tests wait. api_context shares its Redis instead."""
+    from app import video_sites
+
+    monkeypatch.setattr(video_sites, "redis", fakeredis.FakeRedis(decode_responses=True))
+    default_settings.limits.video_site_interval = 0
+    return video_sites
+
+
 @pytest.fixture
-def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, object]]:
+def api_context(tmp_path, monkeypatch, video_sites) -> Iterator[tuple[TestClient, object, object]]:
     from app import google_play
     from app import auth
     from app import main
@@ -44,6 +55,7 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     monkeypatch.setattr(billing_routes, "redis", redis)
     monkeypatch.setattr(transcription_routes, "redis", redis)
     monkeypatch.setattr(tasks, "redis", redis)
+    monkeypatch.setattr(video_sites, "redis", redis)
     monkeypatch.setattr(billing_routes, "billing", billing)
     monkeypatch.setattr(transcription_routes, "billing", billing)
     monkeypatch.setattr(tasks, "billing", billing)

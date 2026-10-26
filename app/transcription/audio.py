@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from app.errors import UserFacingError
+from app import video_sites
+from app.errors import SourceError, UserFacingError
 from app.transcription.cancellation import TranscriptionCancelled
 from app.transcription.device import cpu_thread_count
 from app.media import probe_audio
@@ -50,6 +51,8 @@ DURATION_TOLERANCE = 5.0
 MAX_DOWNLOAD_SIZE = "4G"
 # Partial files yt-dlp leaves while it downloads.
 PARTIAL_SUFFIXES = {".part", ".ytdl", ".temp"}
+# How long a worker waits for its turn to contact a video site.
+SITE_WAIT = 5 * 60
 
 
 @dataclass
@@ -70,20 +73,26 @@ def download_audio(
 ) -> DownloadedAudio:
     """Download with the info the API saved when it checked the video, so
     the site is asked once per job. Without recent info, or if its links no
-    longer work, yt-dlp asks the site again."""
+    longer work, yt-dlp asks the site once more: never after the site
+    refused this server, or said the video cannot be read."""
     safe_url = ensure_safe_source_url(str(source_url))
     info_path = saved_video_info(output_dir)
 
     result = None
     if info_path is not None:
         try:
-            result = run_yt_dlp(["--load-info-json", str(info_path)], output_dir, cancellation_callback)
-        except subprocess.CalledProcessError as error:
-            logger.warning("Download from the saved video info failed, asking the site again: %s", error.stderr)
+            result = download_from_site(
+                ["--load-info-json", str(info_path)], output_dir, cancellation_callback, paced=False
+            )
+        except SourceError as error:
+            # Only an unexplained failure, such as expired audio links.
+            if error.code != SourceError.code:
+                raise
+            logger.warning("Download from the saved video info failed, asking the site again: %s", error)
             info_path.unlink(missing_ok=True)
             remove_downloads(output_dir)
     if result is None:
-        result = run_yt_dlp(["--", safe_url], output_dir, cancellation_callback)
+        result = download_from_site(["--", safe_url], output_dir, cancellation_callback)
 
     json_lines = [
         line
@@ -137,6 +146,21 @@ def download_audio(
     )
 
 
+def download_from_site(
+    source: list[str],
+    output_dir: Path,
+    cancellation_callback: CancellationCallback | None = None,
+    paced: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """run_yt_dlp once the site may be contacted; see app.video_sites. Its
+    failures become SourceErrors that say what went wrong."""
+    with video_sites.access(SITE_WAIT, paced=paced):
+        try:
+            return run_yt_dlp(source, output_dir, cancellation_callback)
+        except subprocess.CalledProcessError as error:
+            raise video_sites.failure(error) from error
+
+
 def run_yt_dlp(
     source: list[str],
     output_dir: Path,
@@ -147,20 +171,17 @@ def run_yt_dlp(
         [
             "yt-dlp",
             *YT_DLP_SAFETY_OPTIONS,
-            "--js-runtimes",
-            "deno",
-            "--extractor-args",
-            "youtube:player_client=web,android",
+            *video_sites.YT_DLP_SITE_OPTIONS,
             "--format",
             "bestaudio/best",
-            "--socket-timeout",
-            "30",
             "--retries",
-            "3",
+            "2",
             "--fragment-retries",
             "3",
-            "--extractor-retries",
-            "3",
+            "--retry-sleep",
+            "http:exp=2:30",
+            "--retry-sleep",
+            "fragment:exp=1:10",
             "--max-filesize",
             MAX_DOWNLOAD_SIZE,
             # Conversion is left to convert_to_wav, which never lets ffmpeg

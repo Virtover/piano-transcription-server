@@ -15,7 +15,7 @@ from redis.exceptions import WatchError
 from app import job_limits
 from app.config import settings
 from app.billing import Billing, cancelled_cost
-from app.errors import detail, public_message
+from app.errors import detail, error_code, public_message
 from app.outsource import routing
 from app.transcription.audio import remove_audio_files
 from app.transcription.cancellation import TranscriptionCancelled
@@ -31,6 +31,8 @@ LEASE_TTL = 60
 LEASE_RENEW_INTERVAL = 15
 ABANDONED_JOB_CHECK_INTERVAL = 30
 WORKER_STOPPED = "Transcription interrupted because its worker stopped"
+# The error_code of a job failed by a restart or a stopped worker.
+INTERRUPTED = "transcription_interrupted"
 
 logger = logging.getLogger(__name__)
 
@@ -309,6 +311,7 @@ def fail_abandoned_job(job_id: str, reason: str) -> bool:
                     mapping={
                         "status": "failed",
                         "error": reason,
+                        "error_code": INTERRUPTED,
                     },
                 )
                 pipe.expire(key, job_ttl())
@@ -370,7 +373,7 @@ def requeue_after_restart(job_id: str, job: dict[str, str], reason: str) -> None
     except Exception:
         logger.exception("Could not requeue job %s after the restart", job_id)
         routing.mark_finished(redis, backend, job_id)
-        update_job(job_id, status="failed", error=reason)
+        update_job(job_id, status="failed", error=reason, error_code=INTERRUPTED)
         redis.expire(job_key(job_id), job_ttl())
         record_job(job_id)
         if job.get("user_id"):
@@ -504,6 +507,7 @@ def run_job(
             job_id,
             status="failed",
             error=public_message(e),
+            error_code=error_code(e),
             error_detail=detail(e),
         )
         record_job(job_id)

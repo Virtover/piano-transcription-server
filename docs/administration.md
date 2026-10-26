@@ -32,6 +32,7 @@ The first thing to look at when users say the server is slow:
 * **Disk:** space used by job files, and space free on the data volume.
 * **Backups:** how many billing backups are on this disk and the age of the newest; with off-site copies on, when the last copy succeeded, or why it failed.
 * **Maintenance:** a pending restart or shutdown, from `scripts/server.py`.
+* **Video sites:** whether video links are refused because a site rate-limited this server, for how long and why, or whether links are read one at a time to recover; and how many such incidents there were. See [When a video site refuses the server](api.md#-when-a-video-site-refuses-the-server).
 * **Controls:** active [limits](#-limits).
 
 ## 🧾 Jobs
@@ -92,6 +93,7 @@ docker compose exec api python -m app.admin limits pause --message "Back at 18:0
 docker compose exec api python -m app.admin limits resume
 docker compose exec api python -m app.admin limits links off --for 1d
 docker compose exec api python -m app.admin limits links on
+docker compose exec api python -m app.admin limits sites reset
 docker compose exec api python -m app.admin limits block user@example.com --reason "abuse" --for 7d
 docker compose exec api python -m app.admin limits unblock user@example.com
 docker compose exec api python -m app.admin limits per-user 1 --for 6h
@@ -101,6 +103,7 @@ docker compose exec api python -m app.admin limits per-user default
 * **`limits`** shows what is active, and for how long.
 * **`pause`** refuses new transcriptions, links and uploads, with `503` and the `--message` (or a default) as `detail`. It is lighter than a [planned restart](architecture.md#-planned-restarts-and-shutdowns): nothing is announced in advance, and asking a cost still works. `resume` ends it.
 * **`links off`** refuses video links, and their cost, with `503`; uploads are still accepted. Use it when a video site blocks the server. `links on` ends it.
+* **`sites reset`** accepts links again before the cooldown ends, after a video site refused the server, and starts the next cooldown from `VIDEO_SITE_COOLDOWN` again. Use it once the site answers again, for example after the server's address changed. Resetting while the site still refuses the server only brings the next refusal sooner.
 * **`block`** stops a user from starting transcriptions or checking a link's cost, with `403`. The user does not see the reason. Reading jobs, the balance, and deleting the account still work. Needs billing. `unblock` ends it.
 * **`per-user`** replaces `MAX_ACTIVE_JOBS_PER_USER` while it is set; `default` goes back to the setting. Users above the new limit keep their jobs and cannot add more until they are below it. Needs billing, like the setting.
 

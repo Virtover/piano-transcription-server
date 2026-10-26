@@ -13,10 +13,11 @@ from redis import Redis
 
 from app.billing import Billing, transcription_cost
 from app.config import settings
-from app import controls, google_play, maintenance, video_info
+from app import controls, google_play, maintenance, video_info, video_sites
+from app.errors import SourceBusy, SourceError, SourceUnsupported, SourceVideoUnavailable
 from app.maintenance import NoticeResponse
 from app.auth import AuthenticatedUser, current_user, google_oauth_client_ids
-from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url, UnsafeSourceUrl
+from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,12 @@ metadata_slots = threading.BoundedSemaphore(METADATA_SLOTS)
 # Recent video checks, by URL. A video's info is a few KB.
 VIDEO_CHECK_KEY = "video_check:"
 VIDEO_CHECK_TTL = 300
+# A video the site said cannot be read is not asked about again for this long.
+FAILED_CHECK_TTL = 60
+FAILED_CHECK_ERRORS = {error.code: error for error in (SourceVideoUnavailable, SourceUnsupported)}
+# Held while a URL is checked, so the same URL is checked once at a time.
+CHECKING_SUFFIX = ":checking"
+CHECKING_TTL = 90
 
 
 class CostResponse(BaseModel):
@@ -88,57 +95,105 @@ class CheckedVideo:
 def check_video(source_url: HttpUrl) -> CheckedVideo:
     """Read a video's info with yt-dlp, and check its length. A check is
     reused for VIDEO_CHECK_TTL, so asking the cost and then submitting the
-    video asks the site once."""
+    video asks the site once. Requests for a URL being checked wait for that
+    check instead of starting another."""
     try:
+        # An unsafe URL is refused as unsupported.
         safe_url = ensure_safe_source_url(str(source_url))
-    except UnsafeSourceUrl as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-    key = VIDEO_CHECK_KEY + hashlib.sha256(safe_url.encode()).hexdigest()
-    cached = redis.get(key)
-    if cached:
-        checked = json.loads(cached)
-        info, checked_at = checked["info"], checked["checked_at"]
-    else:
-        info, checked_at = read_video_info(safe_url), time.time()
-        redis.set(key, json.dumps({"info": info, "checked_at": checked_at}), ex=VIDEO_CHECK_TTL)
-    return CheckedVideo(ensure_allowed_length(float(info["duration"])), info, checked_at)
+        key = VIDEO_CHECK_KEY + hashlib.sha256(safe_url.encode()).hexdigest()
+        checked = cached_check(key)
+        if checked is None:
+            checked = run_check(key, safe_url)
+    except SourceError as error:
+        raise source_refusal(error) from error
+    return CheckedVideo(ensure_allowed_length(float(checked["info"]["duration"])), checked["info"], checked["checked_at"])
+
+
+def cached_check(key: str, wait: float = 0) -> dict[str, Any] | None:
+    """A recent check of the URL, waiting up to wait seconds for one to
+    appear. Raises the error of a recent check the site refused."""
+    deadline = time.monotonic() + wait
+    while True:
+        cached = redis.get(key)
+        if cached:
+            checked = json.loads(cached)
+            if "error" in checked:
+                failed = checked["error"]
+                raise FAILED_CHECK_ERRORS[failed["code"]](failed["message"])
+            return checked
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(0.25, remaining))
+
+
+def run_check(key: str, safe_url: str) -> dict[str, Any]:
+    lock = key + CHECKING_SUFFIX
+    if not redis.set(lock, "1", nx=True, ex=CHECKING_TTL):
+        checked = cached_check(key, METADATA_WAIT)
+        if checked is None:
+            raise SourceBusy(video_sites.BUSY_MESSAGE, retry_after=5)
+        return checked
+    try:
+        info = read_video_info(safe_url)
+    except SourceError as error:
+        if error.code in FAILED_CHECK_ERRORS:
+            failed = {"code": error.code, "message": str(error)}
+            redis.set(key, json.dumps({"error": failed}), ex=FAILED_CHECK_TTL)
+        raise
+    finally:
+        redis.delete(lock)
+    checked = {"info": info, "checked_at": time.time()}
+    redis.set(key, json.dumps(checked), ex=VIDEO_CHECK_TTL)
+    return checked
 
 
 def read_video_info(safe_url: str) -> dict[str, Any]:
     if not metadata_slots.acquire(timeout=METADATA_WAIT):
-        raise HTTPException(
-            status_code=503,
-            detail="Too many videos are being checked; try again in a moment",
-            headers={"Retry-After": "5"},
-        )
+        raise SourceBusy(video_sites.BUSY_MESSAGE, retry_after=5)
     try:
-        result = subprocess.run(
-            [
-                "yt-dlp",
-                *YT_DLP_SAFETY_OPTIONS,
-                "--js-runtimes",
-                "deno",
-                "--extractor-args",
-                "youtube:player_client=web,android",
-                "--dump-single-json",
-                "--no-download",
-                "--",
-                safe_url,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        with video_sites.access(METADATA_WAIT):
+            try:
+                result = subprocess.run(
+                    [
+                        "yt-dlp",
+                        *YT_DLP_SAFETY_OPTIONS,
+                        *video_sites.YT_DLP_SITE_OPTIONS,
+                        "--dump-single-json",
+                        "--no-download",
+                        "--",
+                        safe_url,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                raise video_sites.failure(error) from error
+            except OSError as error:
+                raise SourceError("Unable to read video metadata") from error
         info = json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-        raise HTTPException(status_code=422, detail="Unable to read video metadata") from error
+    except json.JSONDecodeError as error:
+        raise SourceError("Unable to read video metadata") from error
     finally:
         metadata_slots.release()
     duration = info.get("duration") if isinstance(info, dict) else None
     if not isinstance(duration, (int, float)) or duration <= 0:
-        raise HTTPException(status_code=422, detail="Video duration is unavailable")
+        raise SourceError("Video duration is unavailable")
     return video_info.slim(info)
+
+
+def error_detail(error: SourceError) -> dict[str, str]:
+    return {"message": str(error), "error_code": error.code}
+
+
+def source_refusal(error: SourceError) -> HTTPException:
+    return HTTPException(
+        status_code=error.status,
+        detail=error_detail(error),
+        headers={"Retry-After": str(error.retry_after)} if error.retry_after else None,
+    )
 
 
 def video_duration(source_url: HttpUrl) -> float:
@@ -155,6 +210,9 @@ def ensure_accepting(user_id: str, link: bool, submission: bool = True) -> None:
             detail=message,
             headers={"Retry-After": str(retry_after)} if retry_after else None,
         )
+    # Refused before anything is checked or held, while a site refuses this server.
+    if link and (limited := video_sites.refusal()) is not None:
+        raise source_refusal(limited)
 
 
 def ensure_allowed_length(duration: float) -> float:

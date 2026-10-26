@@ -8,6 +8,7 @@ import threading
 import pytest
 
 from app import video_info
+from app.errors import SourceError
 from app.transcription import audio
 from app.video_info import VIDEO_INFO_FILE_NAME, VIDEO_INFO_MAX_AGE, save_video_info, saved_video_info
 
@@ -109,10 +110,11 @@ def test_download_fails_once_the_site_fails_too(processes, tmp_path):
     failing.update({"--load-info-json", "--"})
     save_video_info(tmp_path, {"title": "Nocturne"}, checked_at=video_info.time.time())
 
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(SourceError) as error:
         audio.download_audio("https://youtube.com/watch?v=1", tmp_path)
 
     assert len(yt_dlp_sources(commands)) == 2
+    assert isinstance(error.value.__cause__, subprocess.CalledProcessError)
 
 
 def test_download_with_stale_info_asks_the_site(processes, tmp_path):

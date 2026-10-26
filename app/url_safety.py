@@ -3,7 +3,7 @@ import socket
 from urllib.parse import urlsplit
 
 from app.config import settings
-from app.errors import UserFacingError
+from app.errors import SourceUnsupported
 
 MAX_URL_LENGTH = 2048
 ALLOWED_PORTS = {None, 80, 443}
@@ -16,7 +16,7 @@ BLOCKED_SUFFIXES = (".local", ".localhost", ".internal", ".lan", ".home.arpa")
 YT_DLP_SAFETY_OPTIONS = ["--ignore-config", "--use-extractors", "default,-generic", "--no-playlist"]
 
 
-class UnsafeSourceUrl(UserFacingError, ValueError):
+class UnsafeSourceUrl(SourceUnsupported, ValueError):
     """The URL must not be passed to yt-dlp."""
 
 
