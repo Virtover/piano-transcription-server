@@ -80,8 +80,13 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 | `BILLING_PRODUCTS` | `{}` | JSON mapping of Google Play product IDs to transcription minutes. |
 | `FREE_MINUTES` | unset | Free minutes granted per period; omit to disable. |
 | `FREE_MINUTES_PERIOD` | `30d` | How often free minutes are topped up. |
-| `BILLING_BACKUP_INTERVAL` | `1h` | How often the billing database is backed up. |
-| `BILLING_BACKUP_RETENTION` | `30d` | Age after which automatic backups are deleted. |
+| `BILLING_BACKUP_INTERVAL` | `15m` | How often the billing database is backed up. |
+| `BILLING_BACKUP_KEEP_ALL` | `1d` | Every backup younger than this is kept. See [Which backups are kept](#which-backups-are-kept). |
+| `BILLING_BACKUP_KEEP_HOURLY` | `2d` | Then the first backup of each hour, up to this age. `0s` turns a step off. |
+| `BILLING_BACKUP_KEEP_DAILY` | `14d` | Then the first of each day. |
+| `BILLING_BACKUP_KEEP_WEEKLY` | `8w` | Then the first of each week. |
+| `BILLING_BACKUP_KEEP_MONTHLY` | `0s` | Then the first of each month; off by default. |
+| `BILLING_BACKUP_RETENTION` | unset | Optional upper limit: older backups are deleted whatever the steps keep. The newest backup is always kept. |
 | `BILLING_JOB_DIAGNOSTICS_RETENTION` | `30d` | Age after which job diagnostics records are deleted. See [Job diagnostics](architecture.md#-job-diagnostics). |
 | `GOOGLE_OAUTH_CLIENT_IDS` | `[]` | Public OAuth client IDs whose Google ID tokens are accepted. Required for billing. |
 | `GOOGLE_PLAY_PACKAGE_NAME` | unset | Android package name used for Google Play verification. Required for billing. |
@@ -129,6 +134,17 @@ A number is easier to reason about, because it limits what your server does: eve
 
 `COMPOSE_PROFILES=cloudflare` also requires the secret file `cloudflare/tunnel_token`; `check` fails without it. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
 
+### Off-site backups
+
+Optional, and on when `OFFSITE_BACKUP_BUCKET` is set. Then the other values and the secret files `offsite_backup_access_key` and `offsite_backup_secret_key` are required. See [Off-site copies](#off-site-copies).
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OFFSITE_BACKUP_ENDPOINT` | unset | S3-compatible endpoint of the backup storage. |
+| `OFFSITE_BACKUP_BUCKET` | unset | Bucket for the encrypted billing backups. Setting it turns off-site copies on. |
+| `OFFSITE_BACKUP_REGION` | `auto` | Storage region. `auto` for Cloudflare R2. |
+| `OFFSITE_BACKUP_RECIPIENT` | unset | The age public key (`age1...`) backups are encrypted to. Not a secret; the private key stays off this server. |
+
 ### Container wiring
 
 Set by `docker-compose.yml`. Change them only when running the services outside Docker.
@@ -163,6 +179,8 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `runpod_read_api_key` | Optional. A RunPod key with read-only access to the account. Restricted keys cannot read endpoint settings, so `OUTSOURCE_MAX_CONCURRENCY=auto` and the endpoint settings check of `check --online` use this one. Without it, `auto` allows 4 remote jobs. |
 | `outsource_storage_access_key` | Access key ID of the storage token. |
 | `outsource_storage_secret_key` | Secret access key of the storage token. |
+| `offsite_backup_access_key` | Optional. Access key ID for the off-site backup bucket. See [Off-site copies](#off-site-copies). |
+| `offsite_backup_secret_key` | Optional. Secret access key for the off-site backup bucket. |
 | `server_password` | Optional. When present, every request except `/health` and `/ready` needs this password, as the `X-Server-Password` header or HTTP Basic auth with any user name. At least 12 characters; the API refuses to start otherwise. See [Password protection](setup.md#-password-protection). |
 
 The Cloudflare tunnel token is in a folder of its own, `secrets/cloudflare/tunnel_token`, because only the `cloudflared` service gets that folder. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
@@ -300,22 +318,116 @@ See [Administration](administration.md#-users).
 
 ## 💾 Billing database backups
 
-The API creates a SQLite backup in `/billing/backups` every `BILLING_BACKUP_INTERVAL` (default `1h`), starting when the API starts. On the host these files are in `./billing-data/backups`. They are made with SQLite's online backup, so they are consistent while the API is running. Each is written under a temporary name ending in `.partial`, checked with `PRAGMA integrity_check`, and only then renamed, so every `billing-<unix-time>.sqlite3` file is complete. A backup that fails the check is deleted and the error logged.
+The API creates a SQLite backup in `/billing/backups` every `BILLING_BACKUP_INTERVAL` (default `15m`), starting when the API starts. On the host these files are in `./billing-data/backups`. They are made with SQLite's online backup, so they are consistent while the API is running. Each is written under a temporary name ending in `.partial`, checked with `PRAGMA integrity_check`, and only then renamed, so every `billing-<unix-time>.sqlite3` file is complete. A backup that fails the check is deleted and the error logged.
 
-After each backup, the API deletes automatic backups older than `BILLING_BACKUP_RETENTION` (default `30d`). The age is read from the timestamp in the file name, `billing-<unix-time>.sqlite3`. Other files in the directory, such as manually renamed copies, are never deleted. The API refuses to start if either value is invalid.
+To back up now, for example before an update, and to see what exists:
 
-```env
-BILLING_BACKUP_INTERVAL=6h
-BILLING_BACKUP_RETENTION=14d
+```shell
+docker compose exec api python -m app.backups now
+docker compose exec api python -m app.backups list
 ```
 
-Data from a deleted account stays in older backups until they expire, so the retention period is also the longest time deleted data is kept. Job diagnostics records are in the same database, so a record can survive in backups for up to `BILLING_JOB_DIAGNOSTICS_RETENTION` plus `BILLING_BACKUP_RETENTION` (60 days with the defaults). Copies you make elsewhere are not pruned; apply the same retention to them.
+### Which backups are kept
 
-These backups are on the same disk as the live database. They protect against a bad migration, a wrong manual edit, or file corruption, but not against losing the machine or the disk. Copy `./billing-data/backups` to another location regularly, for example with `rclone` or `rsync` from a host cron job, and encrypt the copy first (for example with `age`). The files contain user emails, Google account IDs, and purchase tokens.
+After each backup, the API thins out older ones, so recent history is dense and older history sparse. With the defaults:
+
+| Age | Kept | Setting |
+| --- | --- | --- |
+| up to 1 day | every backup (96 at `15m`) | `BILLING_BACKUP_KEEP_ALL=1d` |
+| up to 2 days | the first of each hour | `BILLING_BACKUP_KEEP_HOURLY=2d` |
+| up to 14 days | the first of each day | `BILLING_BACKUP_KEEP_DAILY=14d` |
+| up to 8 weeks | the first of each week (Monday) | `BILLING_BACKUP_KEEP_WEEKLY=8w` |
+| older | none; with a monthly step, the first of each month | `BILLING_BACKUP_KEEP_MONTHLY=0s` |
+
+That is about 140 files. Hours, days, weeks, and months are in UTC. Each step keeps the *first* backup of its period, which is also the one the next step keeps, so thinning never removes a backup a longer step still needs. `0s` turns a step off. The newest backup is always kept, so a server that was off for months still has its last one. The age is read from the timestamp in the file name; other files in the directory, such as manually renamed copies, are never deleted.
+
+`BILLING_BACKUP_RETENTION`, unset by default, is an upper limit: older backups are deleted whatever the steps keep. Data from a deleted account stays in backups until they are deleted, so the longest step, or this limit, is also the longest time deleted data is kept: 8 weeks with the defaults. Job diagnostics records are in the same database, so a record can survive in backups for up to `BILLING_JOB_DIAGNOSTICS_RETENTION` plus that. For example, for at most 30 days of history:
+
+```env
+BILLING_BACKUP_RETENTION=30d
+```
+
+### Off-site copies
+
+The backups above are on the same disk as the live database. They protect against a bad migration, a wrong manual edit, or file corruption, but not against losing the disk or the machine. For that, the API can copy each backup to S3-compatible storage elsewhere. It is optional, and off until `OFFSITE_BACKUP_BUCKET` is set.
+
+Copies are encrypted on this machine with [age](https://age-encryption.org) before upload, to a public key you give the server. The matching private key never needs to be on the server, so the storage provider, or anyone with a leaked storage key, sees only encrypted files. **Without the private key the copies cannot be restored**: store it somewhere that survives losing this machine, such as a password manager.
+
+The off-site history follows the same steps as the local one, decided from the copies that exist there. After a disk is replaced, the old copies stay and new backups are added to them.
+
+1. List what the bucket must provide:
+
+   ```shell
+   docker compose run --rm api python -m app.config requirements
+   ```
+
+   Use a bucket and keys of their own, not the outsourcing ones: the outsourcing keys are used for every outsourced job, and must not be able to delete the backups.
+
+2. Create a key pair:
+
+   ```shell
+   docker compose run --rm --no-deps api python -m app.backups keygen
+   ```
+
+   It prints an `OFFSITE_BACKUP_RECIPIENT=age1...` line for `.env`, and the private key, `AGE-SECRET-KEY-...`. Save the private key in your password manager now. Do not put it in `.env` or `secrets`. A key pair from `age-keygen` works too.
+
+3. Save the storage keys as files in `secrets`:
+
+   **Windows (PowerShell)**
+
+   ```powershell
+   Set-Content -Path secrets\offsite_backup_access_key -Value '<access key ID>' -NoNewline
+   Set-Content -Path secrets\offsite_backup_secret_key -Value '<secret access key>' -NoNewline
+   ```
+
+   **macOS and Linux**
+
+   ```bash
+   printf '%s' '<access key ID>' > secrets/offsite_backup_access_key
+   printf '%s' '<secret access key>' > secrets/offsite_backup_secret_key
+   ```
+
+4. Add to `.env`:
+
+   ```env
+   OFFSITE_BACKUP_ENDPOINT=https://<storage endpoint>
+   OFFSITE_BACKUP_BUCKET=<bucket>
+   OFFSITE_BACKUP_RECIPIENT=age1...
+   ```
+
+5. Check, apply, and make the first copy. The existing local backups are uploaded too:
+
+   ```shell
+   docker compose run --rm api python -m app.config check --online
+   docker compose up -d api
+   docker compose exec api python -m app.backups now
+   ```
+
+`python -m app.admin status` shows when the last copy succeeded, or why it failed. A failed copy never stops the local backups, and the next backup retries it.
+
+### Restoring a backup
+
+Restore a local backup from `./billing-data/backups`, or first fetch one from off-site storage. The private key is read from standard input, so it is not stored anywhere. Paste it into a file, for example `key.txt`, then:
+
+**Windows (PowerShell)**
+
+```powershell
+Get-Content key.txt | docker compose run --rm --no-deps -T api python -m app.backups fetch latest
+Remove-Item key.txt
+```
+
+**macOS and Linux**
+
+```bash
+docker compose run --rm --no-deps -T api python -m app.backups fetch latest < key.txt
+rm key.txt
+```
+
+Instead of `latest`, give a name from `python -m app.backups list`. The backup is decrypted, checked with `PRAGMA integrity_check`, and saved in `./billing-data/restore`. On a new machine, copy `.env` and the `secrets/offsite_backup_*` files there first. Without this server's code, any S3 client and `age --decrypt -i key.txt` do the same.
 
 The database is in WAL mode, so `billing.sqlite3-wal` and `billing.sqlite3-shm` may appear next to it while the stack runs. They belong to the live database. Never copy `billing.sqlite3` alone with a filesystem command while the API is running.
 
-To restore a backup, stop the stack so nothing writes to the database, replace the live file, and remove the leftover WAL files:
+To restore, stop the stack so nothing writes to the database, replace the live file, and remove the leftover WAL files. For a fetched backup, copy from `restore` instead of `backups`:
 
 **Windows (PowerShell)**
 

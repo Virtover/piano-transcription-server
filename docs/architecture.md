@@ -53,7 +53,7 @@ The API streams an upload into `/data/jobs/<job_id>/upload.input`, stopping as s
 
 Uploaded files are untrusted. Only common audio and video container formats are accepted. Playlist and concat formats such as HLS are rejected because they make `ffmpeg` open other files or URLs. `ffprobe` and `ffmpeg` run with `-protocol_whitelist file`, so they cannot open network URLs at all. The worker checks the format again before converting.
 
-Billing backups are pruned by the API after each backup, using `BILLING_BACKUP_RETENTION`.
+Billing backups are thinned out by the API after each backup, and optionally copied off-site; see [Billing database backups](configuration.md#-billing-database-backups).
 
 ### ⚡ Crashes and power cuts
 
@@ -68,7 +68,7 @@ Redis started with the append-only file on, over a volume that has only a snapsh
 docker compose exec redis redis-cli config set appendonly yes
 ```
 
-None of this protects against losing the disk or the machine. For that, copy the billing backups elsewhere; see [Billing database backups](configuration.md#-billing-database-backups).
+None of this protects against losing the disk or the machine. For that, turn on [off-site copies](configuration.md#off-site-copies) of the billing backups.
 
 ### 🔁 Planned restarts and shutdowns
 
@@ -98,7 +98,7 @@ Ctrl+C during a countdown cancels it and removes the notice. The script runs `py
 
 ### 🩺 Job diagnostics
 
-Redis job state disappears `RESULT_RETENTION` after a job ends, so each job also has a record in the `job_diagnostics` table of the billing database. Because it is in that database, the hourly billing backups include it. A record is written when the job is queued, starts, is moved between backends, and ends, and holds:
+Redis job state disappears `RESULT_RETENTION` after a job ends, so each job also has a record in the `job_diagnostics` table of the billing database. Because it is in that database, the billing backups include it. A record is written when the job is queued, starts, is moved between backends, and ends, and holds:
 
 * job ID, user ID, source (`url` or `upload`), and the source URL (none for uploads; the file name is not stored),
 * audio duration and reserved cost,

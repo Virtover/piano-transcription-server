@@ -27,21 +27,15 @@ from app.worker.tasks import (
     reconcile_billing,
     recover_active_jobs,
 )
-from app.billing import Billing, prune_backups
+from app.backups import run_backup
+from app.billing import Billing
 
 
 logger = logging.getLogger(__name__)
 
 
 def run_billing_backup() -> None:
-    billing = Billing(settings.billing.database_path)
-    removed = billing.prune_job_diagnostics(settings.billing.job_diagnostics_retention)
-    if removed:
-        logger.info("Removed %d expired job diagnostics records", removed)
-    destination = f"{settings.billing.backup_dir}/billing-{int(time.time())}.sqlite3"
-    billing.backup(destination)
-    for path in prune_backups(settings.billing.backup_dir, settings.billing.backup_retention):
-        logger.info("Removed expired billing backup %s", path.name)
+    run_backup(Billing(settings.billing.database_path))
 
 
 def backup_billing_database() -> None:

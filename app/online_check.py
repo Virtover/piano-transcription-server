@@ -441,6 +441,67 @@ def check_public_address(config, http=requests) -> Result:
     return Result("Public address", "ok", f"{base} reaches this server")
 
 
+# --- Off-site backups --------------------------------------------------------
+
+OFFSITE_HINTS = {
+    "InvalidAccessKeyId": "The access key ID is wrong. Rewrite secrets/offsite_backup_access_key.",
+    "SignatureDoesNotMatch": "The secret access key does not match the access key ID. Rewrite secrets/offsite_backup_secret_key.",
+    "Unauthorized": "The storage keys are wrong. Rewrite both secrets/offsite_backup_* files.",
+    "AccessDenied": "The keys cannot use this bucket. They need to list, read, write, and delete objects in it.",
+    "NoSuchBucket": "No bucket with this name at this endpoint. Check OFFSITE_BACKUP_BUCKET and OFFSITE_BACKUP_ENDPOINT.",
+}
+
+
+def _offsite_failure(step: str, error: Exception) -> Result:
+    code = _error_code(error)
+    if code:
+        return Result("Off-site backups", "fail", f"{step}: {code}", OFFSITE_HINTS.get(code))
+    hint = None
+    if "Endpoint" in type(error).__name__ or "Connect" in type(error).__name__:
+        hint = "The endpoint cannot be reached. Check OFFSITE_BACKUP_ENDPOINT."
+    return Result("Off-site backups", "fail", f"{step}: {type(error).__name__}", hint)
+
+
+def check_offsite(config, store_factory: Callable | None = None) -> Result:
+    """Write, read back, list, and delete a small object, as the backups do."""
+    from app.backups import OFFSITE_PREFIX, OffsiteStore
+
+    try:
+        store = (store_factory or OffsiteStore.from_settings)(config)
+    except Exception as error:
+        return Result("Off-site backups", "fail", str(error))
+
+    key = f"{OFFSITE_PREFIX}online-check-{uuid.uuid4().hex}.txt"
+    try:
+        store.client.put_object(Bucket=store.bucket, Key=key, Body=TEST_BODY)
+    except Exception as error:
+        return _offsite_failure("Upload", error)
+    try:
+        try:
+            body = store.client.get_object(Bucket=store.bucket, Key=key)["Body"].read()
+        except Exception as error:
+            return _offsite_failure("Download", error)
+        if body != TEST_BODY:
+            return Result("Off-site backups", "fail", "Download: the object came back changed")
+        try:
+            count = len(store.backups())
+        except Exception as error:
+            return _offsite_failure("Listing", error)
+    finally:
+        try:
+            store.client.delete_object(Bucket=store.bucket, Key=key)
+            deleted = None
+        except Exception as error:
+            deleted = error
+    if deleted is not None:
+        return _offsite_failure("Delete", deleted)
+    return Result(
+        "Off-site backups",
+        "ok",
+        f"upload, download, listing, and delete work in bucket {store.bucket}; {count} backups there",
+    )
+
+
 # --- Running ----------------------------------------------------------------
 
 def run_checks(config) -> list[Result]:
@@ -459,6 +520,10 @@ def run_checks(config) -> list[Result]:
         results.extend(check_tunnel(config))
     else:
         results.append(Result("Cloudflare Tunnel", "skip", "COMPOSE_PROFILES does not list cloudflare"))
+    if config.offsite.enabled:
+        results.append(check_offsite(config))
+    else:
+        results.append(Result("Off-site backups", "skip", "OFFSITE_BACKUP_BUCKET is not set"))
     return results
 
 

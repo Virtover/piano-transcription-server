@@ -1,6 +1,5 @@
 import hashlib
 import math
-import re
 import sqlite3
 import threading
 import time
@@ -10,7 +9,6 @@ from pathlib import Path
 from app.config import duration_seconds as parse_duration, settings
 
 DELETED_USER_ID = "deleted"
-BACKUP_FILE_PATTERN = re.compile(r"^billing-(\d+)\.sqlite3$")
 TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 # Kinds of minute_ledger entries. Each change to a balance is one entry.
 LEDGER_KINDS = ("purchase", "free", "used", "voided", "admin")
@@ -550,22 +548,6 @@ class InsufficientMinutes(Exception):
 
 def period_seconds() -> int:
     return int(parse_duration(settings.billing.free_minutes_period or "30d", "FREE_MINUTES_PERIOD"))
-
-
-def prune_backups(directory: str, max_age_seconds: float, now: float | None = None) -> list[Path]:
-    """Delete backups older than max_age_seconds. Only files named like the
-    automatic backups are touched; the age comes from the name's timestamp."""
-    backup_dir = Path(directory)
-    if not backup_dir.is_dir():
-        return []
-    cutoff = (time.time() if now is None else now) - max_age_seconds
-    removed = []
-    for path in backup_dir.iterdir():
-        match = BACKUP_FILE_PATTERN.match(path.name)
-        if match and path.is_file() and int(match.group(1)) < cutoff:
-            path.unlink()
-            removed.append(path)
-    return removed
 
 
 def deleted_user_target(user_id: str) -> str:

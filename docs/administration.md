@@ -30,6 +30,7 @@ The first thing to look at when users say the server is slow:
 * **Remote:** remote slots in use out of the limit, when outsourcing is on.
 * **Queues:** messages in the local and remote queues that are not finished yet, including ones a worker has taken, and dead-lettered messages.
 * **Disk:** space used by job files, and space free on the data volume.
+* **Backups:** how many billing backups are on this disk and the age of the newest; with off-site copies on, when the last copy succeeded, or why it failed.
 * **Maintenance:** a pending restart or shutdown, from `scripts/server.py`.
 * **Controls:** active [limits](#-limits).
 

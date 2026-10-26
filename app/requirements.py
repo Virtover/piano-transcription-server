@@ -381,8 +381,75 @@ def tunnel_sections(config) -> list[Section]:
     ]
 
 
+def _days(seconds: float) -> str:
+    return f"{seconds / (24 * 60 * 60):g} days"
+
+
+def offsite_sections(config) -> list[Section]:
+    from app.backups import RetentionPolicy
+
+    enabled = config.offsite.enabled
+    note = (
+        "enabled (OFFSITE_BACKUP_BUCKET is set)"
+        if enabled
+        else "not enabled; set OFFSITE_BACKUP_BUCKET to keep encrypted billing backups off this machine"
+    )
+    endpoint = _or_placeholder(config.offsite.endpoint, "OFFSITE_BACKUP_ENDPOINT")
+    bucket = _or_placeholder(config.offsite.bucket, "OFFSITE_BACKUP_BUCKET")
+    longest = RetentionPolicy.from_settings(config.billing).longest()
+    return [
+        Section(
+            "Off-site backups",
+            "S3-compatible object storage, for example Cloudflare R2 or Backblaze B2",
+            enabled,
+            note,
+            [
+                Requirement(
+                    "Bucket",
+                    f"{bucket}, used for nothing else, not the outsourcing bucket",
+                    "Billing backups are copied here, encrypted, after every backup.",
+                    True,
+                ),
+                Requirement("S3 endpoint URL", endpoint, "The server uploads, lists, and deletes backups here.", True),
+                Requirement(
+                    "Credentials",
+                    "an access key ID and secret key that can list, read, write, and delete objects in this bucket "
+                    "only, saved as secrets/offsite_backup_access_key and secrets/offsite_backup_secret_key",
+                    "The server deletes the backups its retention steps no longer keep. Keys of their own mean the "
+                    "keys used for every outsourced job cannot reach the backups.",
+                    True,
+                ),
+                Requirement(
+                    "Public access",
+                    "none",
+                    "The backups are encrypted, but nobody needs to read them over the web.",
+                ),
+                Requirement(
+                    "Automatic deletion",
+                    f"none, or after more than {_days(longest)}",
+                    "The server deletes what BILLING_BACKUP_KEEP_* and BILLING_BACKUP_RETENTION no longer keep; "
+                    "an earlier deletion rule would remove the oldest history.",
+                ),
+                Requirement(
+                    "Location",
+                    "in the EU or EEA if your users are there, in a different place than this machine",
+                    "The backups hold user emails and purchase records, personal data under GDPR. A copy in the "
+                    "same building does not survive a fire or flood.",
+                ),
+                Requirement(
+                    "Encryption key",
+                    "an age key pair: the public key in OFFSITE_BACKUP_RECIPIENT, the private key stored away from "
+                    "this machine, for example in a password manager",
+                    "Backups are encrypted before upload, so neither the storage provider nor a leaked storage key "
+                    "can read them. Only the private key can, and a backup cannot be restored without it.",
+                ),
+            ],
+        )
+    ]
+
+
 def build_requirements(config) -> list[Section]:
-    return outsourcing_sections(config) + google_sections(config) + tunnel_sections(config)
+    return outsourcing_sections(config) + google_sections(config) + tunnel_sections(config) + offsite_sections(config)
 
 
 def format_requirements(sections: list[Section]) -> list[str]:

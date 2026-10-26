@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 SECRETS_DIR = "/run/secrets"
 # Unknown variables with these prefixes are reported as possible typos.
-CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_")
+CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_", "OFFSITE_")
 MIN_SERVER_PASSWORD_LENGTH = 12
 # Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
 COMPOSE_VARIABLES = {"API_BIND_ADDRESS"}
@@ -84,6 +84,10 @@ def _duration_or_zero(value: Any) -> float:
     return _duration(value, allow_zero=True)
 
 
+def _optional_duration(value: Any) -> float | None:
+    return None if value is None else _duration(value)
+
+
 def _duration_text(value: Any) -> Any:
     if value is not None:
         duration_seconds(value, "the value")
@@ -112,6 +116,8 @@ def _auto_or_positive_int(value: Any) -> int | None:
 Duration = Annotated[float, BeforeValidator(_duration)]
 # The same, but 0s is allowed.
 DurationOrZero = Annotated[float, BeforeValidator(_duration_or_zero)]
+# The same, or None when unset.
+OptionalDuration = Annotated[float | None, BeforeValidator(_optional_duration)]
 # The original s/m/h/d/w string, validated. Used where the API returns it.
 DurationText = Annotated[str | None, BeforeValidator(_duration_text)]
 # None means `auto`.
@@ -194,8 +200,16 @@ class BillingSettings(BaseSettings):
     products: dict[str, int] = Field(default_factory=dict)
     database_path: str = "/billing/billing.sqlite3"
     backup_dir: str = "/billing/backups"
-    backup_interval: Duration = 60 * 60.0
-    backup_retention: Duration = 30 * 24 * 60 * 60.0
+    backup_interval: Duration = 15 * 60.0
+    # Backups kept, by age: every one, then one per hour, day, week, and
+    # month (UTC). 0 turns a step off. See app/backups.py.
+    backup_keep_all: DurationOrZero = 24 * 60 * 60.0
+    backup_keep_hourly: DurationOrZero = 2 * 24 * 60 * 60.0
+    backup_keep_daily: DurationOrZero = 14 * 24 * 60 * 60.0
+    backup_keep_weekly: DurationOrZero = 8 * 7 * 24 * 60 * 60.0
+    backup_keep_monthly: DurationOrZero = 0.0
+    # Optional upper limit: older backups are deleted whatever the steps say.
+    backup_retention: OptionalDuration = None
     job_diagnostics_retention: Duration = 30 * 24 * 60 * 60.0
     free_minutes: int | None = Field(default=None, ge=0, validation_alias="FREE_MINUTES")
     free_minutes_period: DurationText = Field(default=None, validation_alias="FREE_MINUTES_PERIOD")
@@ -227,6 +241,8 @@ class SecretSettings(BaseSettings):
     runpod_read_api_key: SecretStr | None = None
     outsource_storage_access_key: SecretStr | None = None
     outsource_storage_secret_key: SecretStr | None = None
+    offsite_backup_access_key: SecretStr | None = None
+    offsite_backup_secret_key: SecretStr | None = None
     # Optional. When present, every request except /health and /ready needs it.
     server_password: SecretStr | None = None
 
@@ -255,6 +271,24 @@ class OutsourceSettings(BaseSettings):
     storage_region: str = "auto"
     # Largest audio file the remote handler downloads.
     max_audio_mb: float = Field(default=512, gt=0)
+
+
+class OffsiteSettings(BaseSettings):
+    """Optional encrypted copies of the billing backups in S3-compatible
+    storage, away from this machine. On when the bucket is set."""
+
+    model_config = _group_config("OFFSITE_BACKUP_")
+
+    endpoint: str | None = None
+    bucket: str | None = None
+    region: str = "auto"
+    # The age public key (age1...) backups are encrypted to. The private key
+    # is kept elsewhere; this server never needs it.
+    recipient: str | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.bucket)
 
 
 class TunnelSettings(BaseSettings):
@@ -303,6 +337,7 @@ GROUPS: dict[str, type[BaseSettings]] = {
     "google_play": GooglePlaySettings,
     "outsource": OutsourceSettings,
     "runpod": RunPodSettings,
+    "offsite": OffsiteSettings,
     "tunnel": TunnelSettings,
     "secrets": SecretSettings,
 }
@@ -319,6 +354,7 @@ class Settings:
     google_play: GooglePlaySettings
     outsource: OutsourceSettings
     runpod: RunPodSettings
+    offsite: OffsiteSettings
     tunnel: TunnelSettings
     secrets: SecretSettings
     secrets_dir: str = SECRETS_DIR
@@ -523,6 +559,8 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
                 json.loads(account)
             except ValueError:
                 problems.append("The Google Play service-account secret is not valid JSON")
+    if role in ("api", "all") and config.offsite.enabled:
+        problems.extend(offsite_problems(config))
     if role == "all" and config.tunnel.enabled:
         # Only cloudflared reads the token, so only `check` looks for it.
         token = Path(config.secrets_dir) / TUNNEL_TOKEN_FILE
@@ -531,6 +569,33 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
                 f"COMPOSE_PROFILES={TUNNEL_PROFILE} needs the tunnel token in the secret file "
                 f"{config.secrets_dir}/{TUNNEL_TOKEN_FILE}"
             )
+    return problems
+
+
+def offsite_problems(config: "Settings") -> list[str]:
+    offsite = config.offsite
+    problems = []
+    if not offsite.endpoint:
+        problems.append("OFFSITE_BACKUP_ENDPOINT is required when OFFSITE_BACKUP_BUCKET is set")
+    if not offsite.recipient:
+        problems.append(
+            "OFFSITE_BACKUP_RECIPIENT is required when OFFSITE_BACKUP_BUCKET is set: the age public key "
+            "backups are encrypted to. Create a key pair with: "
+            "docker compose run --rm --no-deps api python -m app.backups keygen"
+        )
+    else:
+        try:
+            from pyrage import x25519
+
+            x25519.Recipient.from_str(offsite.recipient.strip())
+        except ImportError:
+            # Images without backups (the worker) do not install it.
+            pass
+        except Exception:
+            problems.append("OFFSITE_BACKUP_RECIPIENT is not an age public key (age1...)")
+    for name in ("offsite_backup_access_key", "offsite_backup_secret_key"):
+        if getattr(config.secrets, name) is None:
+            problems.append(f"OFFSITE_BACKUP_BUCKET needs the secret file {config.secrets_dir}/{name}")
     return problems
 
 
@@ -549,6 +614,12 @@ def configuration_warnings(config: "Settings", environment: dict[str, str]) -> l
                 "Port 8000 is published on every network interface, so the server is also reachable without the "
                 "tunnel's HTTPS. Set API_BIND_ADDRESS=127.0.0.1 unless devices on your network connect directly."
             )
+    offsite, outsource = config.offsite, config.outsource
+    if offsite.enabled and (offsite.endpoint, offsite.bucket) == (outsource.storage_endpoint, outsource.storage_bucket):
+        warnings.append(
+            "Off-site backups use the outsourcing bucket. Use a bucket and keys of their own, so the keys used "
+            "for every outsourced job cannot delete the backups."
+        )
     return warnings
 
 
@@ -594,7 +665,7 @@ def format_duration(seconds: float) -> str:
 
 def is_duration(group: type[BaseSettings], field: str) -> bool:
     return any(
-        getattr(item, "func", None) in (_duration, _duration_or_zero)
+        getattr(item, "func", None) in (_duration, _duration_or_zero, _optional_duration)
         for item in group.model_fields[field].metadata
     )
 

@@ -214,9 +214,12 @@ def test_public_address_keeps_the_password(tunnel):
 def test_tunnel_is_checked_only_when_enabled(default_settings, monkeypatch):
     monkeypatch.setattr(online_check, "check_tunnel", lambda config: [online_check.Result("Cloudflare Tunnel", "ok", "")])
 
-    assert online_check.run_checks(default_settings)[-1].status == "skip"
+    def tunnel_result(config):
+        return next(result for result in online_check.run_checks(config) if result.name == "Cloudflare Tunnel")
+
+    assert tunnel_result(default_settings).status == "skip"
     default_settings.tunnel.compose_profiles = "cloudflare"
-    assert online_check.run_checks(default_settings)[-1].status == "ok"
+    assert tunnel_result(default_settings).status == "ok"
 
 
 # --- Requirements -------------------------------------------------------------

@@ -5,7 +5,7 @@ import shutil
 import time
 from pathlib import Path
 
-from app import controls, job_limits, maintenance
+from app import backups, controls, job_limits, maintenance
 from app.admin.common import ago, size, span
 from app.config import settings
 from app.outsource import routing
@@ -78,6 +78,13 @@ def collect() -> dict:
             "total_bytes": usage.total,
         }
 
+    local_backups = backups.local_backups(settings.billing.backup_dir)
+    backup_state = {
+        "count": len(local_backups),
+        "newest_at": max(local_backups) if local_backups else None,
+        "offsite": backups.offsite_status(tasks.billing),
+    }
+
     notice = maintenance.current(redis)
     paused = controls.paused(redis)
     links_off = controls.links_off(redis)
@@ -90,6 +97,7 @@ def collect() -> dict:
         "remote": remote,
         "queues": queues,
         "disk": disk,
+        "backups": backup_state,
         "maintenance": notice.as_response().model_dump() if notice else None,
         "controls": {
             "paused": paused.value if paused else None,
@@ -141,6 +149,24 @@ def render(state: dict) -> str:
             f"Disk          jobs use {size(disk['jobs_bytes'])}; {size(disk['free_bytes'])} free "
             f"of {size(disk['total_bytes'])} on {disk['path']}"
         )
+
+    backup_state = state["backups"]
+    if backup_state["newest_at"] is None:
+        text = "none yet"
+    else:
+        text = f"{backup_state['count']} local, newest {ago(backup_state['newest_at'])}"
+    offsite = backup_state["offsite"]
+    if offsite is None:
+        text += "; off-site off"
+    elif offsite["failed_at"]:
+        text += f"; off-site copy FAILED {ago(offsite['failed_at'])}: {offsite['error']}"
+        if offsite["succeeded_at"]:
+            text += f" (last success {ago(offsite['succeeded_at'])})"
+    elif offsite["succeeded_at"]:
+        text += f"; off-site copy {ago(offsite['succeeded_at'])}"
+    else:
+        text += "; off-site: no copy yet"
+    lines.append("Backups       " + text)
 
     notice = state["maintenance"]
     if notice is None:
