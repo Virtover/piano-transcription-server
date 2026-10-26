@@ -21,7 +21,6 @@ from app.transcription.audio import remove_audio_files
 from app.transcription.cancellation import TranscriptionCancelled
 
 
-JOB_TTL = 60 * 60  # 1 hour
 # Uploaded files are stored in the job directory under this name.
 UPLOAD_FILE_NAME = "upload.input"
 LOCAL_QUEUE = "default"
@@ -48,6 +47,11 @@ redis = Redis.from_url(
     decode_responses=True,
 )
 billing = Billing()
+
+
+def job_ttl() -> int:
+    """Seconds a finished job, and its MIDI file, stay retrievable."""
+    return int(settings.limits.result_retention)
 
 
 def job_key(job_id: str) -> str:
@@ -169,7 +173,7 @@ def complete_job(job_id: str, result: Path) -> bool:
                         "result": str(result),
                     },
                 )
-                pipe.expire(key, JOB_TTL)
+                pipe.expire(key, job_ttl())
                 pipe.execute()
                 return True
         except WatchError:
@@ -240,7 +244,7 @@ def cancel_job(job_id: str, charge: bool = True) -> str | None:
                         "progress": job.get("progress", "0.0"),
                     },
                 )
-                pipe.expire(key, JOB_TTL)
+                pipe.expire(key, job_ttl())
                 pipe.execute()
                 break
         except WatchError:
@@ -307,7 +311,7 @@ def fail_abandoned_job(job_id: str, reason: str) -> bool:
                         "error": reason,
                     },
                 )
-                pipe.expire(key, JOB_TTL)
+                pipe.expire(key, job_ttl())
                 pipe.execute()
                 break
         except WatchError:
@@ -367,7 +371,7 @@ def requeue_after_restart(job_id: str, job: dict[str, str], reason: str) -> None
         logger.exception("Could not requeue job %s after the restart", job_id)
         routing.mark_finished(redis, backend, job_id)
         update_job(job_id, status="failed", error=reason)
-        redis.expire(job_key(job_id), JOB_TTL)
+        redis.expire(job_key(job_id), job_ttl())
         record_job(job_id)
         if job.get("user_id"):
             billing.release(job_id)
@@ -507,7 +511,7 @@ def run_job(
 
         redis.expire(
             job_key(job_id),
-            JOB_TTL,
+            job_ttl(),
         )
     finally:
         if claimed:
@@ -535,7 +539,7 @@ def finish_cancelled(job_id: str, output_dir: Path) -> None:
     record_job(job_id)
     redis.expire(
         job_key(job_id),
-        JOB_TTL,
+        job_ttl(),
     )
 
 

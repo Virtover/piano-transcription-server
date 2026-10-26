@@ -58,7 +58,8 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 | `MAX_ACTIVE_JOBS` | `50` | Transcriptions being uploaded, checked, queued, or run at once, from all users. Further requests get `429`. Bounds disk use: each upload can take `MAX_UPLOAD_SIZE_MB`. |
 | `MAX_ACTIVE_JOBS_PER_USER` | `5` | The same for one signed-in user. Only applies with billing; without it, all clients are one anonymous user and only `MAX_ACTIVE_JOBS` applies. |
 | `SOURCE_URL_ALLOWED_HOSTS` | see below | JSON list of hosts accepted as transcription sources. Subdomains match too. |
-| `CLEANUP_INTERVAL` | `10m` | How often the cleanup service deletes expired job files. |
+| `RESULT_RETENTION` | `1h` | How long a finished job can be retrieved: its status and, when completed, its MIDI file. Counted from when the job completed, failed, or was cancelled. Then the job is gone (`404`) and its files are deleted at the next cleanup. `GET /api/server-info` returns it as `result_retention_seconds`. Longer periods keep more files on disk. |
+| `CLEANUP_INTERVAL` | `10m` | How often the cleanup service deletes the files of expired jobs. A file can stay on disk up to this long after its job expires, but cannot be downloaded. |
 
 ### Worker
 

@@ -59,6 +59,8 @@ class ServerInfoResponse(BaseModel):
     billing_provider: str
     offers: list[Offer]
     cleanup_interval_seconds: int
+    # How long a finished job's status and MIDI file can be retrieved.
+    result_retention_seconds: int
     max_video_length_minutes: int | None = None
     max_upload_size_mb: float
     # only present when billing is enabled
@@ -178,6 +180,7 @@ def server_info() -> ServerInfoResponse:
             if product_id in product_ids
         ],
         cleanup_interval_seconds=int(settings.cleanup.interval),
+        result_retention_seconds=int(settings.limits.result_retention),
         max_video_length_minutes=settings.limits.max_video_length_minutes,
         max_upload_size_mb=settings.limits.max_upload_size_mb,
     )

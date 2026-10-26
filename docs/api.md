@@ -179,7 +179,7 @@ Jobs survive both: running jobs get time to finish first, and queued jobs stay q
 
 ## 💳 Billing endpoints
 
-* `GET /api/server-info` returns billing provider, available offers, cleanup interval, free-minute policy, maximum video length, the upload size limit (`max_upload_size_mb`), and a pending restart or shutdown (`maintenance`, see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns)).
+* `GET /api/server-info` returns billing provider, available offers, how long finished jobs and their MIDI files can be retrieved (`result_retention_seconds`), the cleanup interval, free-minute policy, maximum video length, the upload size limit (`max_upload_size_mb`), and a pending restart or shutdown (`maintenance`, see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns)).
 * `GET /api/billing/cost?source_url=...` reads video duration and returns the transcription cost before submission. For a file, use `?duration_seconds=...` instead. Pass exactly one of the two. When billing is enabled, it needs the `Authorization` header like other requests.
 * `GET /api/billing/balance` returns the authenticated user's balance and free-minute timing. `minutes` is negative when a refunded purchase's minutes were already used; see [Refunds and chargebacks](google-play-billing.md#-refunds-and-chargebacks). Show the user that they owe minutes, and offer to buy more.
 * `POST /api/billing/google-play/verify` verifies and credits a completed Google Play purchase.

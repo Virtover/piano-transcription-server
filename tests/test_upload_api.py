@@ -271,7 +271,7 @@ def test_cleanup_does_not_remove_file_during_upload(api_context, upload, monkeyp
     def probe_while_cleanup_runs(path, measure=True, max_seconds=None):
         job = tasks.redis.hgetall(tasks.job_key(Path(path).parent.name))
         assert job["status"] == "uploading"
-        assert 0 < tasks.redis.ttl(tasks.job_key(Path(path).parent.name)) <= tasks.JOB_TTL
+        assert 0 < tasks.redis.ttl(tasks.job_key(Path(path).parent.name)) <= transcriptions.PLACEHOLDER_TTL
         tasks.cleanup_expired_jobs()
         assert Path(path).exists()
         return 130.0

@@ -43,7 +43,7 @@ Job files are stored under `/data/jobs/<job_id>/`. Queued and processing jobs do
 
 A worker holds a lease on the job it runs: a Redis key it renews every 15 seconds and that expires after 60. A processing job whose lease has expired lost its worker, for example to a crash. The API checks every 30 seconds and at startup: such a job is marked failed, its billing reservation is released, and its partial files are removed. A job whose worker is still running keeps running, so restarting only the API interrupts nothing. On API startup, queued jobs are sent to their queue again and keep their reservation, so a restart does not lose them. A message for a queued job left over from before the restart is harmless, because only one delivery can claim a job.
 
-Completed and failed jobs receive a one-hour Redis TTL. The cleanup service periodically removes job directories whose Redis keys no longer exist, so files can remain briefly after the TTL expires.
+Completed, failed, and cancelled jobs receive a Redis TTL of `RESULT_RETENTION` (default `1h`): until then their status and MIDI file can be retrieved. Every `CLEANUP_INTERVAL`, the cleanup service removes job directories whose Redis keys no longer exist, so a file can stay on disk, though no longer downloadable, for up to that long after its job expires.
 
 Deleting an account removes the user's Redis jobs and job directories immediately. A worker still processing one of those jobs sees it as cancelled at its next progress check and stops.
 
@@ -98,7 +98,7 @@ Ctrl+C during a countdown cancels it and removes the notice. The script runs `py
 
 ### 🩺 Job diagnostics
 
-Redis job state disappears an hour after a job ends, so each job also has a record in the `job_diagnostics` table of the billing database. Because it is in that database, the hourly billing backups include it. A record is written when the job is queued, starts, is moved between backends, and ends, and holds:
+Redis job state disappears `RESULT_RETENTION` after a job ends, so each job also has a record in the `job_diagnostics` table of the billing database. Because it is in that database, the hourly billing backups include it. A record is written when the job is queued, starts, is moved between backends, and ends, and holds:
 
 * job ID, user ID, source (`url` or `upload`), and the source URL (none for uploads; the file name is not stored),
 * audio duration and reserved cost,

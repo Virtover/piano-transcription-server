@@ -163,3 +163,12 @@ def test_google_oauth_client_ids_use_configured_values(api_context):
     ]
 
     assert auth.google_oauth_client_ids() == settings.auth.client_ids
+
+
+def test_server_info_tells_how_long_results_are_kept(api_context):
+    client, settings, _ = api_context
+
+    assert client.get("/api/server-info").json()["result_retention_seconds"] == 60 * 60
+
+    settings.limits.result_retention = "7d"
+    assert client.get("/api/server-info").json()["result_retention_seconds"] == 7 * 24 * 60 * 60

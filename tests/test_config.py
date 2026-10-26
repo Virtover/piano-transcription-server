@@ -445,3 +445,10 @@ def test_runpod_secrets_cannot_come_from_env(tmp_path, monkeypatch):
 def test_invalid_outsourcing_values(tmp_path, line):
     with pytest.raises(ConfigError, match=line.split("=")[0]):
         load(tmp_path, line + "\n")
+
+
+def test_result_retention_is_a_duration(tmp_path):
+    assert load(tmp_path, "").limits.result_retention == 60 * 60
+    assert load(tmp_path, "RESULT_RETENTION=7d\n").limits.result_retention == 7 * 24 * 60 * 60
+    with pytest.raises(ConfigError, match="RESULT_RETENTION"):
+        load(tmp_path, "RESULT_RETENTION=forever\n")

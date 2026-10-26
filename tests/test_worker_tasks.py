@@ -56,7 +56,7 @@ def test_successful_job_completes_and_charges(worker, monkeypatch):
     assert result["progress"] == "1.0"
     assert result["title"] == "Nocturne"
     assert Path(result["result"]) == Path(settings.service.data_dir) / "jobs" / "job" / "transcription.mid"
-    assert 0 < tasks.redis.ttl(tasks.job_key("job")) <= tasks.JOB_TTL
+    assert 0 < tasks.redis.ttl(tasks.job_key("job")) <= tasks.job_ttl()
     assert billing.get_balance("user") == 6
 
 
@@ -394,3 +394,40 @@ def test_moved_job_keeps_the_lease_of_the_worker_it_moved_to(worker):
     assert tasks.redis.get(tasks.lease_key("job")) == second.token
     second.stop()
     assert not tasks.redis.exists(tasks.lease_key("job"))
+
+
+def test_result_is_retrievable_for_the_retention_period(api_context, monkeypatch):
+    client, settings, _ = api_context
+    settings.limits.result_retention = "2d"
+    job_id = client.post("/api/transcriptions", json={"source_url": "https://example.com/video"}).json()["job_id"]
+
+    def transcribe_source(output_dir, **kwargs):
+        midi = output_dir / "transcription.mid"
+        midi.write_bytes(b"MThd")
+        return midi
+
+    install_pipeline(monkeypatch, transcribe_source)
+    tasks.transcribe_job.fn(job_id, "https://example.com/video")
+
+    assert 24 * 60 * 60 < tasks.redis.ttl(tasks.job_key(job_id)) <= 2 * 24 * 60 * 60
+    assert client.get(f"/api/transcriptions/{job_id}/midi").content == b"MThd"
+    # The cleanup service keeps the file while the job is retrievable.
+    tasks.cleanup_expired_jobs()
+    assert client.get(f"/api/transcriptions/{job_id}/midi").status_code == 200
+
+    # Once the retention period ends, the job expires and its file is deleted.
+    tasks.redis.delete(tasks.job_key(job_id))
+    assert client.get(f"/api/transcriptions/{job_id}/midi").status_code == 404
+    tasks.cleanup_expired_jobs()
+    assert not (Path(settings.service.data_dir) / "jobs" / job_id).exists()
+
+
+@pytest.mark.parametrize("charge", [True, False])
+def test_cancelled_job_is_kept_for_the_retention_period(worker, charge):
+    settings, billing = worker
+    settings.limits.result_retention = "1d"
+    queue_job(billing)
+
+    tasks.cancel_job("job", charge=charge)
+
+    assert 60 * 60 < tasks.redis.ttl(tasks.job_key("job")) <= 24 * 60 * 60

@@ -190,7 +190,7 @@ def restore(job_id: str, fields: dict[str, str], user_id: str) -> None:
     with tasks.redis.pipeline() as pipe:
         pipe.delete(key)
         pipe.hset(key, mapping=fields)
-        pipe.expire(key, tasks.JOB_TTL)
+        pipe.expire(key, tasks.job_ttl())
         pipe.execute()
     job_limits.release(tasks.redis, job_id, user_id)
     tasks.record_job(job_id)

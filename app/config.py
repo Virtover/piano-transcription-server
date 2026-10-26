@@ -149,6 +149,8 @@ class LimitsSettings(BaseSettings):
     max_active_jobs: int = Field(default=50, ge=1)
     # The same per signed-in user; only applies with billing.
     max_active_jobs_per_user: int = Field(default=5, ge=1)
+    # How long a finished job's status and MIDI file can be retrieved.
+    result_retention: Duration = 60 * 60.0
     source_url_allowed_hosts: list[str] = [
         "youtube.com", "youtu.be", "youtube-nocookie.com",
         "vimeo.com", "soundcloud.com", "bandcamp.com", "dailymotion.com",

@@ -19,13 +19,17 @@ from app.auth import AuthenticatedUser, current_user
 from app.media import UnsupportedMedia, probe_audio
 from app.outsource import routing
 from app.worker.tasks import (
-    JOB_TTL,
     UPLOAD_FILE_NAME,
     cancel_job,
     job_key,
     record_job,
     send_job,
 )
+
+
+# A placeholder for a job being uploaded or checked expires after this, in
+# case the API stops before the job is queued.
+PLACEHOLDER_TTL = 60 * 60
 
 
 router = APIRouter(
@@ -136,7 +140,7 @@ def hold_place(job_id: str, user_id: str, status: str) -> None:
     against the job limits. The placeholder expires if the API stops first."""
     key = job_key(job_id)
     redis.hset(key, mapping={"status": status, "user_id": user_id})
-    redis.expire(key, JOB_TTL)
+    redis.expire(key, PLACEHOLDER_TTL)
     try:
         job_limits.acquire(redis, job_id, user_id, job_key)
     except job_limits.TooManyJobs as error:
