@@ -35,7 +35,7 @@ def current() -> dict:
         "per_user_limit": {"limit": int(per_user.value), "expires_in": per_user.expires_in} if per_user else None,
         "configured_per_user_limit": settings.limits.max_active_jobs_per_user,
         "blocked": blocked,
-        "video_sites": video_sites.state(),
+        "video_sites": video_sites.states(),
     }
 
 
@@ -67,12 +67,15 @@ def links_on(actor: str, reason: str | None = None) -> dict:
     return {"changed": changed}
 
 
-def reset_video_sites(actor: str, reason: str | None = None) -> dict:
-    """Accept links again after a video site refused this server, before its
-    cooldown ends, and start the next cooldown from VIDEO_SITE_COOLDOWN."""
-    changed = video_sites.reset()
-    audit(actor, "limits.sites_reset", reason=reason)
-    return {"changed": changed}
+def reset_video_sites(site: str | None, actor: str, reason: str | None = None) -> dict:
+    """Accept links to site, or to every site, again before a cooldown ends,
+    and start the next cooldown from the first again. site is a host such as
+    youtube.com or youtu.be. changed lists the sites that were refused or
+    recovering."""
+    name = video_sites.canonical_site(site) if site else None
+    changed = video_sites.reset(name)
+    audit(actor, "limits.sites_reset", detail=name or "all sites", reason=reason)
+    return {"site": name, "changed": changed}
 
 
 def block(who: str, seconds: float | None, actor: str, reason: str | None = None) -> dict:
@@ -127,7 +130,7 @@ def run_show(args) -> None:
         print(f"Per-user limit:  {per_user['limit']}{lasting(per_user['expires_in'])} (MAX_ACTIVE_JOBS_PER_USER is {configured})")
     else:
         print(f"Per-user limit:  {configured} (MAX_ACTIVE_JOBS_PER_USER)")
-    print(f"Video sites:     {render_video_sites(data['video_sites'])}")
+    print(f"Video sites:     {render_video_sites(data['video_sites'], indent=17)}")
     print(f"Blocked users:   {len(data['blocked']) or 'none'}")
     for user in data["blocked"]:
         print(f"  {user['email'] or user['user_id']}{lasting(user['expires_in'])}: {user['reason'] or 'no reason given'}")
@@ -153,12 +156,11 @@ def run_links(args) -> None:
 
 
 def run_sites(args) -> None:
-    result = reset_video_sites(args.by, args.reason)
-    print(
-        "Video links are accepted again; the next refusal starts a new cooldown"
-        if result["changed"]
-        else "No video site was refusing this server"
-    )
+    result = reset_video_sites(args.site, args.by, args.reason)
+    if result["changed"]:
+        print(f"Links to {', '.join(result['changed'])} are accepted again; the next refusal starts a new cooldown")
+    else:
+        print(f"{result['site'] or 'No video site'} was not refusing links")
 
 
 def run_block(args) -> None:

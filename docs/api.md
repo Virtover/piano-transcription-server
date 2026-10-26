@@ -148,15 +148,17 @@ An administrator can also stop submissions for a while, without a restart (see [
 * `503` for every new transcription while submissions are paused, and for links and their cost while links are turned off; uploads are still accepted then. `Retry-After` is sent when the end is known.
 * `403` for a blocked account, on new transcriptions and link costs. Its jobs, balance, and account deletion still work.
 
-Checking a link's length runs a video download tool. Only a few checks run at once, and they start at least `VIDEO_SITE_INTERVAL` (default 3 seconds) apart. When no check can start within 10 seconds, `POST /api/transcriptions` and `GET /api/billing/cost?source_url=...` answer `503` with `Retry-After` and the error code `source_busy`. A check is reused for 5 minutes, so submitting a link right after asking its cost does not run it again. Requests for a link that is being checked wait for that check, and a video the site says cannot be read is answered from memory for a minute.
+Checking a link's length runs a video download tool. Only a few checks run at once, and checks of links to the same site start at least `VIDEO_SITE_INTERVAL` (default 3 seconds) apart. When no check can start within 10 seconds, `POST /api/transcriptions` and `GET /api/billing/cost?source_url=...` answer `503` with `Retry-After` and the error code `source_busy`. A check is reused for 5 minutes, so submitting a link right after asking its cost does not run it again. Requests for a link that is being checked wait for that check. A video the site says cannot be read is answered from memory for a minute, and a link whose site timed out for 30 seconds.
 
 ### 🛑 When a video site refuses the server
 
 A video site that receives too many requests from one address rate-limits it, asks it to prove it is not a bot, or blocks it. Asking again makes this worse, so the server stops asking:
 
-* The first such answer, to the API or a worker, turns video links off for every user for `VIDEO_SITE_COOLDOWN` (default 30 minutes). Each further incident in a row doubles the time, up to `VIDEO_SITE_MAX_COOLDOWN` (default 1 day).
-* Meanwhile, links and their cost are refused with `503`, `Retry-After` with the time left, and the error code `source_temporarily_unavailable`. Link jobs already queued fail with the same code without contacting the site, and their minutes are given back. Uploads work as usual.
+* The first such answer, to the API or a worker, turns links to that site off for every user for `VIDEO_SITE_COOLDOWN` (default 30 minutes). Each further incident in a row doubles the time, up to `VIDEO_SITE_MAX_COOLDOWN` (default 1 day). Links to other sites are not affected. YouTube's links, including `youtu.be`, count as one site.
+* A site that times out 3 times within 5 minutes is not asked for `VIDEO_SITE_TIMEOUT_COOLDOWN` (default 2 minutes), doubling while it keeps timing out, up to `VIDEO_SITE_COOLDOWN`. One timeout answers only that request, with `Retry-After: 30`.
+* Meanwhile, links to the site and their cost are refused with `503`, `Retry-After` with the time left, and the error code `source_temporarily_unavailable`. Link jobs already queued fail with the same code without contacting the site, and their minutes are given back. Uploads work as usual.
 * When the time is up, links are read one at a time until one succeeds, so the users who waited do not reach the site all at once.
+* At most `VIDEO_SITE_MAX_DOWNLOADS` (default 2) downloads from one site run at once; further jobs wait in the queue for a place.
 * Failed jobs are never retried on their own. An administrator sees the state in `status`, and can end it early with `limits sites reset`; see [Administration](administration.md#-limits).
 
 In the app, offer an upload when you get `source_temporarily_unavailable`, and do not retry the link before `Retry-After`.

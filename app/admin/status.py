@@ -99,7 +99,7 @@ def collect() -> dict:
         "disk": disk,
         "backups": backup_state,
         "maintenance": notice.as_response().model_dump() if notice else None,
-        "video_sites": video_sites.state(),
+        "video_sites": video_sites.states(),
         "controls": {
             "paused": paused.value if paused else None,
             "links_off": links_off.value if links_off else None,
@@ -176,7 +176,7 @@ def render(state: dict) -> str:
         reason = f" ({notice['reason']})" if notice.get("reason") else ""
         lines.append(f"Maintenance   {notice['message']}{reason}")
 
-    lines.append("Video sites   " + render_video_sites(state["video_sites"]))
+    lines.append("Video sites   " + render_video_sites(state["video_sites"], indent=14))
 
     active = []
     controls_state = state["controls"]
@@ -192,21 +192,30 @@ def render(state: dict) -> str:
     return "\n".join(lines)
 
 
-def render_video_sites(sites: dict) -> str:
-    refused = sites["refused"]
-    if refused is not None:
-        left = f" for {span(refused['expires_in'])}" if refused["expires_in"] else ""
-        text = (
-            f"LINKS REFUSED{left}: a site refused this server ({refused['reason']}), "
-            f"incident {sites['incidents_in_a_row']} in a row"
-        )
-    elif sites["recovering"]:
-        text = "recovering: one link at a time until one is read"
-    else:
-        text = "answering"
-    if sites["last_incident_at"] is not None:
-        text += f"; incidents so far: {sites['incidents']}, last {ago(sites['last_incident_at'])}"
-    return text
+def render_video_sites(sites: list[dict], indent: int) -> str:
+    """One line per site with something to show, from video_sites.states()."""
+    lines = []
+    for site in sites:
+        refused = site["refused"]
+        if refused is not None:
+            left = f" for {span(refused['expires_in'])}" if refused["expires_in"] else ""
+            if refused["kind"] == "limited":
+                why, in_a_row = "it refused this server", site["incidents_in_a_row"]
+            else:
+                why, in_a_row = "it is not answering", site["timeout_incidents_in_a_row"]
+            text = f"LINKS REFUSED{left}: {why} ({refused['reason']}), incident {in_a_row} in a row"
+        elif site["recovering"]:
+            text = "recovering: one link at a time until one is read"
+        elif site["downloads"] or site["last_incident_at"] is not None:
+            text = "answering"
+        else:
+            continue
+        if site["downloads"]:
+            text += f"; {site['downloads']} downloading"
+        if site["last_incident_at"] is not None:
+            text += f"; incidents so far: {site['incidents']}, last {ago(site['last_incident_at'])}"
+        lines.append(f"{site['site']}: {text}")
+    return ("\n" + " " * indent).join(lines) or "all answering"
 
 
 def run(args) -> None:

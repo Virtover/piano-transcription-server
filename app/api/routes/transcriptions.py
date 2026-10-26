@@ -341,7 +341,7 @@ def create_transcription(
     if idempotency_key is not None and (earlier := earlier_submission(job_id, user)) is not None:
         return earlier
     ensure_no_maintenance_pending()
-    ensure_accepting(user_id, link=True)
+    ensure_accepting(user_id, link=True, source_url=str(request.source_url))
     # The place is held during the video check too, which runs yt-dlp.
     earlier = claim_submission(job_id, user, "preparing")
     if earlier is not None:

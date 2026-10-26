@@ -91,6 +91,7 @@ def parser() -> argparse.ArgumentParser:
     command.set_defaults(run=limits.run_links)
     command = limit_actions.add_parser("sites", parents=[changes], help="accept links again after a video site refused the server")
     command.add_argument("state", choices=["reset"])
+    command.add_argument("site", nargs="?", help="a host such as youtube.com; every site if left out")
     command.set_defaults(run=limits.run_sites)
     command = limit_actions.add_parser("block", parents=[changes, expires], help="stop a user from starting transcriptions")
     command.add_argument("user", help="email address or user ID")

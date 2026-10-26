@@ -51,8 +51,9 @@ DURATION_TOLERANCE = 5.0
 MAX_DOWNLOAD_SIZE = "4G"
 # Partial files yt-dlp leaves while it downloads.
 PARTIAL_SUFFIXES = {".part", ".ytdl", ".temp"}
-# How long a worker waits for its turn to contact a video site.
-SITE_WAIT = 5 * 60
+# How long a worker waits for its turn to download from a video site. It
+# stops waiting sooner if the job is cancelled.
+SITE_WAIT = 60 * 60
 
 
 @dataclass
@@ -76,13 +77,14 @@ def download_audio(
     longer work, yt-dlp asks the site once more: never after the site
     refused this server, or said the video cannot be read."""
     safe_url = ensure_safe_source_url(str(source_url))
+    site = video_sites.site_of(safe_url)
     info_path = saved_video_info(output_dir)
 
     result = None
     if info_path is not None:
         try:
             result = download_from_site(
-                ["--load-info-json", str(info_path)], output_dir, cancellation_callback, paced=False
+                site, ["--load-info-json", str(info_path)], output_dir, cancellation_callback, paced=False
             )
         except SourceError as error:
             # Only an unexplained failure, such as expired audio links.
@@ -92,7 +94,7 @@ def download_audio(
             info_path.unlink(missing_ok=True)
             remove_downloads(output_dir)
     if result is None:
-        result = download_from_site(["--", safe_url], output_dir, cancellation_callback)
+        result = download_from_site(site, ["--", safe_url], output_dir, cancellation_callback)
 
     json_lines = [
         line
@@ -147,18 +149,20 @@ def download_audio(
 
 
 def download_from_site(
+    site: str,
     source: list[str],
     output_dir: Path,
     cancellation_callback: CancellationCallback | None = None,
     paced: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """run_yt_dlp once the site may be contacted; see app.video_sites. Its
-    failures become SourceErrors that say what went wrong."""
-    with video_sites.access(SITE_WAIT, paced=paced):
+    """run_yt_dlp once site may be contacted, in one of its download places;
+    see app.video_sites. Its failures become SourceErrors that say what went
+    wrong."""
+    with video_sites.access(site, SITE_WAIT, paced=paced, download=True, cancelled=cancellation_callback):
         try:
             return run_yt_dlp(source, output_dir, cancellation_callback)
         except subprocess.CalledProcessError as error:
-            raise video_sites.failure(error) from error
+            raise video_sites.failure(site, error) from error
 
 
 def run_yt_dlp(

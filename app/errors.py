@@ -46,6 +46,10 @@ class SourceTemporarilyUnavailable(SourceError):
     status = 503
 
 
+class SourceTimedOut(SourceTemporarilyUnavailable):
+    """A video site did not answer in time."""
+
+
 class SourceBusy(SourceError):
     """Too many links are being read; the link itself may be fine."""
 

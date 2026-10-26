@@ -14,7 +14,7 @@ from redis import Redis
 from app.billing import Billing, transcription_cost
 from app.config import settings
 from app import controls, google_play, maintenance, video_info, video_sites
-from app.errors import SourceBusy, SourceError, SourceUnsupported, SourceVideoUnavailable
+from app.errors import SourceBusy, SourceError, SourceTimedOut, SourceUnsupported, SourceVideoUnavailable
 from app.maintenance import NoticeResponse
 from app.auth import AuthenticatedUser, current_user, google_oauth_client_ids
 from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url
@@ -32,9 +32,10 @@ metadata_slots = threading.BoundedSemaphore(METADATA_SLOTS)
 # Recent video checks, by URL. A video's info is a few KB.
 VIDEO_CHECK_KEY = "video_check:"
 VIDEO_CHECK_TTL = 300
-# A video the site said cannot be read is not asked about again for this long.
-FAILED_CHECK_TTL = 60
-FAILED_CHECK_ERRORS = {error.code: error for error in (SourceVideoUnavailable, SourceUnsupported)}
+# Failures remembered for a URL, in seconds, so asking again does not reach
+# the site: a video the site said cannot be read, and a site that timed out.
+FAILED_CHECK_TTLS = {SourceVideoUnavailable: 60, SourceUnsupported: 60, SourceTimedOut: 30}
+FAILED_CHECK_KINDS = {kind.__name__: kind for kind in FAILED_CHECK_TTLS}
 # Held while a URL is checked, so the same URL is checked once at a time.
 CHECKING_SUFFIX = ":checking"
 CHECKING_TTL = 90
@@ -119,7 +120,7 @@ def cached_check(key: str, wait: float = 0) -> dict[str, Any] | None:
             checked = json.loads(cached)
             if "error" in checked:
                 failed = checked["error"]
-                raise FAILED_CHECK_ERRORS[failed["code"]](failed["message"])
+                raise FAILED_CHECK_KINDS[failed["kind"]](failed["message"], failed.get("retry_after"))
             return checked
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -137,9 +138,10 @@ def run_check(key: str, safe_url: str) -> dict[str, Any]:
     try:
         info = read_video_info(safe_url)
     except SourceError as error:
-        if error.code in FAILED_CHECK_ERRORS:
-            failed = {"code": error.code, "message": str(error)}
-            redis.set(key, json.dumps({"error": failed}), ex=FAILED_CHECK_TTL)
+        ttl = FAILED_CHECK_TTLS.get(type(error))
+        if ttl is not None:
+            failed = {"kind": type(error).__name__, "message": str(error), "retry_after": error.retry_after}
+            redis.set(key, json.dumps({"error": failed}), ex=ttl)
         raise
     finally:
         redis.delete(lock)
@@ -149,10 +151,11 @@ def run_check(key: str, safe_url: str) -> dict[str, Any]:
 
 
 def read_video_info(safe_url: str) -> dict[str, Any]:
+    site = video_sites.site_of(safe_url)
     if not metadata_slots.acquire(timeout=METADATA_WAIT):
         raise SourceBusy(video_sites.BUSY_MESSAGE, retry_after=5)
     try:
-        with video_sites.access(METADATA_WAIT):
+        with video_sites.access(site, METADATA_WAIT):
             try:
                 result = subprocess.run(
                     [
@@ -170,7 +173,7 @@ def read_video_info(safe_url: str) -> dict[str, Any]:
                     timeout=60,
                 )
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-                raise video_sites.failure(error) from error
+                raise video_sites.failure(site, error) from error
             except OSError as error:
                 raise SourceError("Unable to read video metadata") from error
         info = json.loads(result.stdout)
@@ -200,8 +203,9 @@ def video_duration(source_url: HttpUrl) -> float:
     return check_video(source_url).duration
 
 
-def ensure_accepting(user_id: str, link: bool, submission: bool = True) -> None:
-    """Refuse a request that an administrator's control stops; see app.controls."""
+def ensure_accepting(user_id: str, link: bool, submission: bool = True, source_url: str | None = None) -> None:
+    """Refuse a request that an administrator's control stops, see
+    app.controls, or a link to a site whose breaker is open, see app.video_sites."""
     refused = controls.refusal(redis, user_id, link, submission)
     if refused is not None:
         status, message, retry_after = refused
@@ -210,8 +214,8 @@ def ensure_accepting(user_id: str, link: bool, submission: bool = True) -> None:
             detail=message,
             headers={"Retry-After": str(retry_after)} if retry_after else None,
         )
-    # Refused before anything is checked or held, while a site refuses this server.
-    if link and (limited := video_sites.refusal()) is not None:
+    # Refused before anything is checked or held.
+    if source_url is not None and (limited := video_sites.refusal(video_sites.site_of(source_url))) is not None:
         raise source_refusal(limited)
 
 
@@ -275,7 +279,12 @@ def cost(
     """Cost of a video URL, or of a file of the given duration before it is uploaded."""
     if (source_url is None) == (duration_seconds is None):
         raise HTTPException(status_code=422, detail="Provide either source_url or duration_seconds")
-    ensure_accepting(user.user_id if user else "anonymous", link=source_url is not None, submission=False)
+    ensure_accepting(
+        user.user_id if user else "anonymous",
+        link=source_url is not None,
+        submission=False,
+        source_url=str(source_url) if source_url is not None else None,
+    )
     if source_url is not None:
         duration = video_duration(source_url)
     else:

@@ -161,8 +161,13 @@ class LimitsSettings(BaseSettings):
     # long; each incident in a row doubles it, up to the maximum.
     video_site_cooldown: Duration = 30 * 60.0
     video_site_max_cooldown: Duration = 24 * 60 * 60.0
-    # Least time between the starts of two requests that read a link.
+    # After a video site times out a few times within minutes, its links are
+    # refused this long, doubling up to video_site_cooldown.
+    video_site_timeout_cooldown: Duration = 2 * 60.0
+    # Least time between the starts of two requests that read a link from a site.
     video_site_interval: DurationOrZero = 3.0
+    # Downloads from one video site at once, across the API and the workers.
+    video_site_max_downloads: int = Field(default=2, ge=1)
     source_url_allowed_hosts: list[str] = [
         "youtube.com", "youtu.be", "youtube-nocookie.com",
         "vimeo.com", "soundcloud.com", "bandcamp.com", "dailymotion.com",

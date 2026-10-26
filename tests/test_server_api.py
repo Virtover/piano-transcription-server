@@ -219,10 +219,10 @@ def test_reused_video_check_still_enforces_the_length_limit(yt_dlp, api_context)
     assert len(yt_dlp["commands"]) == 1
 
 
-@pytest.mark.parametrize("stdout", ["not json", '{"duration": 0}', subprocess.TimeoutExpired("yt-dlp", 60)])
+@pytest.mark.parametrize("stdout", ["not json", '{"duration": 0}'])
 def test_failed_video_check_is_not_reused(yt_dlp, stdout):
     yt_dlp["stdout"] = stdout
-    assert duration_error() in {422, 503}
+    assert duration_error() == 422
 
     yt_dlp["stdout"] = '{"duration": 90}'
 
