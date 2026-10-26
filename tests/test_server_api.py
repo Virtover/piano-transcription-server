@@ -33,6 +33,18 @@ def test_ready_reports_redis_state(api_context, monkeypatch):
     assert client.get("/ready").status_code == 503
 
 
+def test_ready_reports_billing_database_state(api_context, monkeypatch, tmp_path):
+    client, settings, _ = api_context
+    monkeypatch.setattr(main.Redis, "from_url", lambda url: type("Up", (), {"ping": lambda self: True})())
+    assert client.get("/ready").json() == {"status": "ready"}
+
+    # A directory cannot be opened as a database.
+    settings.billing.database_path = str(tmp_path)
+    response = client.get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "The billing database is unavailable"}
+
+
 def test_server_info_lists_only_synced_offers(api_context):
     client, settings, _ = api_context
     settings.billing.provider = "google_play"

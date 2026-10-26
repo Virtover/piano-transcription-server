@@ -24,6 +24,7 @@ import time
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 DEFAULT_GRACE = "5m"
 READY_TIMEOUT = 180
+AOF_TIMEOUT = 60
 STATUS_INTERVAL = 10
 DRAIN_INTERVAL = 5
 # A shutdown stops every service, whichever profiles started it.
@@ -74,6 +75,13 @@ class Stack:
         probe = "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=5)"
         result = self._run(self.compose() + ["exec", "-T", "api", "python", "-c", probe], capture_output=True, text=True)
         return result.returncode == 0
+
+    def redis(self, *arguments: str) -> str:
+        result = self._run(self.compose() + ["exec", "-T", "redis", "redis-cli", *arguments],
+                           capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout).strip() or "the redis service is not running")
+        return result.stdout.strip()
 
     def start_build(self):
         return self._popen(self.compose() + ["build"])
@@ -161,6 +169,26 @@ def wait_ready(stack: Stack, clock: Clock) -> bool:
     return True
 
 
+def persist_redis(stack: Stack, clock: Clock) -> None:
+    """Turn on Redis's append-only file in the running Redis and wait until
+    it is written. Redis started with it on over a volume that only has a
+    snapshot starts empty, so this keeps queued jobs through the first
+    restart with the setting. Nothing changes when it is already on."""
+    try:
+        stack.redis("config", "set", "appendonly", "yes")
+        deadline = clock.now() + AOF_TIMEOUT
+        while True:
+            info = stack.redis("info", "persistence")
+            if "aof_rewrite_in_progress:0" in info and "aof_rewrite_scheduled:0" in info:
+                return
+            if clock.now() >= deadline:
+                say(f"Redis did not finish writing its append-only file in {AOF_TIMEOUT} s; queued jobs may be lost")
+                return
+            clock.sleep(1)
+    except RuntimeError as error:
+        say(f"could not turn on Redis persistence ({error}); queued jobs may be lost")
+
+
 def countdown(stack: Stack, clock: Clock, action: str, args, build_images: bool):
     """Announce, then wait for the planned time. Returns the exit code if the
     plan ended early, or None when it is due."""
@@ -201,6 +229,7 @@ def restart(args, stack: Stack, clock: Clock) -> int:
     if code is not None:
         return code
     drain(stack, clock, args.grace)
+    persist_redis(stack, clock)
     say("restarting")
     code = stack.up(args.command)
     if code != 0:
@@ -224,6 +253,7 @@ def stop(args, stack: Stack, clock: Clock) -> int:
     if code is not None:
         return code
     drain(stack, clock, args.grace)
+    persist_redis(stack, clock)
     say("stopping every service" + (" and removing the containers" if args.down else ""))
     code = stack.stop(args.down)
     if code != 0:

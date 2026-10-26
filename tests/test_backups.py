@@ -118,3 +118,26 @@ def test_invalid_backup_setting_fails_at_load(tmp_path):
 
     with pytest.raises(ConfigError, match="BILLING_BACKUP_RETENTION"):
         load_settings(str(env_file), None)
+
+
+def test_backup_that_fails_its_check_leaves_no_file(api_context, monkeypatch):
+    _, settings, _ = api_context
+    real_connect = sqlite3.connect
+
+    class Corrupt(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql.startswith("PRAGMA integrity_check"):
+                sql = "SELECT 'page 3 is never used'"
+            return super().execute(sql, *args)
+
+    def connect(path, *args, **kwargs):
+        if str(path).endswith(".partial"):
+            kwargs["factory"] = Corrupt
+        return real_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+
+    with pytest.raises(sqlite3.DatabaseError, match="integrity check"):
+        main.run_billing_backup()
+
+    assert list(Path(settings.billing.backup_dir).iterdir()) == []

@@ -41,7 +41,7 @@ class FakeBuild:
 
 class FakeStack:
     def __init__(self, clock, build_seconds=30, build_code=0, active_jobs=(), up_code=0, stop_code=0,
-                 ready_after=0):
+                 ready_after=0, aof_seconds=0):
         self.clock = clock
         self.calls = []
         self.notice = None
@@ -54,6 +54,20 @@ class FakeStack:
         self.build = None
         self.up_call = None
         self.stop_call = None
+        self.redis_calls = []
+        # Seconds the append-only file takes to write after it is turned on.
+        self.aof_seconds = aof_seconds
+        self.aof_done_at = None
+
+    def redis(self, *arguments):
+        self.redis_calls.append((self.clock.now(), arguments))
+        if arguments == ("config", "set", "appendonly", "yes"):
+            self.aof_done_at = self.clock.now() + self.aof_seconds
+            return "OK"
+        if arguments == ("info", "persistence"):
+            writing = int(self.clock.now() < self.aof_done_at)
+            return f"aof_enabled:1\naof_rewrite_in_progress:{writing}\naof_rewrite_scheduled:0"
+        raise AssertionError(arguments)
 
     def maintenance(self, *arguments):
         self.calls.append(arguments)
@@ -179,12 +193,14 @@ def test_maintenance_errors_name_the_problem():
 # --- Restart ----------------------------------------------------------------
 
 def test_full_restart(capsys):
-    code, stack, _ = run(["restart", "5m"], build_seconds=60)
+    code, stack, _ = run(["restart", "5m"], build_seconds=60, aof_seconds=2)
 
     assert code == 0
     assert stack.calls[0] == ("schedule", "restart", "300s", "--grace", "300s")
-    # Restarted at the announced time, with the default command, then cleared.
-    assert stack.up_call == (300, None, True)
+    # Redis persistence is on and written before the restart, at the
+    # announced time, with the default command; then the notice is cleared.
+    assert stack.redis_calls[0] == (300, ("config", "set", "appendonly", "yes"))
+    assert stack.up_call == (300 + stack.aof_seconds, None, True)
     assert stack.commands()[-1] == "cancel"
     assert stack.notice is None
     assert "done" in capsys.readouterr().out
@@ -281,7 +297,8 @@ def test_interrupt_cancels_the_restart():
 # --- Stop and start ---------------------------------------------------------
 
 def test_full_shutdown(capsys):
-    code, stack, _ = run(["stop", "10m", "--back-in", "2h", "--reason", "Hardware"], active_jobs=[1, 0])
+    code, stack, _ = run(["stop", "10m", "--back-in", "2h", "--reason", "Hardware"], active_jobs=[1, 0],
+                          aof_seconds=2)
 
     assert code == 0
     assert stack.calls[0] == ("schedule", "shutdown", "600s", "--grace", "300s", "--reason", "Hardware",
@@ -289,7 +306,8 @@ def test_full_shutdown(capsys):
     # Nothing is built for a shutdown; it stops after the running job finished.
     assert stack.build is None
     assert stack.up_call is None
-    assert stack.stop_call == (600 + server.DRAIN_INTERVAL, False)
+    assert stack.redis_calls[0][1] == ("config", "set", "appendonly", "yes")
+    assert stack.stop_call == (600 + server.DRAIN_INTERVAL + stack.aof_seconds, False)
     # The notice stays until the API starts again and removes it.
     assert stack.notice is not None
     assert "python scripts/server.py start" in capsys.readouterr().out
@@ -357,3 +375,27 @@ def test_status_and_cancel(capsys):
     code, stack, _ = run(["cancel"])
     assert code == 0
     assert stack.commands() == ["cancel"]
+
+
+def test_redis_that_cannot_be_reached_does_not_stop_the_restart(capsys):
+    clock = FakeClock()
+    stack = FakeStack(clock)
+
+    def unreachable(*arguments):
+        raise RuntimeError('service "redis" is not running')
+
+    stack.redis = unreachable
+
+    assert server.main(["restart", "1m"], stack, clock) == 0
+    assert stack.up_call is not None
+    assert 'could not turn on Redis persistence (service "redis" is not running)' in capsys.readouterr().out
+
+
+def test_slow_append_only_file_is_waited_for_up_to_a_limit(capsys):
+    clock = FakeClock()
+    stack = FakeStack(clock)
+    stack.aof_seconds = 10 * server.AOF_TIMEOUT
+
+    assert server.main(["restart", "1m"], stack, clock) == 0
+    assert stack.up_call[0] == 60 + server.AOF_TIMEOUT
+    assert "queued jobs may be lost" in capsys.readouterr().out

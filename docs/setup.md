@@ -45,6 +45,8 @@ curl http://localhost:8000/ready
 
 In Windows PowerShell 5.1, type `curl.exe`: plain `curl` there is a different command.
 
+`/health` answers while the API process runs. `/ready` also checks that Redis and the billing database can be reached, and answers `503` with the one that cannot.
+
 Do not commit `.env`, the `secrets` folder, or any machine-specific values.
 
 To update a running server, use `python scripts/server.py restart 5m`: it announces the restart to clients, builds while the current version keeps serving, and lets running jobs finish. `python scripts/server.py stop 10m` shuts the server down the same way. See [Planned restarts and shutdowns](architecture.md#-planned-restarts-and-shutdowns).

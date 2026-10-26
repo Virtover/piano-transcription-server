@@ -3,6 +3,7 @@ import logging
 import shutil
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Callable
 
@@ -25,6 +26,12 @@ JOB_TTL = 60 * 60  # 1 hour
 UPLOAD_FILE_NAME = "upload.input"
 LOCAL_QUEUE = "default"
 REMOTE_QUEUE = "remote"
+# A worker renews its job's lease while it runs. A processing job whose lease
+# has expired lost its worker, and is failed and refunded.
+LEASE_TTL = 60
+LEASE_RENEW_INTERVAL = 15
+ABANDONED_JOB_CHECK_INTERVAL = 30
+WORKER_STOPPED = "Transcription interrupted because its worker stopped"
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +52,10 @@ billing = Billing()
 
 def job_key(job_id: str) -> str:
     return f"transcription:{job_id}"
+
+
+def lease_key(job_id: str) -> str:
+    return f"transcription-lease:{job_id}"
 
 
 def update_job(job_id: str, **values):
@@ -74,7 +85,7 @@ def is_job_cancelled(job_id: str) -> bool:
     return redis.hget(job_key(job_id), "status") != "processing"
 
 
-def claim_job(job_id: str) -> bool:
+def claim_job(job_id: str, lease_token: str = "claimed") -> bool:
     key = job_key(job_id)
 
     while True:
@@ -87,10 +98,53 @@ def claim_job(job_id: str) -> bool:
                 # Progress is kept: a job moved between backends continues
                 # from what it showed.
                 pipe.hset(key, "status", "processing")
+                # Set together, so no one sees the job processing without a lease.
+                pipe.set(lease_key(job_id), lease_token, ex=LEASE_TTL)
                 pipe.execute()
                 return True
         except WatchError:
             continue
+
+
+class JobLease:
+    """Renews a claimed job's lease until stopped, then removes it. The token
+    tells this worker's lease from that of a worker the job moved to."""
+
+    def __init__(self, job_id: str):
+        self.job_id = job_id
+        self.token = uuid.uuid4().hex
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._renew, name=f"lease-{job_id}", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _renew(self) -> None:
+        while not self._stop.wait(LEASE_RENEW_INTERVAL):
+            self._update(renew=True)
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._update(renew=False)
+
+    def _update(self, renew: bool) -> None:
+        key = lease_key(self.job_id)
+        try:
+            with redis.pipeline() as pipe:
+                pipe.watch(key)
+                if pipe.get(key) not in {self.token, None}:
+                    return
+                pipe.multi()
+                if renew:
+                    pipe.set(key, self.token, ex=LEASE_TTL)
+                else:
+                    pipe.delete(key)
+                pipe.execute()
+        except WatchError:
+            # Another worker took the job meanwhile; its lease is not ours.
+            pass
+        except Exception:
+            logger.exception("Could not update the lease of job %s", self.job_id)
 
 
 def complete_job(job_id: str, result: Path) -> bool:
@@ -229,49 +283,79 @@ def reconcile_billing() -> None:
             )
 
 
+def job_backend(job: dict[str, str]) -> routing.Backend:
+    return "remote" if job.get("backend") == "remote" else "local"
+
+
+def fail_abandoned_job(job_id: str, reason: str) -> bool:
+    """Fail and refund a processing job whose lease has expired: its worker
+    stopped mid-job. Returns False if the job is not processing, or a worker
+    still holds it."""
+    key = job_key(job_id)
+    while True:
+        try:
+            with redis.pipeline() as pipe:
+                pipe.watch(key, lease_key(job_id))
+                job = pipe.hgetall(key)
+                if job.get("status") != "processing" or pipe.exists(lease_key(job_id)):
+                    return False
+                pipe.multi()
+                pipe.hset(
+                    key,
+                    mapping={
+                        "status": "failed",
+                        "error": reason,
+                    },
+                )
+                pipe.expire(key, JOB_TTL)
+                pipe.execute()
+                break
+        except WatchError:
+            continue
+    logger.warning("Job %s failed: %s", job_id, reason)
+    record_job(job_id)
+    if job.get("user_id"):
+        billing.release(job_id)
+    shutil.rmtree(job_dir(job_id), ignore_errors=True)
+    routing.mark_finished(redis, job_backend(job), job_id)
+    return True
+
+
+def fail_abandoned_jobs(reason: str = WORKER_STOPPED) -> int:
+    """Run periodically by the API, so a job whose worker crashed does not
+    stay processing, with its minutes reserved, forever."""
+    failed = 0
+    for key in redis.scan_iter(match="transcription:*"):
+        if redis.hget(key, "status") == "processing":
+            failed += fail_abandoned_job(key.removeprefix("transcription:"), reason)
+    return failed
+
+
 def recover_active_jobs(reason: str) -> None:
-    """Run at API startup. Jobs that were processing are failed and refunded:
-    their worker stopped mid-job. Queued jobs are sent to their queue again,
+    """Run at API startup. Processing jobs without a lease are failed and
+    refunded: their worker stopped mid-job. Those with one keep running, as
+    when only the API restarted. Queued jobs are sent to their queue again,
     so a planned restart does not lose them; a leftover message from before
     the restart is harmless, because only one delivery can claim the job."""
     queued = []
+    running = []
     for key in redis.scan_iter(match="transcription:*"):
         job_id = key.removeprefix("transcription:")
-        while True:
-            try:
-                with redis.pipeline() as pipe:
-                    pipe.watch(key)
-                    job = pipe.hgetall(key)
-                    if job.get("status") == "queued":
-                        queued.append((job_id, job))
-                        break
-                    if job.get("status") != "processing":
-                        break
-                    pipe.multi()
-                    pipe.hset(
-                        key,
-                        mapping={
-                            "status": "failed",
-                            "error": reason,
-                        },
-                    )
-                    pipe.expire(key, JOB_TTL)
-                    pipe.execute()
-                    record_job(job_id)
-                    if job.get("user_id"):
-                        billing.release(job_id)
-                    shutil.rmtree(job_dir(job_id), ignore_errors=True)
-                    break
-            except WatchError:
-                continue
-    # Rebuild the routing counts from the jobs that are still queued.
+        job = redis.hgetall(key)
+        if job.get("status") == "queued":
+            queued.append((job_id, job))
+        elif job.get("status") == "processing" and not fail_abandoned_job(job_id, reason):
+            running.append((job_id, job))
+    # Rebuild the routing counts from the jobs that are still queued or running.
     routing.clear_active(redis)
+    for job_id, job in running:
+        routing.mark_active(redis, job_backend(job), job_id)
     for job_id, job in queued:
         requeue_after_restart(job_id, job, reason)
 
 
 def requeue_after_restart(job_id: str, job: dict[str, str], reason: str) -> None:
-    backend: routing.Backend = "remote" if job.get("backend") == "remote" else "local"
+    backend = job_backend(job)
     if backend == "remote" and not routing.outsourcing_enabled():
         # Outsourcing was turned off while the server was down.
         backend = "local"
@@ -364,10 +448,12 @@ def run_job(
     output_dir = job_dir(job_id)
     requeued = False
     claimed = False
+    lease = JobLease(job_id)
     try:
-        if not claim_job(job_id):
+        if not claim_job(job_id, lease.token):
             return
         claimed = True
+        lease.start()
         record_job(job_id)
         started = time.monotonic()
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -424,6 +510,8 @@ def run_job(
             JOB_TTL,
         )
     finally:
+        if claimed:
+            lease.stop()
         # A second delivery of a job that is running elsewhere claims nothing
         # and must not remove the running job from the routing count.
         if not requeued and (claimed or redis.hget(job_key(job_id), "status") != "processing"):

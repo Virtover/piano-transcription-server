@@ -21,7 +21,12 @@ from app.api.routes.billing import router as billing_router, server_info
 from app.config import ensure_valid, settings
 from app import google_play
 from app.google_play import sync_products
-from app.worker.tasks import reconcile_billing, recover_active_jobs
+from app.worker.tasks import (
+    ABANDONED_JOB_CHECK_INTERVAL,
+    fail_abandoned_jobs,
+    reconcile_billing,
+    recover_active_jobs,
+)
 from app.billing import Billing, prune_backups
 
 
@@ -46,6 +51,17 @@ def backup_billing_database() -> None:
         except Exception:
             logger.exception("Could not back up billing database")
         time.sleep(settings.billing.backup_interval)
+
+def watch_abandoned_jobs() -> None:
+    """Fail and refund processing jobs whose worker stopped, for example
+    after a crash, while the API keeps running."""
+    while True:
+        time.sleep(ABANDONED_JOB_CHECK_INTERVAL)
+        try:
+            fail_abandoned_jobs()
+        except Exception:
+            logger.exception("Could not check for abandoned jobs")
+
 
 def sync_voided_purchases() -> None:
     """Take back refunded minutes, at startup and then periodically."""
@@ -111,6 +127,7 @@ def sync_billing_catalog() -> None:
     sync_products()
     enable_transcription_submissions()
     threading.Thread(target=backup_billing_database, daemon=True).start()
+    threading.Thread(target=watch_abandoned_jobs, daemon=True).start()
     if voided_purchases_enabled():
         threading.Thread(target=sync_voided_purchases, daemon=True).start()
 
@@ -126,5 +143,9 @@ def readiness():
         Redis.from_url(settings.service.redis_url).ping()
     except Exception as error:
         raise HTTPException(status_code=503, detail="Redis is unavailable") from error
+    try:
+        Billing(settings.billing.database_path).check()
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="The billing database is unavailable") from error
 
     return {"status": "ready"}

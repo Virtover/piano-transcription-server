@@ -87,6 +87,7 @@ def api_context(tmp_path, monkeypatch) -> Iterator[tuple[TestClient, object, obj
     monkeypatch.setattr(main, "reconcile_billing", lambda: None)
     monkeypatch.setattr(main, "sync_products", lambda: None)
     monkeypatch.setattr(main, "backup_billing_database", lambda: None)
+    monkeypatch.setattr(main, "watch_abandoned_jobs", lambda: None)
     monkeypatch.setattr(main, "enable_transcription_submissions", lambda: transcription_routes.enable_transcription_submissions())
     transcription_routes.transcription_submissions_enabled = False
     google_play.synced_products = None

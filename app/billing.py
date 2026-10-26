@@ -129,7 +129,15 @@ class Billing:
         connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
+        # Sync the WAL at every commit, so a power cut loses no committed
+        # purchase or charge. Usually SQLite's default, but not on every build.
+        connection.execute("PRAGMA synchronous=FULL")
         return connection
+
+    def check(self) -> None:
+        """Raise if the database cannot be opened and read."""
+        with closing(self._connect()) as connection:
+            connection.execute("SELECT 1 FROM users LIMIT 1").fetchall()
 
     def _connect(self) -> sqlite3.Connection:
         if not self._ready:
@@ -519,9 +527,21 @@ class Billing:
             ).rowcount
 
     def backup(self, destination: str) -> None:
-        Path(destination).parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as source, closing(sqlite3.connect(destination)) as target:
-            source.backup(target)
+        """Copy the database to destination. The copy is written under a
+        temporary name and checked first, so a file at destination is always
+        a complete, intact backup."""
+        target_path = Path(destination)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        partial = target_path.with_name(target_path.name + ".partial")
+        try:
+            with closing(self._connect()) as source, closing(sqlite3.connect(partial)) as target:
+                source.backup(target)
+                result = target.execute("PRAGMA integrity_check").fetchone()
+            if result != ("ok",):
+                raise sqlite3.DatabaseError(f"The backup failed its integrity check: {result}")
+            partial.replace(target_path)
+        finally:
+            partial.unlink(missing_ok=True)
 
 
 class InsufficientMinutes(Exception):

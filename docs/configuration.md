@@ -299,7 +299,7 @@ See [Administration](administration.md#-users).
 
 ## 💾 Billing database backups
 
-The API creates a SQLite backup in `/billing/backups` every `BILLING_BACKUP_INTERVAL` (default `1h`), starting when the API starts. On the host these files are in `./billing-data/backups`. They are made with SQLite's online backup, so they are consistent while the API is running.
+The API creates a SQLite backup in `/billing/backups` every `BILLING_BACKUP_INTERVAL` (default `1h`), starting when the API starts. On the host these files are in `./billing-data/backups`. They are made with SQLite's online backup, so they are consistent while the API is running. Each is written under a temporary name ending in `.partial`, checked with `PRAGMA integrity_check`, and only then renamed, so every `billing-<unix-time>.sqlite3` file is complete. A backup that fails the check is deleted and the error logged.
 
 After each backup, the API deletes automatic backups older than `BILLING_BACKUP_RETENTION` (default `30d`). The age is read from the timestamp in the file name, `billing-<unix-time>.sqlite3`. Other files in the directory, such as manually renamed copies, are never deleted. The API refuses to start if either value is invalid.
 

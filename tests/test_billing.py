@@ -191,3 +191,14 @@ def test_database_is_created_on_first_use_not_at_construction(tmp_path):
 
     assert billing.reserved_job_ids() == []
     assert path.exists()
+
+
+def test_connections_sync_every_commit(tmp_path):
+    from contextlib import closing
+
+    from app.billing import Billing
+
+    with closing(Billing(str(tmp_path / "billing.sqlite3"))._connect()) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        # 2 is FULL.
+        assert connection.execute("PRAGMA synchronous").fetchone()[0] == 2

@@ -39,7 +39,9 @@ The Transkun checkpoint detects sustain-pedal events separately instead of autom
 
 ## 🗄️ Job retention and restart behavior
 
-Job files are stored under `/data/jobs/<job_id>/`. Queued and processing jobs do not receive a Redis expiration. On API startup, jobs left processing by a previous session are marked failed, their billing reservations are released, and their partial files are removed: their worker stopped mid-job. Queued jobs are sent to their queue again and keep their reservation, so a restart does not lose them. A message for a queued job left over from before the restart is harmless, because only one delivery can claim a job.
+Job files are stored under `/data/jobs/<job_id>/`. Queued and processing jobs do not receive a Redis expiration.
+
+A worker holds a lease on the job it runs: a Redis key it renews every 15 seconds and that expires after 60. A processing job whose lease has expired lost its worker, for example to a crash. The API checks every 30 seconds and at startup: such a job is marked failed, its billing reservation is released, and its partial files are removed. A job whose worker is still running keeps running, so restarting only the API interrupts nothing. On API startup, queued jobs are sent to their queue again and keep their reservation, so a restart does not lose them. A message for a queued job left over from before the restart is harmless, because only one delivery can claim a job.
 
 Completed and failed jobs receive a one-hour Redis TTL. The cleanup service periodically removes job directories whose Redis keys no longer exist, so files can remain briefly after the TTL expires.
 
@@ -52,6 +54,21 @@ The API streams an upload into `/data/jobs/<job_id>/upload.input`, stopping as s
 Uploaded files are untrusted. Only common audio and video container formats are accepted. Playlist and concat formats such as HLS are rejected because they make `ffmpeg` open other files or URLs. `ffprobe` and `ffmpeg` run with `-protocol_whitelist file`, so they cannot open network URLs at all. The worker checks the format again before converting.
 
 Billing backups are pruned by the API after each backup, using `BILLING_BACKUP_RETENTION`.
+
+### ⚡ Crashes and power cuts
+
+* **Billing database.** SQLite in WAL mode, with every commit synced to disk (`synchronous=FULL`): a purchase or charge the API confirmed survives a power cut, as long as the disk honors sync requests. Each balance change is one transaction. At startup the API settles or releases reservations whose job ended while it was down, and releases those whose job no longer exists in Redis.
+* **Redis.** Job state and the queues are written to an append-only file synced every second, so a power cut loses at most about a second of changes. A job lost that way is refunded at the next API startup, as above.
+* **Running jobs** fail and are refunded when their worker stops; see above. They are not resumed.
+* **`/ready`** answers `503` while Redis or the billing database cannot be reached. `/health` only says that the API process answers.
+
+Redis started with the append-only file on, over a volume that has only a snapshot, starts empty. `scripts/server.py` turns it on in the running Redis before it restarts or stops anything, so updating with it keeps queued jobs. When updating from an older version with `docker compose` directly, run this first:
+
+```shell
+docker compose exec redis redis-cli config set appendonly yes
+```
+
+None of this protects against losing the disk or the machine. For that, copy the billing backups elsewhere; see [Billing database backups](configuration.md#-billing-database-backups).
 
 ### 🔁 Planned restarts and shutdowns
 
@@ -71,7 +88,7 @@ python scripts/server.py cancel                      # also stops a waiting scri
 1. **Announce.** The notice is stored in Redis, and clients see it in `GET /api/server-info`, job status, and the `X-Server-Maintenance` headers; see [Planned restarts and shutdowns](api.md#-planned-restarts-and-shutdowns). It expires on its own shortly after the planned time plus the grace period, so a crashed script cannot leave it behind.
 2. **Build while serving.** The new images are built during the countdown, and the current version keeps serving. If the build fails, the restart is cancelled and the notice removed. If the build takes longer than the countdown, the restart waits for it.
 3. **Refuse jobs that would not finish.** New jobs whose estimated wait and run time ends after the planned time are refused with `503`, without charge; in the last minute, all are.
-4. **Drain.** At the planned time, running jobs get up to `--grace` (default `5m`) to finish. Queued jobs wait and are queued again after the restart.
+4. **Drain.** At the planned time, running jobs get up to `--grace` (default `5m`) to finish. Queued jobs wait and are queued again after the restart. Then Redis's append-only file is turned on, if it is not yet, and the script waits until it is written; see [Crashes and power cuts](#-crashes-and-power-cuts).
 5. **Restart** with `docker compose up -d --build`, which recreates only services whose image or configuration changed. Profiles given with `--profile` apply to the build and the restart; none are needed for outsourcing. `--command` replaces the restart command; then nothing is built before the countdown ends.
 6. **Clear** the notice once the API answers `/ready`. If it does not within 3 minutes, the script stops with an error and the notice expires on its own.
 

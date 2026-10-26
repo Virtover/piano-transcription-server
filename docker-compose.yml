@@ -104,8 +104,14 @@ services:
       - api
     restart: unless-stopped
 
+  # Redis holds job state and the queues. The append-only file is synced
+  # every second, so a power cut loses at most about a second of changes;
+  # snapshots alone could lose an hour. scripts/server.py turns it on in a
+  # running Redis before restarting, because starting with it on over a
+  # snapshot-only volume starts empty. See docs/architecture.md.
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

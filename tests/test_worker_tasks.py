@@ -318,3 +318,79 @@ def test_cleanup_service_exits_on_sigterm(monkeypatch):
     with pytest.raises(SystemExit) as exited:
         handlers[signal.SIGTERM](signal.SIGTERM, None)
     assert exited.value.code == 0
+
+
+def test_claim_sets_the_lease_and_the_end_of_the_job_removes_it(worker, monkeypatch):
+    _, billing = worker
+    queue_job(billing)
+    leases = []
+
+    def transcribe(context):
+        leases.append(tasks.redis.get(tasks.lease_key("job")))
+        assert 0 < tasks.redis.ttl(tasks.lease_key("job")) <= tasks.LEASE_TTL
+        midi = context.output_dir / "transcription.mid"
+        midi.write_bytes(b"MThd")
+        return midi
+
+    tasks.run_job("job", "local", transcribe)
+
+    assert job()["status"] == "completed"
+    assert leases[0] is not None
+    assert not tasks.redis.exists(tasks.lease_key("job"))
+
+
+def test_restart_of_only_the_api_keeps_running_jobs(worker, monkeypatch):
+    settings, billing = worker
+    monkeypatch.setattr(tasks, "send_job", lambda *args: None)
+    queue_job(billing, backend="remote")
+    assert tasks.claim_job("job")
+    running_dir = Path(settings.service.data_dir) / "jobs" / "job"
+    running_dir.mkdir(parents=True)
+
+    tasks.recover_active_jobs("restarted")
+
+    assert job()["status"] == "processing"
+    assert running_dir.exists()
+    assert billing.reserved_job_ids() == ["job"]
+    # The routing count is rebuilt with it.
+    assert tasks.redis.smembers(tasks.routing.ACTIVE_KEYS["remote"]) == {"job"}
+
+
+def test_job_whose_worker_stopped_fails_when_its_lease_expires(worker):
+    settings, billing = worker
+    queue_job(billing, backend="local")
+    assert tasks.claim_job("job")
+    tasks.redis.sadd(tasks.routing.ACTIVE_KEYS["local"], "job")
+    job_files = Path(settings.service.data_dir) / "jobs" / "job"
+    job_files.mkdir(parents=True)
+
+    assert tasks.fail_abandoned_jobs() == 0
+    assert job()["status"] == "processing"
+
+    tasks.redis.delete(tasks.lease_key("job"))
+    assert tasks.fail_abandoned_jobs() == 1
+
+    assert job()["status"] == "failed"
+    assert job()["error"] == tasks.WORKER_STOPPED
+    assert billing.reserved_job_ids() == []
+    assert billing.get_balance("user") == 10
+    assert not job_files.exists()
+    assert tasks.redis.scard(tasks.routing.ACTIVE_KEYS["local"]) == 0
+
+
+def test_moved_job_keeps_the_lease_of_the_worker_it_moved_to(worker):
+    _, billing = worker
+    queue_job(billing)
+    first = tasks.JobLease("job")
+    assert tasks.claim_job("job", first.token)
+    # The job moved to another backend, whose worker claimed it before the
+    # first worker stopped its lease.
+    tasks.redis.hset(tasks.job_key("job"), "status", "queued")
+    second = tasks.JobLease("job")
+    assert tasks.claim_job("job", second.token)
+
+    first.stop()
+
+    assert tasks.redis.get(tasks.lease_key("job")) == second.token
+    second.stop()
+    assert not tasks.redis.exists(tasks.lease_key("job"))
