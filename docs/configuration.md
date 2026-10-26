@@ -74,7 +74,9 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 | `WORKER_ENFORCE_CPU` | `false` | Ignore available CUDA GPUs and run the local worker on CPU. Useful for testing or when the GPU should be reserved for another workload. |
 | `WORKER_MODEL_MEMORY_GIB` | `1.0` | VRAM reserved on each GPU for the model and GPU libraries. See [GPU memory and batching](#-gpu-memory-and-batching). |
 | `WORKER_MEMORY_PER_JOB_GIB` | `1.1` | VRAM budget for each concurrent GPU job. |
-| `WORKER_BATCH_SIZE` | `auto` | Maximum jobs combined into one model batch. `auto` uses each GPU's job capacity, or `6` on CPU. A number is lowered to a GPU's capacity. In CPU mode, also the number of worker threads. See [below](#choosing-other-values). |
+| `WORKER_CPU_MODEL_MEMORY_GIB` | `2.0` | RAM reserved for the loaded model when CPU `WORKER_BATCH_SIZE=auto` estimates how many jobs fit. This is a planning reserve, not a hard memory limit. It does not affect GPU batching. |
+| `WORKER_CPU_MEMORY_PER_JOB_GIB` | `2.0` | RAM estimated for each additional concurrent CPU transcription when CPU `WORKER_BATCH_SIZE=auto` estimates capacity. Increase it if CPU jobs cause memory pressure; decrease it only when measurements show more jobs fit. It does not affect GPU batching. |
+| `WORKER_BATCH_SIZE` | `auto` | Maximum jobs combined into one model batch. `auto` uses each GPU's job capacity, or the lower of CPU thread capacity and the available-RAM estimate on CPU. A number is lowered to a GPU's capacity. In CPU mode, it is also the number of worker threads. See [below](#choosing-other-values). |
 | `WORKER_BATCH_TIMEOUT` | `2s` | Maximum wait for more jobs before running a partial batch. |
 | `WORKER_MAX_CONCURRENCY` | `auto` | Optional cap on concurrent GPU jobs. It can only lower the capacity calculated from VRAM. |
 
@@ -294,7 +296,8 @@ Example capacities with the default values:
 
 * `auto` on GPU: each GPU's batch size is its job capacity from the startup calculation, capped by `WORKER_MAX_CONCURRENCY` if set, and at least 1. A GPU that fits 4 jobs batches up to 4; a GPU that fits 20 batches up to 20.
 * A number on GPU is used as given, but never above that GPU's capacity. When it is lowered, the worker logs a warning at startup, for example `GPU 0: WORKER_BATCH_SIZE=6 is more than this GPU's capacity of 4 job(s); using 4`.
-* On CPU, `auto` means `6`, and the batch size is also the number of worker threads. A large value means many simultaneous downloads and much more RAM. Keep it small, around 2 to 6.
+* On CPU, `auto` is the lower of the resolved CPU thread count and the RAM capacity estimate, and the batch size is also the number of worker threads. The estimate uses `WORKER_CPU_MODEL_MEMORY_GIB` as the model reserve and `WORKER_CPU_MEMORY_PER_JOB_GIB` for each additional request, using currently available system memory. It is recalculated when the worker starts. A large value means many simultaneous downloads and much more RAM.
+* `WORKER_CPU_MODEL_MEMORY_GIB` and `WORKER_CPU_MEMORY_PER_JOB_GIB` control only that CPU RAM estimate. They are separate from `WORKER_MODEL_MEMORY_GIB` and `WORKER_MEMORY_PER_JOB_GIB`, which describe GPU VRAM. For example, with 14 GiB available RAM, a 2 GiB model reserve, and 2 GiB per job, the RAM estimate is 6 jobs; the CPU thread limit may lower it further.
 * The worker log shows the result at startup, for example `GPU 0: 4 job(s), batch 4, 5.84 GiB free`. `python -m app.config check` shows `auto` because the capacity is only known on the worker.
 * Values below the capacity leave capacity unused: jobs that arrive while a batch runs wait until the whole batch finishes.
 * Larger batches give more total throughput, with diminishing returns. In the table above, going from 4 to 6 jobs saves only about 5% time per job. Each job also progresses more slowly, because every step processes one segment for every job in the batch.

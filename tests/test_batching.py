@@ -241,12 +241,23 @@ def test_fixed_batch_size_is_clamped_with_warning_at_startup(default_settings, m
     assert plan.warnings == ("GPU 0: WORKER_BATCH_SIZE=6 is more than this GPU's capacity of 4 job(s); using 4",)
 
 
-def test_cpu_batch_size_defaults_to_six(default_settings, monkeypatch):
-    monkeypatch.setattr(launcher, "physical_cpu_count", lambda: 8)
+def test_cpu_batch_size_uses_cpu_and_ram(default_settings, monkeypatch):
+    monkeypatch.setattr(device, "physical_cpu_count", lambda: 8)
+    memory = type("Memory", (), {"available": 16 * 1024**3})()
+    monkeypatch.setattr(
+        device,
+        "psutil",
+        type("Psutil", (), {"cpu_count": lambda logical=False: 8, "virtual_memory": lambda: memory}),
+    )
 
     assert default_settings.worker.batch_size is None
     assert device.cpu_batch_size() == 6
     assert launcher.plan_worker(None).threads == 6
+
+    default_settings.worker.cpu_model_memory_gib = 4
+    default_settings.worker.cpu_memory_per_job_gib = 3
+    memory.available = 5 * 1024**3
+    assert device.cpu_batch_size() == 1
 
     default_settings.worker.batch_size = 3
     assert launcher.plan_worker(None).threads == 3

@@ -188,7 +188,10 @@ class WorkerSettings(BaseSettings):
     enforce_cpu: bool = False
     model_memory_gib: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     memory_per_job_gib: float = Field(default=1.1, gt=0, allow_inf_nan=False)
-    # auto: each GPU's job capacity; 6 on CPU.
+    # System RAM reserved for the model and each additional CPU job.
+    cpu_model_memory_gib: float = Field(default=2.0, gt=0, allow_inf_nan=False)
+    cpu_memory_per_job_gib: float = Field(default=2.0, gt=0, allow_inf_nan=False)
+    # auto: each GPU's job capacity; CPU and RAM dependent in CPU mode.
     batch_size: AutoInt = None
     batch_timeout: Duration = 2.0
     max_concurrency: AutoInt = None
@@ -699,7 +702,7 @@ def describe(config: Settings) -> list[str]:
             if isinstance(value, SecretStr):
                 shown = "********"
             elif value is None and type(group) is WorkerSettings and field == "batch_size":
-                shown = "auto (each GPU's job capacity, 6 on CPU; resolved at worker start)"
+                shown = "auto (each GPU's job capacity, CPU/RAM dependent; resolved at worker start)"
             elif value is None:
                 shown = "auto" if field in ("threads", "max_concurrency") else "(unset)"
             elif is_duration(type(group), field):

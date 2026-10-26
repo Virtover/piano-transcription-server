@@ -12,10 +12,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# WORKER_BATCH_SIZE=auto in CPU mode. CPU mode also runs this many worker threads.
-DEFAULT_CPU_BATCH_SIZE = 6
-
-
 def physical_cpu_count() -> int:
     detected = psutil.cpu_count(logical=False) if psutil else None
     return max(1, detected or os.cpu_count() or 1)
@@ -33,7 +29,21 @@ def cpu_thread_count() -> int:
 
 
 def cpu_batch_size() -> int:
-    return settings.worker.batch_size or DEFAULT_CPU_BATCH_SIZE
+    configured = settings.worker.batch_size
+    if configured is not None:
+        return configured
+
+    cpu_limit = cpu_thread_count()
+    if psutil is None:
+        return cpu_limit
+
+    available_memory = psutil.virtual_memory().available
+    worker = settings.worker
+    memory_limit = int(
+        max(0, available_memory - worker.cpu_model_memory_gib * 1024**3)
+        // (worker.cpu_memory_per_job_gib * 1024**3)
+    )
+    return max(1, min(cpu_limit, memory_limit))
 
 
 def gpu_batch_size(capacity: int) -> tuple[int, str | None]:
