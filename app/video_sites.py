@@ -326,8 +326,9 @@ def _wait_for_start(site: str, deadline: float, cancelled: CancellationCallback 
             with redis.pipeline() as pipe:
                 pipe.watch(key)
                 now = time.time()
-                start = max(now, float(pipe.get(key) or 0))
-                if start - now > deadline - time.monotonic():
+                previous = pipe.get(key)
+                start = max(now, float(previous or 0))
+                if previous is not None and start - now > deadline - time.monotonic():
                     raise SourceBusy(BUSY_MESSAGE, retry_after=math.ceil(start - now) + 1)
                 pipe.multi()
                 pipe.set(key, str(start + interval), px=math.ceil((start + interval - now) * 1000))
