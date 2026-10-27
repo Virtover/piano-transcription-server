@@ -1,6 +1,7 @@
 # 🎹 Piano Transcription Server
 
 [![Tests](https://github.com/Virtover/piano-transcription-server/actions/workflows/tests.yml/badge.svg)](https://github.com/Virtover/piano-transcription-server/actions/workflows/tests.yml)
+[![Support on Ko-fi](https://img.shields.io/badge/Support%20on%20Ko--fi-ff5e5b?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/krzysztofolszak)
 
 > Download a piano performance, transcribe it to MIDI, and retrieve the result through a simple asynchronous API.
 
@@ -52,11 +53,11 @@ The server is independent of any client that can make HTTP requests and download
 
 Found a bug or have a question? [Open an issue](https://github.com/Virtover/piano-transcription-server/issues).
 
-If the project is useful to you, you can support its development:
+If you find this project useful, support is always appreciated:
 
 <p align="center">
   <a href="https://ko-fi.com/krzysztofolszak">
-    <img src="https://img.shields.io/badge/Ko--fi-29ABE0?style=flat&logo=ko-fi&logoColor=white" alt="Ko-fi" />
+    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi" />
   </a>
 </p>
 
