@@ -133,6 +133,29 @@ def prune_backups(directory: str, policy: RetentionPolicy, now: float | None = N
     return removed
 
 
+def replaced_database_problem(billing, directory: str) -> str | None:
+    """A billing database created after the newest backup is not the one that
+    was backed up: PostgreSQL started empty, for example because
+    POSTGRES_DATA_LOCATION changed or its folder was removed. Serving it would
+    show every balance as zero, and new purchases would land in it."""
+    from app.billing import LEDGER_SINCE_KEY
+
+    dumps = {timestamp: path for timestamp, path in local_backups(directory).items() if path.suffix == ".dump"}
+    if not dumps:
+        return None
+    created = billing.get_state(LEDGER_SINCE_KEY)
+    newest = max(dumps)
+    if created is None or int(created) <= newest:
+        return None
+    return (
+        f"The billing database was created at {_when(int(created))}, after the newest backup "
+        f"{dumps[newest].name} ({_when(newest)}), so it is not the database that was backed up. "
+        "PostgreSQL probably started empty in a new place: check POSTGRES_DATA_LOCATION in .env, or restore "
+        "the backup (\"Moving the billing database\" in docs/configuration.md). To start with an empty "
+        "billing database on purpose, move the .dump files out of billing-data/backups."
+    )
+
+
 # --- Off-site ----------------------------------------------------------------
 
 def offsite_key(timestamp: int, extension: str | None = None) -> str:

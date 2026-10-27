@@ -36,7 +36,7 @@ SECRETS_DIR = "/run/secrets"
 CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_", "OFFSITE_")
 MIN_SERVER_PASSWORD_LENGTH = 12
 # Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
-COMPOSE_VARIABLES = {"API_BIND_ADDRESS"}
+COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION"}
 # The Compose profile that starts the cloudflared service.
 TUNNEL_PROFILE = "cloudflare"
 # In a folder of its own, mounted into cloudflared alone. Docker creates a

@@ -65,11 +65,21 @@ def test_api_bind_address_is_configurable():
     assert '"${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"' in compose
 
 
-def test_postgres_data_is_separate_from_backup_files():
+def test_postgres_data_location_defaults_to_its_own_folder():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
-    assert "- ./billing-data/postgres:/var/lib/postgresql/data" in compose
-    assert "postgres_data:" not in compose
+    # Separate from the backups in billing-data/backups.
+    assert "- ${POSTGRES_DATA_LOCATION:-./billing-data/postgres}:/var/lib/postgresql/data" in compose
+
+
+def test_postgres_data_volume_is_declared():
+    # POSTGRES_DATA_LOCATION=postgres_data names it; Compose rejects an
+    # undeclared volume.
+    import yaml
+
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+
+    assert "postgres_data" in compose["volumes"]
 
 
 def compose_services():

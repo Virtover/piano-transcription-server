@@ -21,7 +21,7 @@ cleanup service: deletes expired job files and stale routing entries
 * `cleanup` removes files whose Redis job state has expired.
 * `redis` stores job state and queues work.
 * `cloudflared` is optional and starts only with `COMPOSE_PROFILES=cloudflare`. It connects out to a Cloudflare Tunnel and forwards HTTPS requests to the API. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
-* The shared `data` volume stores job files. PostgreSQL billing data is stored in the private, host-mounted `billing-data/postgres` directory; verified dumps are stored separately in `billing-data/backups`. Only the API mounts `billing-data`: the workers process untrusted media and reach billing only through PostgreSQL.
+* The shared `data` volume stores job files. PostgreSQL keeps the billing database in `billing-data/postgres`, or in a Docker volume with `POSTGRES_DATA_LOCATION` (see [Where the database is kept](configuration.md#where-the-database-is-kept)); verified dumps are stored separately in `billing-data/backups`. Only the API mounts `billing-data`: the workers process untrusted media and reach billing only through PostgreSQL.
 
 The main implementation surfaces are `app/main.py`, `app/api/routes/`, `app/worker/`, and `app/transcription/`.
 
@@ -62,6 +62,7 @@ Billing backups are thinned out by the API after each backup, and optionally cop
 * **Billing database.** PostgreSQL commits transactions durably through WAL. Each balance change is one transaction, and PostgreSQL advisory transaction locks serialize reservations, settlements, purchases, and refunds. At startup the API settles or releases reservations whose job ended while it was down, and releases those whose job no longer exists in Redis.
 * **Redis.** Job state and the queues are written to an append-only file synced every second, so a power cut loses at most about a second of changes. A job lost that way is refunded at the next API startup, as above.
 * **Running jobs** fail and are refunded when their worker stops; see above. They are not resumed.
+* **A replaced billing database.** The API refuses to start when the billing database was created after the newest backup: PostgreSQL then started empty, for example in a new `POSTGRES_DATA_LOCATION`, and serving it would show every balance as zero.
 * **Billing backups** are synced to disk before they are renamed into place, so a power cut leaves either the complete backup or none.
 * **Starting again.** Every service restarts by itself, but only once Docker runs. Docker Desktop starts only when a user signs in, so a machine that should serve again after a power cut needs Docker to start at boot, or automatic sign-in, and to be set to power on when power returns.
 * **Logs** are kept to about 100 MB per container, so a failing service cannot fill the disk with them.

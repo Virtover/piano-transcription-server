@@ -136,6 +136,10 @@ async def server_password(request: Request, call_next):
 @app.on_event("startup")
 def sync_billing_catalog() -> None:
     ensure_valid("api")
+    # Before anything reads or changes billing, and before the next backup.
+    problem = backups.replaced_database_problem(Billing(), settings.billing.backup_dir)
+    if problem:
+        raise RuntimeError(problem)
     # The restart or shutdown a past notice announced has happened.
     maintenance.clear_past(transcription_routes.redis)
     recover_active_jobs("Transcription interrupted because the server restarted")

@@ -102,12 +102,10 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 
 `BILLING_PROVIDER=google_play` also requires the secret `google_play_service_account.json`. The API refuses to start if the package name, the OAuth client IDs, or the secret is missing. See the [Google Play billing guide](google-play-billing.md). The optional complete URL secret file is named `billing_database_url` (not an environment variable).
 
-Production billing is PostgreSQL. The Compose `postgres` service stores its
-live cluster in `./billing-data/postgres` and is reachable only on the
-internal Compose network. Keep `./billing-data/postgres` separate from
-`./billing-data/backups`; it contains PostgreSQL's live files, not portable
-backups. The directory is created by Compose if needed, and must be writable
-by the PostgreSQL container. Create `secrets/postgres_password` before
+Production billing is PostgreSQL. The Compose `postgres` service is
+reachable only on the internal Compose network, and keeps its live database
+where `POSTGRES_DATA_LOCATION` says; see [Where the database is
+kept](#where-the-database-is-kept). Create `secrets/postgres_password` before
 starting the stack.
 Backups are verified custom-format `pg_dump` files. To move an existing
 SQLite database, stop the old stack, start only PostgreSQL, and run the
@@ -205,6 +203,8 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 | `BILLING_DATABASE_URL` | `postgresql://billing@postgres:5432/billing` | same | Production PostgreSQL URL for balances, purchases, and reservations. Keep passwords in `secrets/billing_database_url` (or use Compose's PostgreSQL password file). |
 | `BILLING_DATABASE_PATH` | `/billing/billing.sqlite3` | tests/tools | Explicit SQLite path retained for legacy tests and the one-time migration source. |
 | `BILLING_BACKUP_DIR` | `/billing/backups` | same | Directory for billing database backups. |
+
+`POSTGRES_DATA_LOCATION` in `.env` is read by Docker Compose, not by the server: where PostgreSQL keeps the live billing database. See [Where the database is kept](#where-the-database-is-kept).
 
 `API_BIND_ADDRESS` in `.env` is read by Docker Compose, not by the server: the network address the API's port `8000` is published on. The secure default is `127.0.0.1`, which keeps direct HTTP local-only. Set `0.0.0.0` only when clients on the network require direct access, and use HTTPS through a tunnel or reverse proxy for public access. See [Password protection](setup.md#-password-protection).
 
@@ -481,11 +481,11 @@ backup is decrypted and checked with `pg_restore --list`, then saved in
 `secrets/offsite_backup_*` files there first. Without this server's code, any
 S3 client and `age --decrypt -i key.txt` do the same.
 
-The live PostgreSQL data is stored in `billing-data\postgres`, mounted inside
-the PostgreSQL container at `/var/lib/postgresql/data`. Do not edit, prune, or
-copy files inside that directory while PostgreSQL is running. PostgreSQL WAL
-and crash recovery protect committed transactions; this directory is the live
-database, not a portable backup.
+The live PostgreSQL data is where `POSTGRES_DATA_LOCATION` says, mounted
+inside the PostgreSQL container at `/var/lib/postgresql/data`. Do not edit,
+prune, or copy its files while PostgreSQL is running. PostgreSQL WAL and crash
+recovery protect committed transactions; these files are the live database,
+not a portable backup.
 
 The host-mounted `billing-data\backups` directory contains verified PostgreSQL
 custom-format files named `billing-<timestamp>.dump`. Older `.sqlite3` files
@@ -523,6 +523,73 @@ The fetched file is saved under `billing-data\restore` and checked with
 `pg_restore --list`. Copy it into the PostgreSQL container with `docker cp`
 before running `pg_restore`; this works in Windows PowerShell 5 as well as
 PowerShell 7. Keep `key.txt` outside the repository and remove it after use.
+
+### Where the database is kept
+
+`POSTGRES_DATA_LOCATION` in `.env` chooses where PostgreSQL keeps the live
+billing database:
+
+| Value | Where | Notes |
+| --- | --- | --- |
+| `./billing-data/postgres` (default) | A folder next to `docker-compose.yml` | Easy to see and to copy with the machine's own backup tools while the stack is stopped. |
+| `postgres_data` | A Docker volume | Recommended with Docker Desktop on Windows and macOS. |
+
+On Linux both are plain directories on the same disk: they are equally fast
+and equally safe. Docker Desktop on Windows and macOS runs the containers in a
+virtual machine and shares host folders into it. Every write to a folder then
+crosses that boundary, which makes small, synced writes several times slower,
+and Docker does not document that a sync to disk is passed through to the
+host's disk. PostgreSQL relies on that sync to keep committed transactions
+after a power cut. A Docker volume is stored inside the virtual machine's own
+disk, where syncs are reliable. Billing writes are few, so the speed rarely
+matters; the reliability does.
+
+Another path on the host also works, and so does any volume declared in
+`docker-compose.yml`.
+
+### Moving the billing database
+
+Changing `POSTGRES_DATA_LOCATION` does not move the data: PostgreSQL starts
+with an empty database in the new place. The API notices a billing database
+created after the newest backup and refuses to start, so balances are never
+served from an empty database by mistake. To move the database, back it up,
+switch, and restore the backup into the new place:
+
+**Windows (PowerShell)**
+
+```powershell
+docker compose stop api worker remote-worker cleanup
+docker compose run --rm --no-deps api python -m app.backups now
+$backup = Get-ChildItem .\billing-data\backups\billing-*.dump | Sort-Object Name | Select-Object -Last 1
+docker compose stop postgres
+# Now set POSTGRES_DATA_LOCATION in .env.
+docker compose up -d --wait postgres
+docker cp $backup.FullName "$(docker compose ps -q postgres):/tmp/billing.dump"
+docker compose exec -T postgres pg_restore -U billing -d billing --no-owner --exit-on-error /tmp/billing.dump
+docker compose exec -T postgres rm -f /tmp/billing.dump
+docker compose up -d
+```
+
+**macOS and Linux**
+
+```bash
+docker compose stop api worker remote-worker cleanup
+docker compose run --rm --no-deps api python -m app.backups now
+backup=$(ls billing-data/backups/billing-*.dump | sort | tail -n 1)
+docker compose stop postgres
+# Now set POSTGRES_DATA_LOCATION in .env.
+docker compose up -d --wait postgres
+docker cp "$backup" "$(docker compose ps -q postgres):/tmp/billing.dump"
+docker compose exec -T postgres pg_restore -U billing -d billing --no-owner --exit-on-error /tmp/billing.dump
+docker compose exec -T postgres rm -f /tmp/billing.dump
+docker compose up -d
+```
+
+Then check balances, for example with `docker compose exec api python -m
+app.admin status`. The old database is left where it was. Remove it once the
+new one works, so that switching back later cannot start an outdated copy:
+delete the `billing-data/postgres` folder, or the volume with `docker volume
+rm` (`docker volume ls` shows its full name).
 
 ### Opening a database or backup in a viewer
 

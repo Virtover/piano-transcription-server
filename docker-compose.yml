@@ -156,13 +156,18 @@ services:
       timeout: 3s
       retries: 20
     volumes:
-      - ./billing-data/postgres:/var/lib/postgresql/data
+      # The live database: the billing-data folder by default, or the Docker
+      # volume postgres_data with POSTGRES_DATA_LOCATION=postgres_data. Changing
+      # it does not move the data; see "Moving the billing database" in
+      # docs/configuration.md.
+      - ${POSTGRES_DATA_LOCATION:-./billing-data/postgres}:/var/lib/postgresql/data
     restart: unless-stopped
     logging: *logging
 
 volumes:
   data:
   redis_data:
+  postgres_data:
 
 secrets:
   postgres_password:

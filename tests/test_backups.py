@@ -291,3 +291,39 @@ def test_postgres_connections_time_out(postgres_billing, monkeypatch):
 
     assert seen["connect_timeout"] > 0
     assert seen["url"] == "postgresql://billing:s3cret%2Fpass@postgres:5432/billing"
+
+
+# --- A replaced database ---------------------------------------------------------
+
+def test_database_newer_than_every_backup_stops_the_api(api_context):
+    from app.billing import LEDGER_SINCE_KEY
+
+    _, settings, billing = api_context
+    backups_dir = Path(settings.billing.backup_dir)
+    backups_dir.mkdir()
+    (backups_dir / "billing-1000.dump").write_bytes(b"PGDMP")
+    billing.set_state(LEDGER_SINCE_KEY, "2000")
+
+    with pytest.raises(RuntimeError, match="POSTGRES_DATA_LOCATION"):
+        main.sync_billing_catalog()
+
+
+@pytest.mark.parametrize("files, created", [
+    ([], "2000"),
+    (["billing-3000.dump"], "2000"),
+    (["billing-2000.dump"], "2000"),
+    # Backups from before the PostgreSQL migration are not of this database.
+    (["billing-1000.sqlite3"], "2000"),
+])
+def test_database_older_than_its_backups_is_accepted(api_context, files, created):
+    from app.backups import replaced_database_problem
+    from app.billing import LEDGER_SINCE_KEY
+
+    _, settings, billing = api_context
+    backups_dir = Path(settings.billing.backup_dir)
+    backups_dir.mkdir()
+    for name in files:
+        (backups_dir / name).write_bytes(b"x")
+    billing.set_state(LEDGER_SINCE_KEY, created)
+
+    assert replaced_database_problem(billing, str(backups_dir)) is None
