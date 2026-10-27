@@ -55,8 +55,8 @@ Found a bug or have a question? [Open an issue](https://github.com/Virtover/pian
 If the project is useful to you, you can support its development:
 
 <p align="center">
-  <a href="https://ko-fi.com/Y3G527Q9PN">
-    <img src="https://img.shields.io/badge/Ko--fi-29ABE0?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi" />
+  <a href="https://ko-fi.com/krzysztofolszak">
+    <img src="https://img.shields.io/badge/Ko--fi-29ABE0?style=flat&logo=ko-fi&logoColor=white" alt="Ko-fi" />
   </a>
 </p>
 
