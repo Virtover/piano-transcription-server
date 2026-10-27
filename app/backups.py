@@ -19,6 +19,7 @@ import argparse
 import logging
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 from contextlib import closing
@@ -31,9 +32,9 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-BACKUP_FILE_PATTERN = re.compile(r"^billing-(\d+)\.sqlite3$")
+BACKUP_FILE_PATTERN = re.compile(r"^billing-(\d+)\.(?:sqlite3|dump)$")
 OFFSITE_PREFIX = "billing-backups/"
-OFFSITE_KEY_PATTERN = re.compile(r"^billing-backups/billing-(\d+)\.sqlite3\.age$")
+OFFSITE_KEY_PATTERN = re.compile(r"^billing-backups/billing-(\d+)\.(?:sqlite3|dump)\.age$")
 # billing_state keys for the last off-site copy, shown by `app.admin status`.
 OFFSITE_SUCCESS_KEY = "offsite_backup_succeeded_at"
 OFFSITE_FAILURE_KEY = "offsite_backup_failure"
@@ -134,8 +135,11 @@ def prune_backups(directory: str, policy: RetentionPolicy, now: float | None = N
 
 # --- Off-site ----------------------------------------------------------------
 
-def offsite_key(timestamp: int) -> str:
-    return f"{OFFSITE_PREFIX}billing-{timestamp}.sqlite3.age"
+def offsite_key(timestamp: int, extension: str | None = None) -> str:
+    extension = extension or (
+        "dump" if settings.billing.database_url.startswith(("postgres://", "postgresql://")) else "sqlite3"
+    )
+    return f"{OFFSITE_PREFIX}billing-{timestamp}.{extension}.age"
 
 
 class OffsiteStore:
@@ -186,7 +190,7 @@ class OffsiteStore:
         if not self.recipient:
             raise RuntimeError("OFFSITE_BACKUP_RECIPIENT is not set")
         encrypted = pyrage.encrypt(path.read_bytes(), [x25519.Recipient.from_str(self.recipient)])
-        key = offsite_key(timestamp)
+        key = offsite_key(timestamp, path.suffix.removeprefix("."))
         self.client.put_object(Bucket=self.bucket, Key=key, Body=encrypted)
         stored = self.client.head_object(Bucket=self.bucket, Key=key).get("ContentLength")
         if stored != len(encrypted):
@@ -233,7 +237,8 @@ def run_backup(billing, config=None, now: float | None = None, store_factory: Ca
     if removed:
         logger.info("Removed %d expired job diagnostics records", removed)
     directory = config.billing.backup_dir
-    billing.backup(f"{directory}/billing-{int(now)}.sqlite3")
+    extension = "dump" if getattr(billing, "_postgres", False) else "sqlite3"
+    billing.backup(f"{directory}/billing-{int(now)}.{extension}")
     policy = RetentionPolicy.from_settings(config.billing)
     for path in prune_backups(directory, policy, now):
         logger.info("Removed billing backup %s", path.name)
@@ -337,14 +342,22 @@ def fetch(name: str, identity: str, store_factory: Callable | None = None) -> in
             print(f"No off-site backup named {name}. See: python -m app.backups list", file=sys.stderr)
             return 1
     data = store.download(remote[timestamp]["key"], keys[0])
-    target = Path(settings.billing.backup_dir).parent / "restore" / f"billing-{timestamp}.sqlite3"
+    extension = remote[timestamp]["key"].rsplit(".", 2)[-2]
+    target = Path(settings.billing.backup_dir).parent / "restore" / f"billing-{timestamp}.{extension}"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
-    with closing(sqlite3.connect(f"file:{target}?mode=ro", uri=True)) as connection:
-        result = connection.execute("PRAGMA integrity_check").fetchone()
-    if result != ("ok",):
-        print(f"{target} failed its integrity check: {result}", file=sys.stderr)
-        return 1
+    if extension == "dump":
+        try:
+            subprocess.run(["pg_restore", "--list", str(target)], check=True, capture_output=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            print(f"{target} failed pg_restore validation: {error}", file=sys.stderr)
+            return 1
+    else:
+        with closing(sqlite3.connect(f"file:{target}?mode=ro", uri=True)) as connection:
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+        if result != ("ok",):
+            print(f"{target} failed its integrity check: {result}", file=sys.stderr)
+            return 1
     print(f"Backup from {_when(timestamp)} saved and checked: {target}")
     return 0
 
@@ -370,7 +383,7 @@ def main(arguments: list[str]) -> int:
         return fetch(args.name, sys.stdin.read())
     from app.billing import Billing
 
-    if not run_backup(Billing(settings.billing.database_path)):
+    if not run_backup(Billing()):
         print("The local backup is done; copying it off-site failed (see above).", file=sys.stderr)
         return 1
     print("Backup done" + (", and copied off-site." if settings.offsite.enabled else "."))

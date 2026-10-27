@@ -45,6 +45,7 @@ def api_context(tmp_path, monkeypatch, video_sites) -> Iterator[tuple[TestClient
     from app.worker import tasks
 
     settings.auth.client_ids = ["test-client-id"]
+    settings.billing.database_url = ""
     settings.billing.database_path = str(tmp_path / "billing.sqlite3")
     settings.billing.backup_dir = str(tmp_path / "backups")
     settings.service.data_dir = str(tmp_path / "data")

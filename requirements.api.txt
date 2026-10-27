@@ -5,6 +5,7 @@ uvicorn[standard]==0.54.0
 pydantic==2.14.1
 pydantic-settings==2.16.1
 redis==8.1.0
+psycopg[binary]==3.2.9
 cachetools==7.2.4
 dramatiq[redis]==2.2.1
 google-api-python-client==2.201.0

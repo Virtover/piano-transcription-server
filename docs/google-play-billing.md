@@ -122,7 +122,9 @@ c =
 \end{cases}
 $$
 
-The cancellation charge cannot exceed the reserved cost. Billing records are stored in the SQLite database configured by `BILLING_DATABASE_PATH`.
+The cancellation charge cannot exceed the reserved cost. Production billing
+records are stored in PostgreSQL; `BILLING_DATABASE_PATH` is retained only for
+tests and the one-time SQLite migration source.
 
 ## 🗑️ Account deletion
 

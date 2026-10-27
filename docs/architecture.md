@@ -21,7 +21,7 @@ cleanup service: deletes expired job files and stale routing entries
 * `cleanup` removes files whose Redis job state has expired.
 * `redis` stores job state and queues work.
 * `cloudflared` is optional and starts only with `COMPOSE_PROFILES=cloudflare`. It connects out to a Cloudflare Tunnel and forwards HTTPS requests to the API. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
-* The shared `data` volume stores job files. Billing SQLite data and its periodic backups are stored in the host-mounted `billing-data` directory, available only to the API and the workers.
+* The shared `data` volume stores job files. PostgreSQL billing data is stored in the private, host-mounted `billing-data/postgres` directory; verified dumps are stored separately in `billing-data/backups`, available only to the API and workers.
 
 The main implementation surfaces are `app/main.py`, `app/api/routes/`, `app/worker/`, and `app/transcription/`.
 
@@ -59,11 +59,12 @@ Billing backups are thinned out by the API after each backup, and optionally cop
 
 ### ⚡ Crashes and power cuts
 
-* **Billing database.** SQLite in WAL mode, with every commit synced to disk (`synchronous=FULL`): a purchase or charge the API confirmed survives a power cut, as long as the disk honors sync requests. Each balance change is one transaction. At startup the API settles or releases reservations whose job ended while it was down, and releases those whose job no longer exists in Redis.
+* **Billing database.** PostgreSQL commits transactions durably through WAL. Each balance change is one transaction, and PostgreSQL advisory transaction locks serialize reservations, settlements, purchases, and refunds. At startup the API settles or releases reservations whose job ended while it was down, and releases those whose job no longer exists in Redis.
 * **Redis.** Job state and the queues are written to an append-only file synced every second, so a power cut loses at most about a second of changes. A job lost that way is refunded at the next API startup, as above.
 * **Running jobs** fail and are refunded when their worker stops; see above. They are not resumed.
 * **Completed results.** MIDI is written to a same-directory temporary file, synced, atomically renamed into place, and checked before Redis records `completed`. At startup, completed jobs are checked again; a missing, invalid, or out-of-data-directory result is changed to `failed` and its unfinished billing reservation is released.
 * **`/ready`** answers `503` while Redis or the billing database cannot be reached. `/health` only says that the API process answers.
+* **Security.** PostgreSQL is not published as a host port and its password is mounted as a Docker secret. Off-site backup endpoints must use HTTPS. Direct API HTTP is suitable only on a trusted local network; use the Cloudflare Tunnel or another TLS reverse proxy for public access.
 
 Redis started with the append-only file on, over a volume that has only a snapshot, starts empty. `scripts/server.py` turns it on in the running Redis before it restarts or stops anything, so updating with it keeps queued jobs. When updating from an older version with `docker compose` directly, run this first:
 

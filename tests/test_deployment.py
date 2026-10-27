@@ -62,7 +62,14 @@ def test_runpod_torch_is_pinned():
 def test_api_bind_address_is_configurable():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
-    assert '"${API_BIND_ADDRESS:-0.0.0.0}:8000:8000"' in compose
+    assert '"${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"' in compose
+
+
+def test_postgres_data_is_separate_from_backup_files():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "- ./billing-data/postgres:/var/lib/postgresql/data" in compose
+    assert "postgres_data:" not in compose
 
 
 # --- Writable directories ---------------------------------------------------

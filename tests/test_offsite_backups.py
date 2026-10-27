@@ -284,5 +284,6 @@ def test_online_checks_skip_off_site_when_off(api_context, monkeypatch):
 
 
 def test_offsite_key_names():
-    assert offsite_key(123) == "billing-backups/billing-123.sqlite3.age"
+    assert offsite_key(123) == "billing-backups/billing-123.dump.age"
+    assert offsite_key(123, "sqlite3") == "billing-backups/billing-123.sqlite3.age"
     assert backups.OFFSITE_KEY_PATTERN.match(offsite_key(int(time.time())))

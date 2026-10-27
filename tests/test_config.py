@@ -376,6 +376,11 @@ def test_env_example_has_no_inline_comments_or_wiring():
     assert not example_keys() & {"REDIS_URL", "DATA_DIR", "BILLING_DATABASE_PATH", "BILLING_BACKUP_DIR"}
 
 
+def test_offsite_backup_endpoint_requires_tls(tmp_path):
+    with pytest.raises(ConfigError, match="OFFSITE_BACKUP_ENDPOINT"):
+        load(tmp_path, "OFFSITE_BACKUP_ENDPOINT=http://storage.example\n")
+
+
 def test_every_setting_is_documented():
     documentation = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
     names = [*config.known_variables(), *config.ALIASES]

@@ -102,7 +102,12 @@ New installations need nothing extra. An installation from before this change ha
 docker compose run --rm --no-deps -u root api chown -R 10001:10001 /data /billing
 ```
 
-On Linux, this also changes the owner of `billing-data` on the host: its files stay readable, but changing them there, for example to restore a backup, needs `sudo`. Admin commands such as `docker compose exec api python -m app.admin` run as the same user, so files they create stay usable by the services.
+On Linux, this also changes the owner of `billing-data` on the host, including
+the live `billing-data/postgres` cluster: its files stay readable, but
+changing them there, for example to restore a backup, needs `sudo`. Do not
+edit the PostgreSQL cluster files directly while PostgreSQL is running. Admin
+commands such as `docker compose exec api python -m app.admin` run as the same
+user, so files they create stay usable by the services.
 
 ## 🎮 GPU and CPU execution
 

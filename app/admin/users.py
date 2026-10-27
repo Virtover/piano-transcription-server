@@ -42,7 +42,8 @@ def account(who: str) -> dict:
         "purchases": [
             dict(row)
             for row in billing.read(
-                "SELECT product_id, order_id, minutes, voided_at FROM purchases WHERE user_id = ? ORDER BY rowid DESC",
+                "SELECT product_id, order_id, minutes, voided_at FROM purchases WHERE user_id = ? "
+                "ORDER BY voided_at NULLS FIRST, order_id DESC",
                 (user_id,),
             )
         ],

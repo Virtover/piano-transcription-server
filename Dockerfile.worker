@@ -10,8 +10,11 @@ ARG DENO_SHA256=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
+        python3-dev \
         python3-pip \
         ffmpeg \
+        build-essential \
+        postgresql-client \
         wget \
         unzip \
     && wget -qO /tmp/deno.zip "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \

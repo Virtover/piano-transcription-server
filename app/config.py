@@ -239,6 +239,9 @@ class BillingSettings(BaseSettings):
 
     provider: Literal["none", "google_play"] = "none"
     products: dict[str, int] = Field(default_factory=dict)
+    # PostgreSQL is the production database. database_path remains for the
+    # explicit SQLite compatibility used by local tests and migration tools.
+    database_url: str = "postgresql://billing@postgres:5432/billing"
     database_path: str = "/billing/billing.sqlite3"
     backup_dir: str = "/billing/backups"
     backup_interval: Duration = 15 * 60.0
@@ -286,6 +289,7 @@ class SecretSettings(BaseSettings):
     offsite_backup_secret_key: SecretStr | None = None
     # Optional. When present, every request except /health and /ready needs it.
     server_password: SecretStr | None = None
+    billing_database_url: SecretStr | None = None
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
@@ -331,6 +335,13 @@ class OffsiteSettings(BaseSettings):
     # The age public key (age1...) backups are encrypted to. The private key
     # is kept elsewhere; this server never needs it.
     recipient: str | None = None
+
+    @field_validator("endpoint")
+    @classmethod
+    def _https_endpoint(cls, value: str | None) -> str | None:
+        if value is not None and not value.lower().startswith("https://"):
+            raise ValueError("must use https:// to protect backup credentials and data")
+        return value
 
     @property
     def enabled(self) -> bool:

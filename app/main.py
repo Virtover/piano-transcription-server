@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 def run_billing_backup() -> None:
-    run_backup(Billing(settings.billing.database_path))
+    run_backup(Billing())
 
 
 def backup_billing_database() -> None:
@@ -56,7 +56,7 @@ def monitor_backup_health() -> None:
     while True:
         time.sleep(interval)
         try:
-            state = backups.offsite_status(Billing(settings.billing.database_path))
+            state = backups.offsite_status(Billing())
             now = int(time.time())
             if state is None:
                 continue
@@ -81,7 +81,7 @@ def watch_abandoned_jobs() -> None:
 
 def sync_voided_purchases() -> None:
     """Take back refunded minutes, at startup and then periodically."""
-    billing = Billing(settings.billing.database_path)
+    billing = Billing()
     while True:
         try:
             google_play.sync_voided_purchases(billing)
@@ -161,7 +161,7 @@ def readiness():
     except Exception as error:
         raise HTTPException(status_code=503, detail="Redis is unavailable") from error
     try:
-        Billing(settings.billing.database_path).check()
+        Billing().check()
     except Exception as error:
         raise HTTPException(status_code=503, detail="The billing database is unavailable") from error
 

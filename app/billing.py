@@ -1,8 +1,10 @@
 import hashlib
 import math
 import sqlite3
+import subprocess
 import threading
 import time
+from urllib.parse import quote, urlsplit, urlunsplit
 from contextlib import closing
 from pathlib import Path
 
@@ -14,6 +16,33 @@ TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 LEDGER_KINDS = ("purchase", "free", "used", "voided", "admin")
 # billing_state key: when this database started recording minute_ledger.
 LEDGER_SINCE_KEY = "minute_ledger_since"
+SCHEMA_VERSION = 1
+
+
+class _PostgresConnection:
+    """Small DB-API adapter retaining qmark SQL for legacy SQLite callers."""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def execute(self, query, parameters=()):
+        return self._connection.execute(query.replace("?", "%s"), parameters)
+
+    def executemany(self, query, parameters):
+        return self._connection.executemany(query.replace("?", "%s"), parameters)
+
+    def __enter__(self):
+        self._connection.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self._connection.__exit__(*args)
+
+    def close(self):
+        return self._connection.close()
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
 
 
 def transcription_cost(duration_seconds: float) -> int:
@@ -33,10 +62,72 @@ class Billing:
         # Billing when imported, also in services and tests without access
         # to the billing directory.
         self.database_path = database_path or settings.billing.database_path
+        self.database_url = None if database_path else (
+            settings.secrets.billing_database_url.get_secret_value()
+            if settings.secrets.billing_database_url else settings.billing.database_url
+        )
+        self._postgres = bool(self.database_url and not database_path)
         self._ready = False
         self._ready_lock = threading.Lock()
 
     def _create_schema(self) -> None:
+        if self._postgres:
+            with self._connect_raw() as connection:
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended('billing-schema', 0))"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS billing_schema (
+                        version INTEGER PRIMARY KEY,
+                        applied_at BIGINT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id TEXT PRIMARY KEY, email TEXT UNIQUE, minutes INTEGER NOT NULL DEFAULT 0,
+                        free_grant_at BIGINT NOT NULL DEFAULT 0
+                    );
+                    CREATE TABLE IF NOT EXISTS purchases (
+                        product_id TEXT NOT NULL, purchase_token TEXT NOT NULL, user_id TEXT NOT NULL,
+                        minutes INTEGER NOT NULL, order_id TEXT, voided_at BIGINT,
+                        PRIMARY KEY (product_id, purchase_token)
+                    );
+                    CREATE TABLE IF NOT EXISTS transcription_reservations (
+                        job_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, reserved_minutes INTEGER NOT NULL CHECK (reserved_minutes > 0),
+                        charged_minutes INTEGER, status TEXT NOT NULL CHECK (status IN ('reserved','released','settled'))
+                    );
+                    CREATE TABLE IF NOT EXISTS deleted_users (user_hash TEXT PRIMARY KEY, free_grant_at BIGINT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS job_diagnostics (
+                        job_id TEXT PRIMARY KEY, user_id TEXT, source TEXT, source_url TEXT,
+                        duration_seconds DOUBLE PRECISION, cost_minutes INTEGER, status TEXT NOT NULL, error TEXT,
+                        backend TEXT, outsourced INTEGER NOT NULL DEFAULT 0, requeue_reason TEXT,
+                        created_at BIGINT NOT NULL, started_at BIGINT, finished_at BIGINT, updated_at BIGINT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS billing_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS minute_ledger (
+                        id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL,
+                        minutes INTEGER NOT NULL, at BIGINT NOT NULL, note TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS admin_actions (
+                        id BIGSERIAL PRIMARY KEY, at BIGINT NOT NULL, actor TEXT NOT NULL,
+                        action TEXT NOT NULL, target TEXT, detail TEXT, reason TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS minute_ledger_user_index ON minute_ledger (user_id);
+                    CREATE INDEX IF NOT EXISTS minute_ledger_at_index ON minute_ledger (at);
+                    CREATE INDEX IF NOT EXISTS job_diagnostics_user_index ON job_diagnostics (user_id);
+                    CREATE INDEX IF NOT EXISTS job_diagnostics_created_index ON job_diagnostics (created_at);
+                    INSERT INTO billing_state (key, value) VALUES ('minute_ledger_since', '{ledger_since}')
+                    ON CONFLICT (key) DO NOTHING
+                    ;
+                    INSERT INTO billing_schema (version, applied_at)
+                    VALUES ({schema_version}, {applied_at})
+                    ON CONFLICT (version) DO NOTHING
+                    """.format(
+                        ledger_since=int(time.time()),
+                        schema_version=SCHEMA_VERSION,
+                        applied_at=int(time.time()),
+                    ),
+                )
+            return
         Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
         with closing(self._open()) as connection, connection:
             connection.executescript(
@@ -123,7 +214,41 @@ class Billing:
             if "voided_at" not in purchase_columns:
                 connection.execute("ALTER TABLE purchases ADD COLUMN voided_at INTEGER")
 
-    def _open(self) -> sqlite3.Connection:
+    def _connect_raw(self):
+        import psycopg
+        from psycopg.rows import dict_row
+        url = self._postgres_url()
+        # Compose deliberately keeps the password out of the URL and exposes
+        # it as a Docker secret. A complete billing_database_url secret still
+        # takes precedence in __init__.
+        password_file = Path(settings.secrets_dir) / "postgres_password"
+        if url and urlsplit(url).password is None and password_file.is_file():
+            parts = urlsplit(url)
+            password = password_file.read_text(encoding="utf-8").strip()
+            netloc = f"{parts.username}:{quote(password, safe='')}@{parts.hostname}"
+            if parts.port:
+                netloc += f":{parts.port}"
+            url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+        connection = psycopg.connect(url)
+        connection.row_factory = dict_row
+        connection.autocommit = False
+        return connection
+
+    def _postgres_url(self) -> str:
+        url = self.database_url
+        password_file = Path(settings.secrets_dir) / "postgres_password"
+        if url and urlsplit(url).password is None and password_file.is_file():
+            parts = urlsplit(url)
+            password = password_file.read_text(encoding="utf-8").strip()
+            netloc = f"{parts.username}:{quote(password, safe='')}@{parts.hostname}"
+            if parts.port:
+                netloc += f":{parts.port}"
+            url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+        return url
+
+    def _open(self):
+        if self._postgres:
+            return _PostgresConnection(self._connect_raw())
         connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
@@ -131,6 +256,14 @@ class Billing:
         # purchase or charge. Usually SQLite's default, but not on every build.
         connection.execute("PRAGMA synchronous=FULL")
         return connection
+
+    def _begin_write(self, connection) -> None:
+        if self._postgres:
+            # Serialize balance-changing transactions and make reserve/settle/
+            # purchase safe across API and worker processes.
+            connection.execute("SELECT pg_advisory_xact_lock(hashtextextended('billing-write', 0))")
+        else:
+            connection.execute("BEGIN IMMEDIATE")
 
     def check(self) -> None:
         """Raise if the database cannot be opened and read."""
@@ -148,7 +281,7 @@ class Billing:
     @staticmethod
     def _ensure_user(connection: sqlite3.Connection, user_id: str, email: str | None = None) -> None:
         created = connection.execute(
-            "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+            "INSERT INTO users (user_id) VALUES (?) ON CONFLICT (user_id) DO NOTHING",
             (user_id,),
         ).rowcount
         if created:
@@ -181,7 +314,7 @@ class Billing:
 
         now = int(time.time())
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_write(connection)
             self._ensure_user(connection, user_id, email)
             user = connection.execute(
                 "SELECT minutes, free_grant_at FROM users WHERE user_id = ?",
@@ -242,7 +375,7 @@ class Billing:
         if settings.billing.provider == "none" or cost <= 0:
             return None
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_write(connection)
             self._ensure_user(connection, user_id, email)
             user = connection.execute(
                 "SELECT minutes FROM users WHERE user_id = ?",
@@ -265,7 +398,8 @@ class Billing:
                        reserved_minutes = excluded.reserved_minutes,
                        charged_minutes = NULL,
                        status = 'reserved'
-                   WHERE status = 'released' AND user_id = excluded.user_id""",
+                   WHERE transcription_reservations.status = 'released'
+                     AND transcription_reservations.user_id = excluded.user_id""",
                 (job_id, user_id, cost),
             ).rowcount
             if not reserved_now:
@@ -305,7 +439,7 @@ class Billing:
 
     def _settle(self, job_id: str, charged_minutes: int | None) -> None:
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_write(connection)
             reservation = connection.execute(
                 "SELECT * FROM transcription_reservations WHERE job_id = ?",
                 (job_id,),
@@ -336,7 +470,7 @@ class Billing:
     ) -> int:
         minutes = settings.billing.products[product_id]
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_write(connection)
             existing = connection.execute(
                 "SELECT 1 FROM purchases WHERE product_id = ? AND purchase_token = ?",
                 (product_id, token),
@@ -361,16 +495,16 @@ class Billing:
         (user ID, minutes taken), or None if the token is unknown, already
         voided, or belonged to a deleted account."""
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_write(connection)
             purchase = connection.execute(
-                "SELECT rowid, user_id, minutes, order_id FROM purchases WHERE purchase_token = ? AND voided_at IS NULL",
+                "SELECT product_id, purchase_token, user_id, minutes, order_id FROM purchases WHERE purchase_token = ? AND voided_at IS NULL",
                 (token,),
             ).fetchone()
             if purchase is None:
                 return None
             connection.execute(
-                "UPDATE purchases SET voided_at = ? WHERE rowid = ?",
-                (int(time.time()), purchase["rowid"]),
+                "UPDATE purchases SET voided_at = ? WHERE product_id = ? AND purchase_token = ?",
+                (int(time.time()), purchase["product_id"], purchase["purchase_token"]),
             )
             if purchase["user_id"] == DELETED_USER_ID:
                 return None
@@ -406,7 +540,7 @@ class Billing:
         """Add minutes to a user's balance by hand, or take them away when
         negative. Returns the new balance, which can be below zero."""
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_write(connection)
             updated = connection.execute(
                 "UPDATE users SET minutes = minutes + ? WHERE user_id = ?",
                 (minutes, user_id),
@@ -439,7 +573,7 @@ class Billing:
         """Delete a user's account data. Purchases are kept without the user ID
         so a purchase token cannot be credited twice."""
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_write(connection)
             user = connection.execute(
                 "SELECT free_grant_at FROM users WHERE user_id = ?",
                 (user_id,),
@@ -464,7 +598,8 @@ class Billing:
             if user and user["free_grant_at"] and _free_minutes_enabled():
                 if user["free_grant_at"] + period_seconds() > time.time():
                     connection.execute(
-                        "INSERT OR REPLACE INTO deleted_users (user_hash, free_grant_at) VALUES (?, ?)",
+                        "INSERT INTO deleted_users (user_hash, free_grant_at) VALUES (?, ?) "
+                        "ON CONFLICT (user_hash) DO UPDATE SET free_grant_at = excluded.free_grant_at",
                         (_user_hash(user_id), user["free_grant_at"]),
                     )
             return user is not None
@@ -494,9 +629,15 @@ class Billing:
                        error = excluded.error,
                        backend = excluded.backend,
                        outsourced = excluded.outsourced,
-                       requeue_reason = COALESCE(excluded.requeue_reason, requeue_reason),
-                       started_at = COALESCE(started_at, excluded.started_at),
-                       finished_at = COALESCE(finished_at, excluded.finished_at),
+                       requeue_reason = COALESCE(
+                           excluded.requeue_reason, job_diagnostics.requeue_reason
+                       ),
+                       started_at = COALESCE(
+                           job_diagnostics.started_at, excluded.started_at
+                       ),
+                       finished_at = COALESCE(
+                           job_diagnostics.finished_at, excluded.finished_at
+                       ),
                        updated_at = excluded.updated_at""",
                 (
                     job_id,
@@ -541,6 +682,27 @@ class Billing:
         a complete, intact backup."""
         target_path = Path(destination)
         target_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._postgres:
+            partial = target_path.with_name(target_path.name + ".partial")
+            try:
+                subprocess.run(
+                    ["pg_dump", "--format=custom", "--no-owner", "--file", str(partial), self._postgres_url()],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                if partial.stat().st_size == 0:
+                    raise RuntimeError("pg_dump produced an empty backup")
+                subprocess.run(
+                    ["pg_restore", "--list", str(partial)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                partial.replace(target_path)
+            finally:
+                partial.unlink(missing_ok=True)
+            return
         partial = target_path.with_name(target_path.name + ".partial")
         try:
             with closing(self._connect()) as source, closing(sqlite3.connect(partial)) as target:

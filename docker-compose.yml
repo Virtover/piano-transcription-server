@@ -3,7 +3,7 @@
 x-wiring: &wiring
   REDIS_URL: redis://redis:6379/0
   DATA_DIR: /data
-  BILLING_DATABASE_PATH: /billing/billing.sqlite3
+  BILLING_DATABASE_URL: postgresql://billing@postgres:5432/billing
   BILLING_BACKUP_DIR: /billing/backups
 
 services:
@@ -16,7 +16,7 @@ services:
       # 0.0.0.0 accepts connections on every network interface. Set
       # API_BIND_ADDRESS=127.0.0.1 in .env when an HTTPS proxy on this machine
       # forwards to the API, so only the proxy can reach it.
-      - "${API_BIND_ADDRESS:-0.0.0.0}:8000:8000"
+      - "${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"
     env_file:
       - .env
     environment: *wiring
@@ -26,6 +26,8 @@ services:
       - ./secrets:/run/secrets:ro
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 
@@ -42,6 +44,8 @@ services:
       - ./secrets:/run/secrets:ro
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     gpus: all
     restart: unless-stopped
@@ -63,6 +67,8 @@ services:
       - ./secrets:/run/secrets:ro
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     command: ["python", "-m", "app.worker.launcher", "remote"]
     restart: unless-stopped
@@ -121,6 +127,27 @@ services:
       - redis_data:/data
     restart: unless-stopped
 
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: billing
+      POSTGRES_USER: billing
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U billing -d billing"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - ./billing-data/postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
 volumes:
   data:
   redis_data:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password

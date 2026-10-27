@@ -100,7 +100,47 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 | `GOOGLE_PLAY_PACKAGE_NAME` | unset | Android package name used for Google Play verification. Required for billing. |
 | `GOOGLE_PLAY_VOIDED_PURCHASES_INTERVAL` | `1h` | How often refunded and charged-back purchases are read from Google Play, and their minutes taken back. See [Refunds](google-play-billing.md#-refunds-and-chargebacks). |
 
-`BILLING_PROVIDER=google_play` also requires the secret `google_play_service_account.json`. The API refuses to start if the package name, the OAuth client IDs, or the secret is missing. See the [Google Play billing guide](google-play-billing.md).
+`BILLING_PROVIDER=google_play` also requires the secret `google_play_service_account.json`. The API refuses to start if the package name, the OAuth client IDs, or the secret is missing. See the [Google Play billing guide](google-play-billing.md). The optional complete URL secret file is named `billing_database_url` (not an environment variable).
+
+Production billing is PostgreSQL. The Compose `postgres` service stores its
+live cluster in `./billing-data/postgres` and is reachable only on the
+internal Compose network. Keep `./billing-data/postgres` separate from
+`./billing-data/backups`; it contains PostgreSQL's live files, not portable
+backups. The directory is created by Compose if needed, and must be writable
+by the PostgreSQL container. Create `secrets/postgres_password` before
+starting the stack.
+Backups are verified custom-format `pg_dump` files. To move an existing
+SQLite database, stop the old stack, start only PostgreSQL, and run the
+one-time migration command:
+
+**Windows (PowerShell)**
+
+```powershell
+docker compose down
+docker compose up -d --wait postgres
+docker compose run --build --rm --no-deps api python -m app.migrate_billing /billing/billing.sqlite3 "postgresql://billing@postgres:5432/billing"
+```
+
+**macOS and Linux**
+
+```bash
+docker compose down
+docker compose up -d --wait postgres
+docker compose run --build --rm --no-deps api python -m app.migrate_billing /billing/billing.sqlite3 "postgresql://billing@postgres:5432/billing"
+```
+
+The migration reads the PostgreSQL password from
+`secrets/postgres_password`; it is not part of the command. It validates the
+SQLite source, copies all billing tables, and compares row counts. If the
+command reports `Billing migration completed and validated.`, start the full
+stack with `docker compose up -d`.
+
+The command validates SQLite integrity, copies all billing tables, and compares
+row counts. It is never run automatically at startup. PostgreSQL schema setup is
+serialized with an advisory lock so concurrent API/worker starts cannot
+partially initialize it. `python -m app.backups
+now` creates and verifies a `billing-<timestamp>.dump`; `fetch` validates
+off-site dumps with `pg_restore --list` before exposing them for restore.
 
 ### Outsourcing
 
@@ -149,7 +189,7 @@ Optional, and on when `OFFSITE_BACKUP_BUCKET` is set. Then the other values and 
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `OFFSITE_BACKUP_ENDPOINT` | unset | S3-compatible endpoint of the backup storage. |
+| `OFFSITE_BACKUP_ENDPOINT` | unset | HTTPS S3-compatible endpoint of the backup storage. Plain HTTP is rejected because it would expose backup credentials and data. |
 | `OFFSITE_BACKUP_BUCKET` | unset | Bucket for the encrypted billing backups. Setting it turns off-site copies on. |
 | `OFFSITE_BACKUP_REGION` | `auto` | Storage region. `auto` for Cloudflare R2. |
 | `OFFSITE_BACKUP_RECIPIENT` | unset | The age public key (`age1...`) backups are encrypted to. Not a secret; the private key stays off this server. |
@@ -162,10 +202,11 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 | --- | --- | --- | --- |
 | `REDIS_URL` | `redis://localhost:6379/0` | `redis://redis:6379/0` | Redis connection URL. |
 | `DATA_DIR` | `/data` | `/data` | Shared directory for job files. |
-| `BILLING_DATABASE_PATH` | `/billing/billing.sqlite3` | same | SQLite database for balances, purchases, and reservations. |
+| `BILLING_DATABASE_URL` | `postgresql://billing@postgres:5432/billing` | same | Production PostgreSQL URL for balances, purchases, and reservations. Keep passwords in `secrets/billing_database_url` (or use Compose's PostgreSQL password file). |
+| `BILLING_DATABASE_PATH` | `/billing/billing.sqlite3` | tests/tools | Explicit SQLite path retained for legacy tests and the one-time migration source. |
 | `BILLING_BACKUP_DIR` | `/billing/backups` | same | Directory for billing database backups. |
 
-`API_BIND_ADDRESS` in `.env` is read by Docker Compose, not by the server: the network address the API's port `8000` is published on. The default `0.0.0.0` accepts connections on every network interface, which phones on the same network need. Set `127.0.0.1` when an HTTPS proxy or tunnel on the same machine forwards to the API, so it cannot be reached around the proxy. See [Password protection](setup.md#-password-protection).
+`API_BIND_ADDRESS` in `.env` is read by Docker Compose, not by the server: the network address the API's port `8000` is published on. The secure default is `127.0.0.1`, which keeps direct HTTP local-only. Set `0.0.0.0` only when clients on the network require direct access, and use HTTPS through a tunnel or reverse proxy for public access. See [Password protection](setup.md#-password-protection).
 
 Default for `SOURCE_URL_ALLOWED_HOSTS`:
 
@@ -191,6 +232,7 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `offsite_backup_access_key` | Optional. Access key ID for the off-site backup bucket. See [Off-site copies](#off-site-copies). |
 | `offsite_backup_secret_key` | Optional. Secret access key for the off-site backup bucket. |
 | `server_password` | Optional. When present, every request except `/health` and `/ready` needs this password, as the `X-Server-Password` header or HTTP Basic auth with any user name. At least 12 characters; the API refuses to start otherwise. See [Password protection](setup.md#-password-protection). |
+| `postgres_password` | PostgreSQL password used by the API and workers. Mount it as `secrets/postgres_password`; never put it in `.env`. |
 
 The Cloudflare tunnel token is in a folder of its own, `secrets/cloudflare/tunnel_token`, because only the `cloudflared` service gets that folder. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
 
@@ -214,7 +256,7 @@ An existing `.env` keeps working without changes; you only see deprecation warni
 
 1. Rename `CLEANUP_INTERVAL_SECONDS=86400` to `CLEANUP_INTERVAL=1d`, and `WORKER_BATCH_TIMEOUT_SECONDS=2` to `WORKER_BATCH_TIMEOUT=2s`.
 2. Rename the service-account key in `secrets` to `google_play_service_account.json` and remove `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE`.
-3. Remove `REDIS_URL`, `DATA_DIR`, and `BILLING_DATABASE_PATH` from `.env`. Compose sets them now; values left in `.env` are overridden by Compose.
+3. Remove `REDIS_URL`, `DATA_DIR`, `BILLING_DATABASE_URL`, and `BILLING_DATABASE_PATH` from `.env`. Compose sets them now; values left in `.env` are overridden by Compose.
 4. Remove any inline comments after values.
 5. Run `docker compose run --rm api python -m app.config check`, then `docker compose up -d --build`.
 
@@ -328,7 +370,7 @@ See [Administration](administration.md#-users).
 
 ## 💾 Billing database backups
 
-The API creates a SQLite backup in `/billing/backups` every `BILLING_BACKUP_INTERVAL` (default `15m`), starting when the API starts. On the host these files are in `./billing-data/backups`. They are made with SQLite's online backup, so they are consistent while the API is running. Each is written under a temporary name ending in `.partial`, checked with `PRAGMA integrity_check`, and only then renamed, so every `billing-<unix-time>.sqlite3` file is complete. A backup that fails the check is deleted and the error logged.
+The API creates a PostgreSQL custom-format dump in `/billing/backups` every `BILLING_BACKUP_INTERVAL` (default `15m`), starting when the API starts. On the host these files are in `./billing-data/backups`. Each dump is written under a temporary name, checked with `pg_restore --list`, and only then atomically renamed, so every `billing-<unix-time>.dump` file is complete. A backup that fails the check is deleted and the error logged.
 
 To back up now, for example before an update, and to see what exists:
 
@@ -433,84 +475,59 @@ docker compose run --rm --no-deps -T api python -m app.backups fetch latest < ke
 rm key.txt
 ```
 
-Instead of `latest`, give a name from `python -m app.backups list`. The backup is decrypted, checked with `PRAGMA integrity_check`, and saved in `./billing-data/restore`. On a new machine, copy `.env` and the `secrets/offsite_backup_*` files there first. Without this server's code, any S3 client and `age --decrypt -i key.txt` do the same.
+Instead of `latest`, give a name from `python -m app.backups list`. The
+backup is decrypted and checked with `pg_restore --list`, then saved in
+`./billing-data/restore`. On a new machine, copy `.env` and the
+`secrets/offsite_backup_*` files there first. Without this server's code, any
+S3 client and `age --decrypt -i key.txt` do the same.
 
-The database is in WAL mode, so `billing.sqlite3-wal` and `billing.sqlite3-shm` may appear next to it while the stack runs. They belong to the live database. Never copy `billing.sqlite3` alone with a filesystem command while the API is running.
+The live PostgreSQL data is stored in `billing-data\postgres`, mounted inside
+the PostgreSQL container at `/var/lib/postgresql/data`. Do not edit, prune, or
+copy files inside that directory while PostgreSQL is running. PostgreSQL WAL
+and crash recovery protect committed transactions; this directory is the live
+database, not a portable backup.
 
-To restore, stop the stack so nothing writes to the database, replace the live file, and remove the leftover WAL files. For a fetched backup, copy from `restore` instead of `backups`:
+The host-mounted `billing-data\backups` directory contains verified PostgreSQL
+custom-format files named `billing-<timestamp>.dump`. Older `.sqlite3` files
+are legacy backups from before the migration and are not the live database.
+Use `docker compose exec api python -m app.backups list` to see both local and
+off-site backups.
+
+Every dump is written to a temporary file, validated with `pg_restore --list`,
+and atomically renamed only after validation. To restore, stop all application
+services, keep PostgreSQL running, and restore into a temporary database first:
 
 **Windows (PowerShell)**
 
 ```powershell
-docker compose down
-Remove-Item billing-data\billing.sqlite3-wal, billing-data\billing.sqlite3-shm -ErrorAction SilentlyContinue
-Copy-Item billing-data\backups\<backup-file>.sqlite3 billing-data\billing.sqlite3 -Force
-docker compose up -d
+docker compose stop api worker remote-worker cleanup
+docker compose exec -T postgres createdb -U billing billing_restore
+docker cp .\billing-data\backups\<backup-file>.dump $(docker compose ps -q postgres):/tmp/billing-restore.dump
+docker compose exec -T postgres pg_restore -U billing -d billing_restore --no-owner --exit-on-error /tmp/billing-restore.dump
+docker compose exec -T postgres rm -f /tmp/billing-restore.dump
+docker compose exec -T postgres psql -U billing -d billing_restore -c "SELECT count(*) FROM users"
 ```
 
-**macOS and Linux**
+Only after verifying the temporary database should an operator schedule a
+production restore. Do not overwrite the live database volume with filesystem
+commands. A production restore must be performed with PostgreSQL tools during
+maintenance, followed by `docker compose up -d` and a `/ready` check.
 
-```bash
-docker compose down
-rm -f billing-data/billing.sqlite3-wal billing-data/billing.sqlite3-shm
-cp billing-data/backups/<backup-file>.sqlite3 billing-data/billing.sqlite3
-docker compose up -d
+For off-site recovery, first fetch and validate a dump:
+
+```powershell
+Get-Content key.txt | docker compose run --build --rm --no-deps -T api python -m app.backups fetch latest
 ```
 
-Check a backup before relying on it:
-
-```shell
-docker compose exec api python -c "import sqlite3; d=sqlite3.connect('file:/billing/backups/<backup-file>.sqlite3?mode=ro', uri=True); print(d.execute('PRAGMA integrity_check').fetchone())"
-```
-
-It should print `('ok',)`. Test a restore on a separate copy from time to time.
+The fetched file is saved under `billing-data\restore` and checked with
+`pg_restore --list`. Copy it into the PostgreSQL container with `docker cp`
+before running `pg_restore`; this works in Windows PowerShell 5 as well as
+PowerShell 7. Keep `key.txt` outside the repository and remove it after use.
 
 ### Opening a database or backup in a viewer
 
-Use a local desktop tool. Billing data contains user emails, Google account IDs, and purchase tokens, so do not upload it to online tools.
-
-- [DB Browser for SQLite](https://sqlitebrowser.org): free and the simplest option. Use **File → Open Database Read Only**, then browse tables under **Browse Data** or run queries under **Execute SQL**.
-- DBeaver, DataGrip, and TablePlus also open WAL databases.
-- The **SQLite Viewer** extension for VS Code opens a file directly in the editor.
-
-Rules when opening files:
-
-- Prefer a backup file or a snapshot (below) over the live database. A viewer that writes or holds a lock can interfere with the running API.
-- Open files read-only whenever you only want to look.
-- If you open the live `billing.sqlite3`, keep `billing.sqlite3-wal` and `billing.sqlite3-shm` in the same folder. Recent writes are in the WAL file, so opening the main file alone shows outdated data.
-- Work on a copy and delete it when you are done.
-
-Some viewers, especially online and older ones, report that a WAL-mode file is "not a database". The file is valid. To make a copy that any viewer can open, without stopping the API:
-
-```shell
-docker compose exec -T api python -c "
-import os, sqlite3
-src = sqlite3.connect(os.environ.get('BILLING_DATABASE_PATH', '/billing/billing.sqlite3'), timeout=30)
-dst = sqlite3.connect('/tmp/view.sqlite3')
-src.backup(dst)
-print(dst.execute('PRAGMA journal_mode=DELETE').fetchone())
-dst.close(); src.close()
-"
-docker compose cp api:/tmp/view.sqlite3 view.sqlite3
-docker compose exec api rm /tmp/view.sqlite3
-```
-
-It should print `('delete',)`. Open `view.sqlite3` and delete it afterwards. The snapshot includes data that is still in the WAL file, and the live database stays in WAL mode.
-
-To convert a copy of an existing backup file instead:
-
-**Windows (PowerShell)**
-
-```powershell
-Copy-Item billing-data\backups\<backup-file>.sqlite3 view.sqlite3
-python -c "import sqlite3; d=sqlite3.connect('view.sqlite3'); print(d.execute('PRAGMA journal_mode=DELETE').fetchone()); d.close()"
-```
-
-**macOS and Linux**
-
-```bash
-cp billing-data/backups/<backup-file>.sqlite3 view.sqlite3
-python3 -c "import sqlite3; d=sqlite3.connect('view.sqlite3'); print(d.execute('PRAGMA journal_mode=DELETE').fetchone()); d.close()"
-```
-
-Never run `PRAGMA journal_mode=DELETE` on the live database or on a backup you plan to keep as is. Do it on a copy.
+Use a local PostgreSQL client such as `psql`, DBeaver, DataGrip, or TablePlus.
+Billing data contains user emails, Google account IDs, and purchase tokens, so
+do not upload it to online tools. Inspect a dump by restoring it into a
+temporary database; never point a viewer at the live PostgreSQL volume or grant
+the viewer write access to production.

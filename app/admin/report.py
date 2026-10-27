@@ -46,10 +46,16 @@ def billing_report(since: float = 30 * 86400, per: str = "day", remote_price_per
 
 
 def minutes(billing, start: float, period: str) -> dict:
+    expression = (
+        "to_char(to_timestamp(at) AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
+        if period == "%Y-%m-%d" else
+        "to_char(to_timestamp(at) AT TIME ZONE 'UTC', 'YYYY-MM')"
+    ) if getattr(billing, "_postgres", False) else "strftime(?, at, 'unixepoch')"
+    parameters = (int(start),) if getattr(billing, "_postgres", False) else (period, int(start))
     rows = billing.read(
-        "SELECT strftime(?, at, 'unixepoch') AS period, kind, SUM(minutes) AS minutes "
+        f"SELECT {expression} AS period, kind, SUM(minutes) AS minutes "
         "FROM minute_ledger WHERE at >= ? GROUP BY period, kind ORDER BY period",
-        (period, int(start)),
+        parameters,
     )
     periods: dict[str, dict] = {}
     for row in rows:
@@ -73,12 +79,18 @@ def negative_balances(billing) -> dict:
 
 
 def job_time(billing, start: float, period: str, price_per_hour: float | None) -> dict:
+    expression = (
+        "to_char(to_timestamp(created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
+        if period == "%Y-%m-%d" else
+        "to_char(to_timestamp(created_at) AT TIME ZONE 'UTC', 'YYYY-MM')"
+    ) if getattr(billing, "_postgres", False) else "strftime(?, created_at, 'unixepoch')"
+    parameters = (int(start),) if getattr(billing, "_postgres", False) else (period, int(start))
     rows = billing.read(
-        "SELECT strftime(?, created_at, 'unixepoch') AS period, backend, COUNT(*) AS jobs, "
+        f"SELECT {expression} AS period, backend, COUNT(*) AS jobs, "
         "SUM(finished_at - started_at) AS seconds FROM job_diagnostics "
         "WHERE created_at >= ? AND status = 'completed' AND started_at IS NOT NULL AND finished_at IS NOT NULL "
         "GROUP BY period, backend ORDER BY period",
-        (period, int(start)),
+        parameters,
     )
     periods = []
     remote_seconds = 0.0

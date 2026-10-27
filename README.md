@@ -20,7 +20,7 @@ The API is available at `http://localhost:8000`; interactive documentation is at
 See [Local setup](docs/setup.md) for requirements, GPU checks, health checks, and worker scaling.
 
 > [!NOTE]
-> Billing data lives in the host directory `billing-data` and is backed up every 15 minutes, with older backups thinned out to hourly, daily, and weekly ones over 8 weeks, and optionally copied, encrypted, to off-site storage. The API updates the database schema on startup, so copy `billing-data` before upgrading. See [Billing database backups](docs/configuration.md#-billing-database-backups).
+> Production billing uses PostgreSQL in `billing-data/postgres` and is backed up every 15 minutes with verified `pg_dump` files in `billing-data/backups`, optionally copied and encrypted off-site. Existing SQLite installations must be migrated explicitly; startup never performs a data migration. See [Billing database backups](docs/configuration.md#-billing-database-backups).
 
 ## 📚 Documentation
 
