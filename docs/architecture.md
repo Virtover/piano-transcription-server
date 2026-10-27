@@ -62,6 +62,7 @@ Billing backups are thinned out by the API after each backup, and optionally cop
 * **Billing database.** SQLite in WAL mode, with every commit synced to disk (`synchronous=FULL`): a purchase or charge the API confirmed survives a power cut, as long as the disk honors sync requests. Each balance change is one transaction. At startup the API settles or releases reservations whose job ended while it was down, and releases those whose job no longer exists in Redis.
 * **Redis.** Job state and the queues are written to an append-only file synced every second, so a power cut loses at most about a second of changes. A job lost that way is refunded at the next API startup, as above.
 * **Running jobs** fail and are refunded when their worker stops; see above. They are not resumed.
+* **Completed results.** MIDI is written to a same-directory temporary file, synced, atomically renamed into place, and checked before Redis records `completed`. At startup, completed jobs are checked again; a missing, invalid, or out-of-data-directory result is changed to `failed` and its unfinished billing reservation is released.
 * **`/ready`** answers `503` while Redis or the billing database cannot be reached. `/health` only says that the API process answers.
 
 Redis started with the append-only file on, over a volume that has only a snapshot, starts empty. `scripts/server.py` turns it on in the running Redis before it restarts or stops anything, so updating with it keeps queued jobs. When updating from an older version with `docker compose` directly, run this first:
@@ -70,7 +71,7 @@ Redis started with the append-only file on, over a volume that has only a snapsh
 docker compose exec redis redis-cli config set appendonly yes
 ```
 
-None of this protects against losing the disk or the machine. For that, turn on [off-site copies](configuration.md#off-site-copies) of the billing backups.
+None of this protects against losing the disk or the machine. For that, turn on [off-site copies](configuration.md#off-site-copies) of the billing backups. Off-site copy failures and backups that stop advancing are logged as operational errors; the backup state is also visible in the administration status. They do not make `/health` fail, and `/ready` remains focused on Redis and billing database reachability.
 
 ### 🔁 Planned restarts and shutdowns
 

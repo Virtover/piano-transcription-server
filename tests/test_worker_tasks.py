@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.billing import cancelled_cost
+from app.errors import UserFacingError
 from app.transcription.cancellation import TranscriptionCancelled
 from app.worker import tasks
 
@@ -139,6 +140,17 @@ def test_complete_job_raises_when_cancelled(worker):
         tasks.complete_job("job", Path("result.mid"))
 
 
+def test_complete_job_rejects_invalid_result(worker, tmp_path):
+    tasks.redis.hset(tasks.job_key("job"), mapping={"status": "processing", "user_id": "user"})
+    result = tmp_path / "result.mid"
+    result.write_bytes(b"broken")
+
+    with pytest.raises(UserFacingError, match="invalid MIDI"):
+        tasks.complete_job("job", result)
+
+    assert job("job")["status"] == "processing"
+
+
 def test_reconcile_billing_finishes_interrupted_transitions(worker):
     _, billing = worker
     queue_job(billing, "completed", cost=2)
@@ -165,7 +177,13 @@ def test_restart_fails_interrupted_jobs_and_keeps_queued_ones(worker, monkeypatc
     queue_job(billing, "queued", cost=3, source_url="https://example.com/a", backend="local")
     queue_job(billing, "processing")
     tasks.redis.hset(tasks.job_key("processing"), "status", "processing")
-    tasks.redis.hset(tasks.job_key("done"), mapping={"status": "completed", "user_id": "user"})
+    done_result = Path(settings.service.data_dir) / "jobs" / "done" / "transcription.mid"
+    done_result.parent.mkdir(parents=True)
+    done_result.write_bytes(b"MThd-data")
+    tasks.redis.hset(
+        tasks.job_key("done"),
+        mapping={"status": "completed", "user_id": "user", "result": str(done_result)},
+    )
     interrupted_dir = Path(settings.service.data_dir) / "jobs" / "processing"
     queued_dir = Path(settings.service.data_dir) / "jobs" / "queued"
     interrupted_dir.mkdir(parents=True)
@@ -183,6 +201,23 @@ def test_restart_fails_interrupted_jobs_and_keeps_queued_ones(worker, monkeypatc
     # The queued job keeps its reservation; the interrupted one is refunded.
     assert billing.reserved_job_ids() == ["queued"]
     assert billing.get_balance("user") == 7
+
+
+def test_restart_fails_completed_job_with_missing_result(worker):
+    settings, billing = worker
+    queue_job(billing, "done", cost=2)
+    tasks.redis.hset(
+        tasks.job_key("done"),
+        mapping={"status": "completed", "user_id": "user", "result": str(
+            Path(settings.service.data_dir) / "jobs" / "done" / "transcription.mid"
+        )},
+    )
+
+    tasks.recover_active_jobs("restarted")
+
+    assert job("done")["status"] == "failed"
+    assert job("done")["error_code"] == tasks.INVALID_RESULT
+    assert billing.reserved_job_ids() == []
 
 
 def test_queued_upload_is_requeued_from_its_file(worker, monkeypatch):

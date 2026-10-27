@@ -425,4 +425,7 @@ def check_midi(midi_path: Path) -> Path:
             "Piano transcription produced "
             "an empty MIDI file"
         )
+    with midi_path.open("rb") as file:
+        if file.read(4) != b"MThd":
+            raise UserFacingError("Piano transcription produced an invalid MIDI file")
     return midi_path

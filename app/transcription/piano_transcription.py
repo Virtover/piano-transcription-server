@@ -1,6 +1,7 @@
 import gc
 import logging
 import math
+import os
 import queue
 import threading
 import time
@@ -189,7 +190,19 @@ def audio_for_model(model, sample_rate: int, audio: np.ndarray) -> np.ndarray:
 
 
 def write_midi(events: list, output_path: Path) -> None:
-    writeMidi(events).write(str(output_path))
+    partial_path = output_path.with_name(f".{output_path.name}.partial")
+    try:
+        writeMidi(events).write(str(partial_path))
+        with partial_path.open("rb") as file:
+            os.fsync(file.fileno())
+        os.replace(partial_path, output_path)
+        directory_fd = os.open(output_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        partial_path.unlink(missing_ok=True)
 
 
 def _transcribe_audio_batch(

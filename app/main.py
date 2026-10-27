@@ -27,6 +27,7 @@ from app.worker.tasks import (
     reconcile_billing,
     recover_active_jobs,
 )
+from app import backups
 from app.backups import run_backup
 from app.billing import Billing
 
@@ -45,6 +46,27 @@ def backup_billing_database() -> None:
         except Exception:
             logger.exception("Could not back up billing database")
         time.sleep(settings.billing.backup_interval)
+
+
+def monitor_backup_health() -> None:
+    """Warn when configured off-site backups fail or stop advancing."""
+    if not settings.offsite.enabled:
+        return
+    interval = settings.billing.backup_interval
+    while True:
+        time.sleep(interval)
+        try:
+            state = backups.offsite_status(Billing(settings.billing.database_path))
+            now = int(time.time())
+            if state is None:
+                continue
+            if state["error"]:
+                logger.error("Off-site backup copying is failing: %s", state["error"])
+            elif state["succeeded_at"] is None or now - state["succeeded_at"] > interval * 2:
+                logger.error("Off-site backup copying has not succeeded for %.0f seconds", now - (state["succeeded_at"] or 0))
+        except Exception:
+            logger.exception("Could not monitor off-site backup health")
+
 
 def watch_abandoned_jobs() -> None:
     """Fail and refund processing jobs whose worker stopped, for example
@@ -121,6 +143,7 @@ def sync_billing_catalog() -> None:
     sync_products()
     enable_transcription_submissions()
     threading.Thread(target=backup_billing_database, daemon=True).start()
+    threading.Thread(target=monitor_backup_health, daemon=True).start()
     threading.Thread(target=watch_abandoned_jobs, daemon=True).start()
     if voided_purchases_enabled():
         threading.Thread(target=sync_voided_purchases, daemon=True).start()

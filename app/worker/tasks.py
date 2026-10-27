@@ -18,6 +18,8 @@ from app.billing import Billing, cancelled_cost
 from app.errors import detail, error_code, public_message
 from app.outsource import routing
 from app.transcription.audio import remove_audio_files
+from app.transcription.audio import check_midi
+from app.errors import UserFacingError
 from app.transcription.cancellation import TranscriptionCancelled
 
 
@@ -33,6 +35,7 @@ ABANDONED_JOB_CHECK_INTERVAL = 30
 WORKER_STOPPED = "Transcription interrupted because its worker stopped"
 # The error_code of a job failed by a restart or a stopped worker.
 INTERRUPTED = "transcription_interrupted"
+INVALID_RESULT = "result_unavailable"
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +168,7 @@ def complete_job(job_id: str, result: Path) -> bool:
                     raise TranscriptionCancelled()
                 if status != "processing":
                     return False
+                check_midi(result)
 
                 pipe.multi()
                 pipe.hset(
@@ -353,12 +357,32 @@ def recover_active_jobs(reason: str) -> None:
             queued.append((job_id, job))
         elif job.get("status") == "processing" and not fail_abandoned_job(job_id, reason):
             running.append((job_id, job))
+        elif job.get("status") == "completed":
+            check_completed_result(job_id, job)
     # Rebuild the routing counts from the jobs that are still queued or running.
     routing.clear_active(redis)
     for job_id, job in running:
         routing.mark_active(redis, job_backend(job), job_id)
     for job_id, job in queued:
         requeue_after_restart(job_id, job, reason)
+
+
+def check_completed_result(job_id: str, job: dict[str, str]) -> bool:
+    """Fail a completed job whose durable result is missing or invalid."""
+    result = Path(job.get("result", ""))
+    try:
+        result.resolve().relative_to(Path(settings.service.data_dir).resolve())
+        check_midi(result)
+    except (OSError, ValueError, UserFacingError) as error:
+        reason = "The completed MIDI result is missing or invalid"
+        logger.error("Job %s has no usable completed result: %s", job_id, error)
+        update_job(job_id, status="failed", error=reason, error_code=INVALID_RESULT)
+        redis.expire(job_key(job_id), job_ttl())
+        record_job(job_id)
+        if job.get("user_id"):
+            billing.release(job_id)
+        return False
+    return True
 
 
 def requeue_after_restart(job_id: str, job: dict[str, str], reason: str) -> None:
