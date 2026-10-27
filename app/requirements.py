@@ -335,7 +335,11 @@ def tunnel_sections(config) -> list[Section]:
         else "not enabled; set COMPOSE_PROFILES=cloudflare to serve the API over HTTPS through Cloudflare"
     )
     hostname = _or_placeholder(config.tunnel.hostname, "CLOUDFLARE_TUNNEL_HOSTNAME")
-    upload_mb = f"{config.limits.max_upload_size_mb:g}"
+    upload_mb = (
+        f"{config.limits.max_upload_size_mb:g}"
+        if config.limits.max_upload_size_mb is not None
+        else "unlimited"
+    )
     return [
         Section(
             "Cloudflare Tunnel",

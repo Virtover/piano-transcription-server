@@ -410,13 +410,19 @@ async def upload_transcription(
     ensure_no_maintenance_pending()
     await run_in_threadpool(ensure_accepting, user.user_id if user else "anonymous", False)
 
-    size_limit = int(settings.limits.max_upload_size_mb * 1024**2)
+    size_limit = (
+        int(settings.limits.max_upload_size_mb * 1024**2)
+        if settings.limits.max_upload_size_mb is not None
+        else None
+    )
     too_large = HTTPException(
         status_code=413,
-        detail=f"The file exceeds the {settings.limits.max_upload_size_mb:g} MB upload limit",
+        detail=f"The file exceeds the {settings.limits.max_upload_size_mb:g} MB upload limit"
+        if settings.limits.max_upload_size_mb is not None
+        else "The uploaded file exceeds the configured limit",
     )
     content_length = request.headers.get("content-length", "")
-    if content_length.isdigit() and int(content_length) > size_limit:
+    if size_limit is not None and content_length.isdigit() and int(content_length) > size_limit:
         raise too_large
     await run_in_threadpool(ensure_minimum_balance, user)
 
@@ -435,7 +441,7 @@ async def upload_transcription(
         with upload_path.open("wb") as file:
             async for chunk in request.stream():
                 size += len(chunk)
-                if size > size_limit:
+                if size_limit is not None and size > size_limit:
                     raise too_large
                 file.write(chunk)
         if size == 0:

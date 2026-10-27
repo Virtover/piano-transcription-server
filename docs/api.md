@@ -54,7 +54,7 @@ The body is the file itself, not a multipart form. This lets the server stop rea
 
 * Accepted formats: MP3, WAV, FLAC, Ogg/Opus, AAC, M4A, AIFF, WMA, MP4, MOV, MKV, and WebM. Video files are fine; only their audio is used. The server checks the content, not the file name.
 * `filename` is only used as the title (without the extension). It never decides where the file is stored.
-* The size limit is `MAX_UPLOAD_SIZE_MB` (default 200 MB), and the length limit is `MAX_VIDEO_LENGTH_MINUTES`, the same as for links. `GET /api/server-info` returns both.
+* The size limit is `MAX_UPLOAD_SIZE_MB` (default 200 MB), and the length limit is `MAX_VIDEO_LENGTH_MINUTES` (default 120 minutes), the same as for links. Either setting can be `unlimited`. `GET /api/server-info` returns both; an unlimited limit is returned as `null`.
 * The length is measured by decoding the audio, not read from the file's header, which can be wrong. The job is charged for the measured length, and only that much is transcribed.
 * The response is the same as for a link, and the job is polled, cancelled, and downloaded the same way. Its metadata contains only the title and duration.
 * The uploaded file is deleted when the job completes, fails, or is cancelled. It is kept until then so the job can be retried on another backend.

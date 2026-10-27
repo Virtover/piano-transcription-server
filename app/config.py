@@ -112,6 +112,29 @@ def _auto_or_positive_int(value: Any) -> int | None:
     return value
 
 
+def _unlimited_or_positive(value: Any) -> int | float | None:
+    """Parse a positive number or `unlimited`, represented internally as None."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "unlimited"):
+            return None
+        value = float(text)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("must be 'unlimited' or a positive number")
+    return value
+
+
+def _unlimited_or_positive_int(value: Any) -> int | None:
+    parsed = _unlimited_or_positive(value)
+    if parsed is None:
+        return None
+    if isinstance(parsed, float) and not parsed.is_integer():
+        raise ValueError("must be 'unlimited' or a positive integer")
+    return int(parsed)
+
+
 # Seconds, parsed from s/m/h/d/w strings.
 Duration = Annotated[float, BeforeValidator(_duration)]
 # The same, but 0s is allowed.
@@ -122,6 +145,8 @@ OptionalDuration = Annotated[float | None, BeforeValidator(_optional_duration)]
 DurationText = Annotated[str | None, BeforeValidator(_duration_text)]
 # None means `auto`.
 AutoInt = Annotated[int | None, BeforeValidator(_auto_or_positive_int)]
+UnlimitedNumber = Annotated[float | None, BeforeValidator(_unlimited_or_positive)]
+UnlimitedInt = Annotated[int | None, BeforeValidator(_unlimited_or_positive_int)]
 
 
 # --- Settings groups -----------------------------------------------------
@@ -149,12 +174,12 @@ class ServiceSettings(BaseSettings):
 class LimitsSettings(BaseSettings):
     model_config = _group_config()
 
-    max_video_length_minutes: float | None = Field(default=None, gt=0)
-    max_upload_size_mb: float = Field(default=200, gt=0)
+    max_video_length_minutes: UnlimitedNumber = Field(default=120, gt=0)
+    max_upload_size_mb: UnlimitedNumber = Field(default=200, gt=0)
     # Jobs being uploaded, checked, queued, or transcribed at once.
-    max_active_jobs: int = Field(default=50, ge=1)
+    max_active_jobs: UnlimitedInt = Field(default=50, ge=1)
     # The same per signed-in user; only applies with billing.
-    max_active_jobs_per_user: int = Field(default=5, ge=1)
+    max_active_jobs_per_user: UnlimitedInt = Field(default=5, ge=1)
     # How long a finished job's status and MIDI file can be retrieved.
     result_retention: Duration = 60 * 60.0
     # After a video site rate-limits this server, links are refused this
@@ -167,7 +192,7 @@ class LimitsSettings(BaseSettings):
     # Least time between the starts of two requests that read a link from a site.
     video_site_interval: DurationOrZero = 3.0
     # Downloads from one video site at once, across the API and the workers.
-    video_site_max_downloads: int = Field(default=2, ge=1)
+    video_site_max_downloads: UnlimitedInt = Field(default=2, ge=1)
     source_url_allowed_hosts: list[str] = [
         "youtube.com", "youtu.be", "youtube-nocookie.com",
         "vimeo.com", "soundcloud.com", "bandcamp.com", "dailymotion.com",

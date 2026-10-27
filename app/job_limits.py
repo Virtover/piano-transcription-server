@@ -31,7 +31,7 @@ def _take(redis: Redis, key: str, job_id: str, limit: int, job_key) -> bool:
         pipe.sadd(key, job_id)
         pipe.scard(key)
         _, count = pipe.execute()
-    if count > limit:
+    if limit is not None and count > limit:
         # Two requests racing for the last place may both be refused, never both let in.
         redis.srem(key, job_id)
         return False

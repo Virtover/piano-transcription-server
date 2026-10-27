@@ -67,7 +67,33 @@ def test_inline_comments_and_empty_values(tmp_path):
     settings = load(tmp_path, "CLEANUP_INTERVAL=1d # once a day\nMAX_VIDEO_LENGTH_MINUTES=\n")
 
     assert settings.cleanup.interval == 86400
+    assert settings.limits.max_video_length_minutes == 120
+
+
+def test_limits_accept_unlimited(tmp_path):
+    settings = load(
+        tmp_path,
+        "\n".join(
+            [
+                "MAX_VIDEO_LENGTH_MINUTES=unlimited",
+                "MAX_UPLOAD_SIZE_MB=unlimited",
+                "MAX_ACTIVE_JOBS=unlimited",
+                "MAX_ACTIVE_JOBS_PER_USER=unlimited",
+                "VIDEO_SITE_MAX_DOWNLOADS=unlimited",
+            ]
+        )
+        + "\n",
+    )
+
     assert settings.limits.max_video_length_minutes is None
+    assert settings.limits.max_upload_size_mb is None
+    assert settings.limits.max_active_jobs is None
+    assert settings.limits.max_active_jobs_per_user is None
+    assert settings.limits.video_site_max_downloads is None
+
+
+def test_max_video_length_defaults_to_120_minutes(default_settings):
+    assert default_settings.limits.max_video_length_minutes == 120
 
 
 def test_process_environment_overrides_env_file(tmp_path, monkeypatch):

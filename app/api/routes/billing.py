@@ -70,7 +70,7 @@ class ServerInfoResponse(BaseModel):
     # How long a finished job's status and MIDI file can be retrieved.
     result_retention_seconds: int
     max_video_length_minutes: int | None = None
-    max_upload_size_mb: float
+    max_upload_size_mb: float | None
     # only present when billing is enabled
     free_minutes: int | None = None
     free_minutes_period: str | None = None

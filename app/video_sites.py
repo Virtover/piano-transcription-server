@@ -361,7 +361,10 @@ class DownloadSlot:
                 with redis.pipeline() as pipe:
                     pipe.watch(self.key)
                     now = time.time()
-                    if pipe.zcount(self.key, now, "+inf") >= settings.limits.video_site_max_downloads:
+                    if (
+                        settings.limits.video_site_max_downloads is not None
+                        and pipe.zcount(self.key, now, "+inf") >= settings.limits.video_site_max_downloads
+                    ):
                         return False
                     pipe.multi()
                     pipe.zremrangebyscore(self.key, "-inf", now)
