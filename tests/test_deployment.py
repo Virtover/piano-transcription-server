@@ -72,6 +72,28 @@ def test_postgres_data_is_separate_from_backup_files():
     assert "postgres_data:" not in compose
 
 
+def compose_services():
+    import yaml
+
+    return yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))["services"]
+
+
+@pytest.mark.parametrize("service", ["worker", "remote-worker", "cleanup"])
+def test_only_the_api_mounts_billing_data(service):
+    # The workers process untrusted media; they reach billing through
+    # PostgreSQL and need neither the backups nor the cluster files.
+    services = compose_services()
+
+    assert "./billing-data:/billing" in services["api"]["volumes"]
+    assert not any("billing-data" in volume for volume in services[service].get("volumes", []))
+
+
+def test_every_service_rotates_its_logs():
+    for name, service in compose_services().items():
+        assert service["logging"]["driver"] == "json-file", name
+        assert service["logging"]["options"]["max-size"], name
+
+
 # --- Writable directories ---------------------------------------------------
 
 @pytest.fixture

@@ -218,3 +218,76 @@ def test_backup_that_fails_its_check_leaves_no_file(api_context, monkeypatch):
         main.run_billing_backup()
 
     assert list(Path(settings.billing.backup_dir).iterdir()) == []
+
+
+# --- PostgreSQL ----------------------------------------------------------------
+
+@pytest.fixture
+def postgres_billing(default_settings, tmp_path):
+    from app.billing import Billing
+
+    secrets = Path(default_settings.secrets_dir)
+    secrets.mkdir(parents=True)
+    (secrets / "postgres_password").write_text("s3cret/pass\n", encoding="utf-8")
+    billing = Billing()
+    assert billing._postgres
+    return billing
+
+
+def test_postgres_password_is_not_a_command_argument(postgres_billing, tmp_path, monkeypatch):
+    import subprocess
+
+    calls = []
+
+    def run(command, env=None, **kwargs):
+        calls.append((command, env))
+        if command[0] == "pg_dump":
+            Path(command[command.index("--file") + 1]).write_bytes(b"PGDMP")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    postgres_billing.backup(str(tmp_path / "backups" / "billing-1.dump"))
+
+    assert [command[0] for command, _ in calls] == ["pg_dump", "pg_restore"]
+    for command, env in calls:
+        assert not any("s3cret" in argument for argument in command)
+        assert env["PGPASSWORD"] == "s3cret/pass"
+    assert calls[0][0][-1] == "postgresql://billing@postgres:5432/billing"
+    assert (tmp_path / "backups" / "billing-1.dump").read_bytes() == b"PGDMP"
+
+
+def test_failed_postgres_backup_error_has_no_password(postgres_billing, tmp_path, monkeypatch):
+    import subprocess
+
+    def run(command, env=None, **kwargs):
+        return subprocess.CompletedProcess(command, 1, "", "pg_dump: error: connection refused\n")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(RuntimeError) as error:
+        postgres_billing.backup(str(tmp_path / "backups" / "billing-1.dump"))
+
+    assert str(error.value) == "pg_dump failed with exit status 1: pg_dump: error: connection refused"
+    assert list((tmp_path / "backups").iterdir()) == []
+
+
+def test_postgres_connections_time_out(postgres_billing, monkeypatch):
+    import sys
+    import types
+
+    seen = {}
+
+    def connect(url, **kwargs):
+        seen.update(kwargs, url=url)
+        raise TimeoutError
+
+    psycopg = types.SimpleNamespace(connect=connect)
+    monkeypatch.setitem(sys.modules, "psycopg", psycopg)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", types.SimpleNamespace(dict_row=None))
+
+    with pytest.raises(TimeoutError):
+        postgres_billing._connect_raw()
+
+    assert seen["connect_timeout"] > 0
+    assert seen["url"] == "postgresql://billing:s3cret%2Fpass@postgres:5432/billing"

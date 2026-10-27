@@ -1,10 +1,11 @@
 import hashlib
 import math
+import os
 import sqlite3
 import subprocess
 import threading
 import time
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from contextlib import closing
 from pathlib import Path
 
@@ -17,6 +18,7 @@ LEDGER_KINDS = ("purchase", "free", "used", "voided", "admin")
 # billing_state key: when this database started recording minute_ledger.
 LEDGER_SINCE_KEY = "minute_ledger_since"
 SCHEMA_VERSION = 1
+CONNECT_TIMEOUT_SECONDS = 10
 
 
 class _PostgresConnection:
@@ -217,24 +219,17 @@ class Billing:
     def _connect_raw(self):
         import psycopg
         from psycopg.rows import dict_row
-        url = self._postgres_url()
-        # Compose deliberately keeps the password out of the URL and exposes
-        # it as a Docker secret. A complete billing_database_url secret still
-        # takes precedence in __init__.
-        password_file = Path(settings.secrets_dir) / "postgres_password"
-        if url and urlsplit(url).password is None and password_file.is_file():
-            parts = urlsplit(url)
-            password = password_file.read_text(encoding="utf-8").strip()
-            netloc = f"{parts.username}:{quote(password, safe='')}@{parts.hostname}"
-            if parts.port:
-                netloc += f":{parts.port}"
-            url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-        connection = psycopg.connect(url)
+        # A database that cannot be reached fails the request instead of
+        # holding its thread until the operating system gives up.
+        connection = psycopg.connect(self._postgres_url(), connect_timeout=CONNECT_TIMEOUT_SECONDS)
         connection.row_factory = dict_row
         connection.autocommit = False
         return connection
 
     def _postgres_url(self) -> str:
+        # Compose deliberately keeps the password out of the URL and exposes
+        # it as a Docker secret. A complete billing_database_url secret still
+        # takes precedence in __init__.
         url = self.database_url
         password_file = Path(settings.secrets_dir) / "postgres_password"
         if url and urlsplit(url).password is None and password_file.is_file():
@@ -245,6 +240,20 @@ class Billing:
                 netloc += f":{parts.port}"
             url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
         return url
+
+    def _postgres_tool_arguments(self) -> tuple[str, dict[str, str]]:
+        """The URL without its password, and an environment with it. Command
+        arguments are visible to every process in the container and appear in
+        the error of a failed command, which is logged."""
+        parts = urlsplit(self._postgres_url())
+        environment = dict(os.environ)
+        if parts.password is None:
+            return urlunsplit(parts), environment
+        environment["PGPASSWORD"] = unquote(parts.password)
+        netloc = f"{parts.username}@{parts.hostname}" if parts.username else parts.hostname
+        if parts.port:
+            netloc += f":{parts.port}"
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment)), environment
 
     def _open(self):
         if self._postgres:
@@ -684,22 +693,15 @@ class Billing:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         if self._postgres:
             partial = target_path.with_name(target_path.name + ".partial")
+            url, environment = self._postgres_tool_arguments()
             try:
-                subprocess.run(
-                    ["pg_dump", "--format=custom", "--no-owner", "--file", str(partial), self._postgres_url()],
-                    check=True,
-                    capture_output=True,
-                    text=True,
+                _run_postgres_tool(
+                    ["pg_dump", "--format=custom", "--no-owner", "--file", str(partial), url], environment
                 )
                 if partial.stat().st_size == 0:
                     raise RuntimeError("pg_dump produced an empty backup")
-                subprocess.run(
-                    ["pg_restore", "--list", str(partial)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                partial.replace(target_path)
+                _run_postgres_tool(["pg_restore", "--list", str(partial)], environment)
+                _replace_durably(partial, target_path)
             finally:
                 partial.unlink(missing_ok=True)
             return
@@ -710,13 +712,41 @@ class Billing:
                 result = target.execute("PRAGMA integrity_check").fetchone()
             if result != ("ok",):
                 raise sqlite3.DatabaseError(f"The backup failed its integrity check: {result}")
-            partial.replace(target_path)
+            _replace_durably(partial, target_path)
         finally:
             partial.unlink(missing_ok=True)
 
 
 class InsufficientMinutes(Exception):
     pass
+
+
+def _run_postgres_tool(command: list[str], environment: dict[str, str]) -> None:
+    result = subprocess.run(command, capture_output=True, text=True, env=environment)
+    if result.returncode != 0:
+        # Only the tool's name and its own message: the command holds the URL.
+        message = (result.stderr or "").strip().splitlines()
+        raise RuntimeError(
+            f"{command[0]} failed with exit status {result.returncode}" + (f": {message[-1]}" if message else "")
+        )
+
+
+def _replace_durably(partial: Path, target: Path) -> None:
+    """Rename a finished file into place so that a power cut leaves either
+    no file or the complete one, never a renamed but unwritten file."""
+    # Writable, because Windows cannot sync a file opened only for reading.
+    with partial.open("r+b") as file:
+        os.fsync(file.fileno())
+    partial.replace(target)
+    try:
+        directory = os.open(target.parent, os.O_RDONLY)
+    except OSError:
+        # Directories cannot be opened on Windows, where tests run.
+        return
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def period_seconds() -> int:

@@ -6,6 +6,14 @@ x-wiring: &wiring
   BILLING_DATABASE_URL: postgresql://billing@postgres:5432/billing
   BILLING_BACKUP_DIR: /billing/backups
 
+# Docker keeps container logs without limit by default, so a busy or failing
+# service could fill the disk. This keeps about 100 MB per container.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 20m
+    max-file: "5"
+
 services:
 
   api:
@@ -22,6 +30,9 @@ services:
     environment: *wiring
     volumes:
       - data:/data
+      # Backups, restores, and the one-time SQLite migration. Only the API
+      # gets this folder: the workers process untrusted media and reach
+      # billing through PostgreSQL alone.
       - ./billing-data:/billing
       - ./secrets:/run/secrets:ro
     depends_on:
@@ -30,6 +41,7 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    logging: *logging
 
   worker:
     build:
@@ -40,7 +52,6 @@ services:
     environment: *wiring
     volumes:
       - data:/data
-      - ./billing-data:/billing
       - ./secrets:/run/secrets:ro
     depends_on:
       redis:
@@ -49,6 +60,7 @@ services:
         condition: service_healthy
     gpus: all
     restart: unless-stopped
+    logging: *logging
 
   # Sends jobs to the outsourcing provider when local GPUs are overloaded.
   # Always started: with OUTSOURCE_PROVIDER=none it only idles, so .env is the
@@ -63,7 +75,6 @@ services:
     environment: *wiring
     volumes:
       - data:/data
-      - ./billing-data:/billing
       - ./secrets:/run/secrets:ro
     depends_on:
       redis:
@@ -72,6 +83,7 @@ services:
         condition: service_healthy
     command: ["python", "-m", "app.worker.launcher", "remote"]
     restart: unless-stopped
+    logging: *logging
 
   # Only deletes expired job files, so it runs on the small API image.
   cleanup:
@@ -88,6 +100,7 @@ services:
         condition: service_healthy
     command: ["python", "-m", "app.worker.cleanup"]
     restart: unless-stopped
+    logging: *logging
 
   # Optional HTTPS access through a Cloudflare Tunnel. Started only with
   # COMPOSE_PROFILES=cloudflare in .env. It connects out to Cloudflare and
@@ -109,6 +122,7 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    logging: *logging
 
   # Redis holds job state and the queues. The append-only file is synced
   # every second, so a power cut loses at most about a second of changes;
@@ -126,6 +140,7 @@ services:
     volumes:
       - redis_data:/data
     restart: unless-stopped
+    logging: *logging
 
   postgres:
     image: postgres:17-alpine
@@ -143,6 +158,7 @@ services:
     volumes:
       - ./billing-data/postgres:/var/lib/postgresql/data
     restart: unless-stopped
+    logging: *logging
 
 volumes:
   data:
