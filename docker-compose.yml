@@ -16,6 +16,26 @@ x-logging: &logging
 
 services:
 
+  # Gives /data and billing-data to the services' non-root user, then exits.
+  # Docker creates a missing bind-mounted folder as root, so a new server
+  # needs this as much as an old one. It runs as root without a network and
+  # never touches the PostgreSQL cluster. See app/prepare.py.
+  prepare:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    user: root
+    network_mode: none
+    environment:
+      # The host group that may manage billing-data; scripts/server.py sets it.
+      BILLING_DATA_GROUP: ${BILLING_DATA_GROUP:-}
+    volumes:
+      - data:/data
+      - ./billing-data:/billing
+    command: ["python", "-m", "app.prepare"]
+    restart: "no"
+    logging: *logging
+
   api:
     build:
       context: .
@@ -36,6 +56,8 @@ services:
       - ./billing-data:/billing
       - ./secrets:/run/secrets:ro
     depends_on:
+      prepare:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       postgres:
@@ -54,6 +76,8 @@ services:
       - data:/data
       - ./secrets:/run/secrets:ro
     depends_on:
+      prepare:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       postgres:
@@ -77,6 +101,8 @@ services:
       - data:/data
       - ./secrets:/run/secrets:ro
     depends_on:
+      prepare:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       postgres:
@@ -96,6 +122,8 @@ services:
     volumes:
       - data:/data
     depends_on:
+      prepare:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     command: ["python", "-m", "app.worker.cleanup"]

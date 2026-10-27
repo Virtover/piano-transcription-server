@@ -36,7 +36,7 @@ SECRETS_DIR = "/run/secrets"
 CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_", "OFFSITE_")
 MIN_SERVER_PASSWORD_LENGTH = 12
 # Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
-COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION"}
+COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP"}
 # The Compose profile that starts the cloudflared service.
 TUNNEL_PROFILE = "cloudflare"
 # In a folder of its own, mounted into cloudflared alone. Docker creates a
@@ -682,7 +682,8 @@ def configuration_warnings(config: "Settings", environment: dict[str, str]) -> l
 
 
 CONTAINER_UID = 10001
-OWNERSHIP_FIX = f"docker compose run --rm --no-deps -u root api chown -R {CONTAINER_UID}:{CONTAINER_UID} /data /billing"
+# The Compose prepare service does this before every start; see app.prepare.
+OWNERSHIP_FIX = "docker compose run --rm prepare"
 
 
 def unwritable_directories(config: "Settings | None" = None, role: str = "all") -> list[str]:
@@ -700,7 +701,7 @@ def unwritable_directories(config: "Settings | None" = None, role: str = "all") 
             uid = getattr(os, "getuid", lambda: "?")()
             problems.append(
                 f"{directory} is not writable by this service (user ID {uid}). "
-                f"If it was created by an earlier version, run once: {OWNERSHIP_FIX}"
+                f"Start the stack with `docker compose up -d`, or run: {OWNERSHIP_FIX}"
             )
     return problems
 

@@ -2,25 +2,40 @@
 
     python scripts/server.py restart 5m                  # announce, build, wait, drain, restart
     python scripts/server.py stop 10m --back-in 2h       # announce, wait, drain, stop everything
-    python scripts/server.py start                       # start again and wait until ready
+    python scripts/server.py start                       # build, prepare, start, wait until ready
     python scripts/server.py status
     python scripts/server.py cancel                      # also stops a waiting script
+    python scripts/server.py restore [latest|NAME|N]     # billing database from an off-site backup
 
-Runs on the host with only the Python standard library. Clients see the
+Runs on the host with only the Python standard library. On a new
+installation, start creates .env from .env.example and a random PostgreSQL
+password in secrets/postgres_password, which is never printed. Clients see the
 notice in GET /api/server-info, in job status, and in the X-Server-Maintenance
 headers. For a restart, the new images are built while the countdown runs and
 the current version keeps serving; if the build fails, the restart is
 cancelled. At the planned time, running jobs get up to --grace to finish.
 Queued jobs survive both a restart and a shutdown.
+
+restore asks for the off-site backups' private key without showing it, or
+reads it from standard input when it is piped. It fetches and checks the
+backup first, then stops the API and the workers, takes a safety backup of
+the current database, restores in one transaction, and starts again.
 """
 
 import argparse
+import getpass
 import json
+import os
+import re
+import secrets
 import shlex
+import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 DEFAULT_GRACE = "5m"
 READY_TIMEOUT = 180
@@ -30,6 +45,12 @@ DRAIN_INTERVAL = 5
 # A shutdown stops every service, whichever profiles started it.
 ALL_PROFILES = ["*"]
 OUTSOURCE_NOTE = "--outsource is no longer needed: OUTSOURCE_PROVIDER in .env turns outsourcing on or off"
+# Everything that uses the billing database; PostgreSQL keeps running.
+BILLING_SERVICES = ["api", "worker", "remote-worker", "cleanup"]
+# The last line of `python -m app.backups fetch`.
+FETCHED = re.compile(r"saved and checked: (/billing/\S+)")
+PG_RESTORE = ["pg_restore", "-U", "billing", "-d", "billing", "--clean", "--if-exists", "--no-owner",
+              "--single-transaction", "--exit-on-error"]
 
 
 def parse_duration(text: str) -> float:
@@ -49,13 +70,65 @@ def remaining_text(seconds: float) -> str:
     return f"{minutes} m {seconds} s" if minutes else f"{seconds} s"
 
 
+def prepare_files(root: Path) -> list[str]:
+    """Create the files Compose needs before anything starts, and say what
+    was created. Existing files are never changed."""
+    created = []
+    env = root / ".env"
+    if not env.exists():
+        shutil.copyfile(root / ".env.example", env)
+        created.append("created .env from .env.example; change what you need, then restart")
+    folder = root / "secrets"
+    password = folder / "postgres_password"
+    # Docker creates a missing bind-mounted file as an empty folder, owned by
+    # root on Linux.
+    root_owned = "it was probably created by Docker as root. Run: sudo rm -r secrets/postgres_password " \
+                 "&& sudo chown \"$(id -u):$(id -g)\" secrets, then start again"
+    if password.is_dir():
+        try:
+            password.rmdir()
+        except PermissionError:
+            raise RuntimeError(f"secrets/postgres_password is a folder, not a file: {root_owned}") from None
+        except OSError:
+            raise RuntimeError(f"{password} is a folder, not a file: move it away and start again") from None
+    if not password.exists():
+        if not folder.exists():
+            folder.mkdir()
+            # PostgreSQL and the services read the secrets as other users.
+            folder.chmod(0o755)
+        try:
+            # Letters and digits only, so it needs no quoting anywhere.
+            password.write_text(secrets.token_hex(24), encoding="utf-8")
+        except PermissionError:
+            raise RuntimeError(f"cannot write secrets/postgres_password: {root_owned}") from None
+        # Readable whatever the umask: PostgreSQL and the services run as
+        # other users and read it through a bind mount.
+        password.chmod(0o644)
+        created.append("created a random PostgreSQL password in secrets/postgres_password")
+    # Created here rather than by Docker, which would make it root's. The
+    # prepare service gives it to the services and keeps its group.
+    (root / "billing-data" / "backups").mkdir(parents=True, exist_ok=True)
+    return created
+
+
+def share_billing_data(environment) -> None:
+    """Let the prepare service make billing-data writable by this user's
+    group, so backups can be copied, moved, or deleted without sudo."""
+    if hasattr(os, "getgid") and os.getgid() != 0:
+        environment.setdefault("BILLING_DATA_GROUP", str(os.getgid()))
+
+
 class Stack:
     """The Docker Compose stack, reached through the docker CLI."""
 
-    def __init__(self, profiles: list[str], run=subprocess.run, popen=subprocess.Popen):
+    def __init__(self, profiles: list[str], run=subprocess.run, popen=subprocess.Popen, root: Path = ROOT):
         self.profiles = profiles
         self._run = run
         self._popen = popen
+        self.root = root
+
+    def prepare_files(self) -> list[str]:
+        return prepare_files(self.root)
 
     def compose(self, profiles: list[str] | None = None) -> list[str]:
         selected = self.profiles if profiles is None else profiles
@@ -93,6 +166,35 @@ class Stack:
 
     def stop(self, down: bool) -> int:
         return self._run(self.compose(ALL_PROFILES) + (["down"] if down else ["stop"])).returncode
+
+    def fetch_backup(self, which: str, key: str) -> tuple[int, str]:
+        # The key goes on standard input: arguments and the environment are
+        # visible to other processes.
+        result = self._run(
+            self.compose() + ["run", "--rm", "--no-deps", "-T", "api", "python", "-m", "app.backups", "fetch", which],
+            input=key, capture_output=True, text=True,
+        )
+        return result.returncode, "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+
+    def host_path(self, container_path: str) -> Path:
+        # billing-data is mounted at /billing in docker-compose.yml.
+        return self.root / "billing-data" / Path(container_path).relative_to("/billing")
+
+    def start_postgres(self) -> int:
+        return self._run(self.compose() + ["up", "-d", "--wait", "postgres"]).returncode
+
+    def stop_services(self, services: list[str]) -> int:
+        return self._run(self.compose() + ["stop", *services]).returncode
+
+    def backup_now(self) -> int:
+        return self._run(self.compose() + ["run", "--rm", "--no-deps", "api", "python", "-m", "app.backups", "now"]
+                         ).returncode
+
+    def restore_dump(self, dump: Path) -> int:
+        # pg_restore reads a custom-format dump from standard input, so
+        # nothing is copied into the container.
+        with dump.open("rb") as stream:
+            return self._run(self.compose() + ["exec", "-T", "postgres", *PG_RESTORE], stdin=stream).returncode
 
 
 class Clock:
@@ -265,8 +367,16 @@ def stop(args, stack: Stack, clock: Clock) -> int:
 
 
 def start(args, stack: Stack, clock: Clock) -> int:
+    try:
+        for message in stack.prepare_files():
+            say(message)
+    except (OSError, RuntimeError) as error:
+        say(str(error))
+        return 1
     say("starting")
-    code = stack.up(build=False)
+    # Built every time, so a start after an update never runs old code; an
+    # unchanged image is a quick cache hit.
+    code = stack.up()
     if code != 0:
         say(f"docker compose failed with exit code {code}")
         return code
@@ -275,6 +385,61 @@ def start(args, stack: Stack, clock: Clock) -> int:
         return 1
     say("done: the API is ready")
     return 0
+
+
+def read_key() -> str:
+    """The private key: typed without being shown, or piped in."""
+    if sys.stdin.isatty():
+        return getpass.getpass("Private key of the off-site backups (AGE-SECRET-KEY-..., not shown): ")
+    return sys.stdin.read()
+
+
+def confirm(question: str) -> bool:
+    return input(question).strip().lower() in ("y", "yes")
+
+
+def restore(args, stack: Stack, clock: Clock) -> int:
+    key = read_key()
+    if "AGE-SECRET-KEY-" not in key:
+        say("no private key given (AGE-SECRET-KEY-...): nothing was changed")
+        return 1
+    say(f"fetching and checking off-site backup {args.backup}")
+    code, output = stack.fetch_backup(args.backup, key)
+    del key
+    if output:
+        print(output, flush=True)
+    fetched = FETCHED.search(output)
+    if code != 0 or not fetched:
+        say("fetching failed: nothing was changed")
+        return code or 1
+    dump = stack.host_path(fetched.group(1))
+    if not args.yes:
+        if not sys.stdin.isatty():
+            say("standard input is not a terminal, so nothing can be asked: add --yes. Nothing was changed")
+            return 1
+        if not confirm(f"Replace the live billing database with {dump.name}? Running jobs are interrupted. [y/N] "):
+            say("cancelled: nothing was changed")
+            return 0
+    if stack.start_postgres() != 0:
+        say("PostgreSQL did not start: nothing was changed")
+        return 1
+    say("stopping the API and the workers")
+    if stack.stop_services(BILLING_SERVICES) != 0:
+        say("could not stop the services: nothing was changed")
+        return 1
+    say("taking a safety backup of the current database")
+    if stack.backup_now() != 0:
+        say("the safety backup failed, so nothing was restored. Start again with: python scripts/server.py start")
+        return 1
+    say(f"restoring {dump.name}")
+    code = stack.restore_dump(dump)
+    if code != 0:
+        # --single-transaction: a failed restore leaves the database as it was.
+        say(f"pg_restore failed with exit code {code}; the database is unchanged")
+    else:
+        say("restored; the previous database is the newest file in billing-data/backups")
+    started = start(args, stack, clock)
+    return code or started
 
 
 def parse_arguments(arguments: list[str]) -> argparse.Namespace:
@@ -309,6 +474,13 @@ def parse_arguments(arguments: list[str]) -> argparse.Namespace:
     start_parser = commands.add_parser("start", help="start the server again")
     profiles(start_parser)
 
+    restore_parser = commands.add_parser("restore", help="replace the billing database with an off-site backup")
+    restore_parser.add_argument("backup", nargs="?", default="latest",
+                                help="latest (default), a name, or a number from `python -m app.backups list`: "
+                                     "1 is the newest, 2 the one before")
+    restore_parser.add_argument("--yes", action="store_true", help="do not ask before replacing the database")
+    profiles(restore_parser)
+
     commands.add_parser("status", help="print the pending restart or shutdown")
     commands.add_parser("cancel", help="cancel the pending restart or shutdown")
 
@@ -321,6 +493,8 @@ def main(arguments: list[str], stack: Stack | None = None, clock: Clock | None =
     args = parse_arguments(arguments)
     if getattr(args, "outsource", False):
         say(OUTSOURCE_NOTE)
+    if stack is None:
+        share_billing_data(os.environ)
     stack = stack or Stack(args.profile)
     clock = clock or Clock()
     try:
@@ -334,7 +508,7 @@ def main(arguments: list[str], stack: Stack | None = None, clock: Clock | None =
     except RuntimeError as error:
         say(str(error))
         return 1
-    return {"restart": restart, "stop": stop, "start": start}[args.action](args, stack, clock)
+    return {"restart": restart, "stop": stop, "start": start, "restore": restore}[args.action](args, stack, clock)
 
 
 if __name__ == "__main__":

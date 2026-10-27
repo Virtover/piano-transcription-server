@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,6 +87,10 @@ class FakeStack:
         if command == "active-jobs":
             return str(self.active_jobs.pop(0) if self.active_jobs else 0)
         raise AssertionError(arguments)
+
+    def prepare_files(self):
+        self.prepared_at = self.clock.now()
+        return []
 
     def start_build(self):
         self.build = FakeBuild(self.clock, self.clock.now() + self.build_seconds, self.build_code)
@@ -354,8 +359,114 @@ def test_start_waits_until_ready(capsys):
     code, stack, _ = run(["start"], ready_after=6)
 
     assert code == 0
-    assert stack.up_call == (0, None, False)
+    # Built, so a start after an update runs the new code.
+    assert stack.up_call == (0, None, True)
     assert "ready" in capsys.readouterr().out
+
+
+def test_start_prepares_files_before_starting():
+    _, stack, _ = run(["start"])
+
+    assert stack.prepared_at == 0
+
+
+def test_start_stops_when_files_cannot_be_prepared(capsys):
+    clock = FakeClock()
+    stack = FakeStack(clock)
+
+    def blocked():
+        raise RuntimeError("secrets/postgres_password is a folder, not a file: move it away and start again")
+
+    stack.prepare_files = blocked
+
+    assert server.main(["start"], stack, clock) == 1
+    assert stack.up_call is None
+    assert "is a folder, not a file" in capsys.readouterr().out
+
+
+@pytest.fixture
+def checkout(tmp_path):
+    (tmp_path / ".env.example").write_text("MAX_ACTIVE_JOBS=50\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_new_installation_gets_env_and_password(checkout):
+    created = server.prepare_files(checkout)
+
+    assert len(created) == 2
+    assert (checkout / ".env").read_text(encoding="utf-8") == "MAX_ACTIVE_JOBS=50\n"
+    password = (checkout / "secrets" / "postgres_password").read_text(encoding="utf-8")
+    assert len(password) == 48 and password.isalnum()
+    # Nothing prints the password.
+    assert not any(password in message for message in created)
+
+
+def test_billing_data_is_created_by_the_user_not_by_docker(checkout):
+    server.prepare_files(checkout)
+
+    assert (checkout / "billing-data" / "backups").is_dir()
+
+
+@pytest.mark.parametrize(("gid", "expected"), [(1000, "1000"), (0, None)])
+def test_billing_data_is_shared_with_the_users_group(monkeypatch, gid, expected):
+    monkeypatch.setattr(server.os, "getgid", lambda: gid, raising=False)
+    environment = {}
+
+    server.share_billing_data(environment)
+
+    assert environment.get("BILLING_DATA_GROUP") == expected
+
+
+def test_existing_files_are_never_changed(checkout):
+    (checkout / ".env").write_text("MAX_ACTIVE_JOBS=5\n", encoding="utf-8")
+    (checkout / "secrets").mkdir()
+    (checkout / "secrets" / "postgres_password").write_text("chosen", encoding="utf-8")
+
+    assert server.prepare_files(checkout) == []
+    assert (checkout / ".env").read_text(encoding="utf-8") == "MAX_ACTIVE_JOBS=5\n"
+    assert (checkout / "secrets" / "postgres_password").read_text(encoding="utf-8") == "chosen"
+
+
+def test_empty_folder_left_by_docker_becomes_the_password(checkout):
+    # Starting without the file makes Docker create a folder in its place.
+    (checkout / "secrets" / "postgres_password").mkdir(parents=True)
+
+    server.prepare_files(checkout)
+
+    assert (checkout / "secrets" / "postgres_password").is_file()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="file modes")
+def test_password_is_readable_by_the_containers_whatever_the_umask(checkout):
+    previous = os.umask(0o077)
+    try:
+        server.prepare_files(checkout)
+    finally:
+        os.umask(previous)
+
+    assert (checkout / "secrets").stat().st_mode & 0o777 == 0o755
+    assert (checkout / "secrets" / "postgres_password").stat().st_mode & 0o777 == 0o644
+
+
+def test_root_owned_folder_explains_the_fix(checkout, monkeypatch):
+    (checkout / "secrets" / "postgres_password").mkdir(parents=True)
+
+    def denied(self):
+        raise PermissionError("Permission denied")
+
+    monkeypatch.setattr(Path, "rmdir", denied)
+
+    with pytest.raises(RuntimeError, match=r"sudo rm -r secrets/postgres_password"):
+        server.prepare_files(checkout)
+
+
+def test_folder_with_contents_is_not_removed(checkout):
+    (checkout / "secrets" / "postgres_password").mkdir(parents=True)
+    (checkout / "secrets" / "postgres_password" / "kept").write_text("x", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="is a folder, not a file"):
+        server.prepare_files(checkout)
+    assert (checkout / "secrets" / "postgres_password" / "kept").exists()
 
 
 def test_start_reports_an_api_that_does_not_come_up(capsys):
@@ -399,3 +510,176 @@ def test_slow_append_only_file_is_waited_for_up_to_a_limit(capsys):
     assert server.main(["restart", "1m"], stack, clock) == 0
     assert stack.up_call[0] == 60 + server.AOF_TIMEOUT
     assert "queued jobs may be lost" in capsys.readouterr().out
+
+
+# --- Restore ------------------------------------------------------------------
+
+KEY = "AGE-SECRET-KEY-1EXAMPLE"
+
+
+class RestoreStack(FakeStack):
+    def __init__(self, clock, fetch_code=0, backup_code=0, restore_code=0, **options):
+        super().__init__(clock, **options)
+        self.steps = []
+        self.fetch_code = fetch_code
+        self.backup_code = backup_code
+        self.restore_code = restore_code
+        self.root = Path("/srv/piano")
+
+    def fetch_backup(self, which, key):
+        self.steps.append(("fetch", which, key))
+        if self.fetch_code:
+            return self.fetch_code, "No off-site backup named billing-9."
+        return 0, "Backup from 2026-10-27 16:47 UTC saved and checked: /billing/restore/billing-1793116030.dump"
+
+    def host_path(self, container_path):
+        return server.Stack.host_path(self, container_path)
+
+    def start_postgres(self):
+        self.steps.append(("postgres",))
+        return 0
+
+    def stop_services(self, services):
+        self.steps.append(("stop", tuple(services)))
+        return 0
+
+    def backup_now(self):
+        self.steps.append(("backup",))
+        return self.backup_code
+
+    def restore_dump(self, dump):
+        self.steps.append(("restore", dump))
+        return self.restore_code
+
+    def up(self, command=None, build=True):
+        self.steps.append(("up",))
+        return super().up(command, build)
+
+
+@pytest.fixture
+def terminal(monkeypatch):
+    """A person at a terminal who types the key and answers the question."""
+    answers = {"key": KEY, "confirm": True, "tty": True}
+    monkeypatch.setattr(server, "read_key", lambda: answers["key"])
+    monkeypatch.setattr(server, "confirm", lambda question: answers["confirm"])
+    monkeypatch.setattr(server.sys.stdin, "isatty", lambda: answers["tty"], raising=False)
+    return answers
+
+
+def restore_run(arguments, **options):
+    clock = FakeClock()
+    stack = RestoreStack(clock, **options)
+    return server.main(arguments, stack, clock), stack
+
+
+def test_restore_fetches_first_then_backs_up_and_restores(terminal, capsys):
+    code, stack = restore_run(["restore"])
+
+    assert code == 0
+    dump = Path("/srv/piano/billing-data/restore/billing-1793116030.dump")
+    assert stack.steps == [
+        ("fetch", "latest", KEY), ("postgres",), ("stop", tuple(server.BILLING_SERVICES)), ("backup",),
+        ("restore", dump), ("up",),
+    ]
+    assert "the API is ready" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("which", ["3", "billing-1793116030.dump.age"])
+def test_restore_passes_the_chosen_backup(terminal, which):
+    _, stack = restore_run(["restore", which])
+
+    assert stack.steps[0] == ("fetch", which, KEY)
+
+
+def test_declined_restore_changes_nothing(terminal, capsys):
+    terminal["confirm"] = False
+
+    code, stack = restore_run(["restore"])
+
+    assert code == 0
+    assert [step[0] for step in stack.steps] == ["fetch"]
+    assert "nothing was changed" in capsys.readouterr().out
+
+
+def test_failed_fetch_changes_nothing(terminal):
+    code, stack = restore_run(["restore", "9"], fetch_code=1)
+
+    assert code == 1
+    assert [step[0] for step in stack.steps] == ["fetch"]
+
+
+def test_missing_key_changes_nothing(terminal):
+    terminal["key"] = "\n"
+
+    code, stack = restore_run(["restore"])
+
+    assert code == 1
+    assert stack.steps == []
+
+
+def test_piped_key_needs_yes(terminal):
+    terminal["tty"] = False
+
+    code, stack = restore_run(["restore"])
+    assert code == 1
+    assert [step[0] for step in stack.steps] == ["fetch"]
+
+    code, stack = restore_run(["restore", "--yes"])
+    assert code == 0
+    assert stack.steps[-1] == ("up",)
+
+
+def test_failed_safety_backup_restores_nothing(terminal, capsys):
+    code, stack = restore_run(["restore"], backup_code=1)
+
+    assert code == 1
+    assert "restore" not in [step[0] for step in stack.steps]
+    assert "nothing was restored" in capsys.readouterr().out
+
+
+def test_failed_restore_still_starts_the_services(terminal, capsys):
+    code, stack = restore_run(["restore"], restore_code=1)
+
+    assert code == 1
+    assert stack.steps[-1] == ("up",)
+    assert "the database is unchanged" in capsys.readouterr().out
+
+
+def test_key_is_sent_on_standard_input_only(tmp_path):
+    calls = []
+
+    def fake_run(command, **options):
+        calls.append((command, options))
+        return SimpleNamespace(returncode=0, stdout="saved and checked: /billing/restore/billing-1.dump\n", stderr="")
+
+    stack = server.Stack([], run=fake_run, root=tmp_path)
+    stack.fetch_backup("2", KEY)
+
+    command, options = calls[0]
+    assert KEY not in " ".join(command)
+    assert options["input"] == KEY
+    assert command[-2:] == ["fetch", "2"]
+    assert "env" not in options
+
+
+def test_dump_is_streamed_into_pg_restore(tmp_path):
+    dump = tmp_path / "billing-1.dump"
+    dump.write_bytes(b"PGDMP")
+    received = []
+
+    def fake_run(command, **options):
+        received.append((command, options["stdin"].read()))
+        return SimpleNamespace(returncode=0)
+
+    server.Stack([], run=fake_run, root=tmp_path).restore_dump(dump)
+
+    command, data = received[0]
+    assert command[-len(server.PG_RESTORE):] == server.PG_RESTORE
+    assert "--single-transaction" in command and "--clean" in command
+    assert data == b"PGDMP"
+
+
+def test_container_paths_map_to_billing_data(tmp_path):
+    stack = server.Stack([], root=tmp_path)
+
+    assert stack.host_path("/billing/restore/billing-1.dump") == tmp_path / "billing-data" / "restore" / "billing-1.dump"

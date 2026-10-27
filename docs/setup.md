@@ -27,10 +27,11 @@ The worker image includes `ffmpeg`, Transkun, and the Python dependencies. Redis
 ## 🚀 Run the stack
 
 ```shell
-cp .env.example .env
+python scripts/server.py start
 docker compose run --rm api python -m app.config check
-docker compose up --build
 ```
+
+On a new installation, `start` creates `.env` from `.env.example` and a random PostgreSQL password in `secrets/postgres_password`, which it never prints. It does not change either file once it exists. It then builds the images and waits until the API is ready. After changing `.env`, run `docker compose up -d` to apply it.
 
 The `check` command validates `.env` and the secrets and prints the resolved configuration with secrets masked. With `--online`, it also tests the configured services with the real credentials; see [Checking the configuration](configuration.md#-checking-the-configuration). Container paths and service addresses are set in `docker-compose.yml`, so `.env` only holds your choices. See [Configuration](configuration.md).
 
@@ -96,19 +97,11 @@ Requests without the correct password get `401` with `{"detail": "Server passwor
 
 The API, workers, and cleanup service run as user ID `10001`, not root, so a bug in a video download tool or in ffmpeg cannot reach the rest of the container as root.
 
-New installations need nothing extra. An installation from before this change has a `data` volume and a `billing-data` folder that belong to root. The services then refuse to start, and their log names the directory and this command. Run it once, on any system:
+Nothing needs to be done by hand. Docker creates a missing `billing-data` folder as root, and volumes from older versions belong to root, so before the other services start, the `prepare` service gives `/data` and `billing-data` to user `10001` and exits. It runs as root without a network and never touches the PostgreSQL cluster in `billing-data/postgres`. If a service still reports a directory it cannot write, run `docker compose run --rm prepare` and read its output.
 
-```shell
-docker compose run --rm --no-deps -u root api chown -R 10001:10001 /data /billing
-```
+On Linux, the folders in `billing-data` keep the group of the user who ran `python scripts/server.py start` and are writable by it, so you can copy, move, or delete backups without `sudo`. The PostgreSQL cluster stays readable only by PostgreSQL.
 
-On Linux, this also changes the owner of `billing-data` on the host, including
-the live `billing-data/postgres` cluster. PostgreSQL takes its files back
-when its container starts next, so restart it afterwards:
-`docker compose restart postgres`. Do not edit the PostgreSQL cluster files
-directly while PostgreSQL is running. Admin
-commands such as `docker compose exec api python -m app.admin` run as the same
-user, so files they create stay usable by the services.
+Admin commands such as `docker compose exec api python -m app.admin` run as the same user, so files they create stay usable by the services.
 
 ## 🎮 GPU and CPU execution
 

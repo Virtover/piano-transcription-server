@@ -105,8 +105,10 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 Production billing is PostgreSQL. The Compose `postgres` service is
 reachable only on the internal Compose network, and keeps its live database
 where `POSTGRES_DATA_LOCATION` says; see [Where the database is
-kept](#where-the-database-is-kept). Create `secrets/postgres_password` before
-starting the stack.
+kept](#where-the-database-is-kept). `python scripts/server.py start` creates a
+random `secrets/postgres_password` when it is missing. PostgreSQL uses it only
+when it creates the database, so changing the file later does not change the
+password of an existing database.
 Backups are verified custom-format `pg_dump` files. To move an existing
 SQLite database, stop the old stack, start only PostgreSQL, and run the
 one-time migration command:
@@ -205,6 +207,8 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 | `BILLING_BACKUP_DIR` | `/billing/backups` | same | Directory for billing database backups. |
 
 `POSTGRES_DATA_LOCATION` in `.env` is read by Docker Compose, not by the server: where PostgreSQL keeps the live billing database. See [Where the database is kept](#where-the-database-is-kept).
+
+`BILLING_DATA_GROUP` is read by Docker Compose: the numeric host group that may manage the files in `billing-data`. `scripts/server.py` sets it to the group of the user running it, so it normally stays unset in `.env`. See [Running as a non-root user](setup.md#-running-as-a-non-root-user).
 
 `API_BIND_ADDRESS` in `.env` is read by Docker Compose, not by the server: the network address the API's port `8000` is published on. The secure default is `127.0.0.1`, which keeps direct HTTP local-only. Set `0.0.0.0` only when clients on the network require direct access, and use HTTPS through a tunnel or reverse proxy for public access. See [Password protection](setup.md#-password-protection).
 
@@ -459,27 +463,41 @@ The off-site history follows the same steps as the local one, decided from the c
 
 ### Restoring a backup
 
-Restore a local backup from `./billing-data/backups`, or first fetch one from off-site storage. The private key is read from standard input, so it is not stored anywhere. Paste it into a file, for example `key.txt`, then:
+To replace the live billing database with an off-site backup, run on any system:
+
+```shell
+python scripts/server.py restore
+```
+
+It asks for the private key without showing it, so the key is not stored anywhere and does not appear in the shell history. Then it:
+
+1. Downloads, decrypts, and checks the backup with `pg_restore --list`, into `./billing-data/restore`. If this fails, nothing has changed.
+2. Asks before going on, then stops the API and the workers. Running jobs are interrupted.
+3. Takes a safety backup of the current database into `./billing-data/backups`. If this fails, nothing is restored.
+4. Restores with `pg_restore --clean --if-exists --no-owner --single-transaction --exit-on-error`, so a failed restore leaves the database as it was.
+5. Starts the stack again and waits until `/ready` answers.
+
+Without an argument it restores the newest off-site backup. Give a name, or a number counted from the newest, as `python -m app.backups list` shows them: `restore 2` is the one before the newest. The safety backup is also copied off-site when off-site copies are on, so after a restore it is number 1.
+
+For automation, pipe the key in and add `--yes`, which skips the question:
 
 **Windows (PowerShell)**
 
 ```powershell
-Get-Content key.txt | docker compose run --rm --no-deps -T api python -m app.backups fetch latest
+Get-Content key.txt | python scripts/server.py restore 2 --yes
 Remove-Item key.txt
 ```
 
 **macOS and Linux**
 
 ```bash
-docker compose run --rm --no-deps -T api python -m app.backups fetch latest < key.txt
+python scripts/server.py restore 2 --yes < key.txt
 rm key.txt
 ```
 
-Instead of `latest`, give a name from `python -m app.backups list`. The
-backup is decrypted and checked with `pg_restore --list`, then saved in
-`./billing-data/restore`. On a new machine, copy `.env` and the
-`secrets/offsite_backup_*` files there first. Without this server's code, any
-S3 client and `age --decrypt -i key.txt` do the same.
+On a new machine, copy `.env` and the `secrets/offsite_backup_*` files there first. Without this server's code, any S3 client and `age --decrypt -i key.txt` download and decrypt a backup too.
+
+To only fetch a backup without restoring it, pipe the key into `docker compose run --rm --no-deps -T api python -m app.backups fetch latest`.
 
 The live PostgreSQL data is where `POSTGRES_DATA_LOCATION` says, mounted
 inside the PostgreSQL container at `/var/lib/postgresql/data`. Do not edit,
@@ -494,8 +512,8 @@ Use `docker compose exec api python -m app.backups list` to see both local and
 off-site backups.
 
 Every dump is written to a temporary file, validated with `pg_restore --list`,
-and atomically renamed only after validation. To restore, stop all application
-services, keep PostgreSQL running, and restore into a temporary database first:
+and atomically renamed only after validation. To look into a local backup
+without touching the live database, restore it into a temporary database:
 
 **Windows (PowerShell)**
 
@@ -508,21 +526,9 @@ docker compose exec -T postgres rm -f /tmp/billing-restore.dump
 docker compose exec -T postgres psql -U billing -d billing_restore -c "SELECT count(*) FROM users"
 ```
 
-Only after verifying the temporary database should an operator schedule a
-production restore. Do not overwrite the live database volume with filesystem
-commands. A production restore must be performed with PostgreSQL tools during
-maintenance, followed by `docker compose up -d` and a `/ready` check.
-
-For off-site recovery, first fetch and validate a dump:
-
-```powershell
-Get-Content key.txt | docker compose run --build --rm --no-deps -T api python -m app.backups fetch latest
-```
-
-The fetched file is saved under `billing-data\restore` and checked with
-`pg_restore --list`. Copy it into the PostgreSQL container with `docker cp`
-before running `pg_restore`; this works in Windows PowerShell 5 as well as
-PowerShell 7. Keep `key.txt` outside the repository and remove it after use.
+Remove it afterwards with `docker compose exec -T postgres dropdb -U billing
+billing_restore`, and start the services again with `python scripts/server.py
+start`. Never overwrite the live database files with filesystem commands.
 
 ### Where the database is kept
 

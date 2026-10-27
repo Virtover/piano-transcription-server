@@ -168,6 +168,21 @@ def test_fetch_downloads_decrypts_and_checks(offsite, identity, capsys):
     assert "AGE-SECRET-KEY" in capsys.readouterr().err
 
 
+def test_fetch_counts_from_the_newest(offsite, identity, capsys):
+    settings, _, store = offsite
+    make_backups(settings.billing.backup_dir, [1000, 2000, 3000])
+    sync_offsite(store, settings.billing.backup_dir, RetentionPolicy(DAY, 0, 0, 0, 0), 3500)
+
+    assert backups.fetch("2", str(identity)) == 0
+    assert "billing-2000.sqlite3" in capsys.readouterr().out
+    assert backups.fetch("3", str(identity)) == 0
+    assert "billing-1000.sqlite3" in capsys.readouterr().out
+
+    assert backups.fetch("4", str(identity)) == 1
+    assert backups.fetch("0", str(identity)) == 1
+    assert "choose 1 (the newest) to 3" in capsys.readouterr().err
+
+
 def test_fetch_with_the_wrong_key_fails(offsite):
     settings, _, store = offsite
     make_backups(settings.billing.backup_dir, [1000])
@@ -200,7 +215,7 @@ def test_list_shows_both_places(offsite, capsys):
 
     assert backups.list_backups() == 0
     output = capsys.readouterr().out
-    assert "Local" in output and "Off-site (backups): 1" in output and "2024-01-01 00:00 UTC" in output
+    assert "Local" in output and "Off-site (backups): 1" in output and "  1. 2024-01-01 00:00 UTC" in output
 
 
 # --- Configuration --------------------------------------------------------------

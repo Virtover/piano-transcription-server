@@ -98,6 +98,20 @@ def test_only_the_api_mounts_billing_data(service):
     assert not any("billing-data" in volume for volume in services[service].get("volumes", []))
 
 
+@pytest.mark.parametrize("service", ["api", "worker", "remote-worker", "cleanup"])
+def test_services_start_after_their_folders_are_prepared(service):
+    assert compose_services()[service]["depends_on"]["prepare"] == {"condition": "service_completed_successfully"}
+
+
+def test_prepare_runs_as_root_without_a_network_or_secrets():
+    prepare = compose_services()["prepare"]
+
+    assert prepare["user"] == "root"
+    assert prepare["network_mode"] == "none"
+    assert sorted(prepare["volumes"]) == ["./billing-data:/billing", "data:/data"]
+    assert prepare["restart"] == "no"
+
+
 def test_every_service_rotates_its_logs():
     for name, service in compose_services().items():
         assert service["logging"]["driver"] == "json-file", name

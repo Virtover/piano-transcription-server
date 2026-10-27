@@ -333,8 +333,9 @@ def list_backups(store_factory: Callable | None = None) -> int:
         return 0
     remote = (store_factory or OffsiteStore.from_settings)(settings).backups()
     print(f"Off-site ({settings.offsite.bucket}): {len(remote)}")
-    for timestamp, item in sorted(remote.items(), reverse=True):
-        print(f"  {_when(timestamp)}  {item['key']}  {item['size']:,} bytes")
+    # Numbered newest first, as `fetch <number>` counts them.
+    for number, (timestamp, item) in enumerate(sorted(remote.items(), reverse=True), 1):
+        print(f"  {number:>3}. {_when(timestamp)}  {item['key']}  {item['size']:,} bytes")
     return 0
 
 
@@ -358,6 +359,13 @@ def fetch(name: str, identity: str, store_factory: Callable | None = None) -> in
         return 1
     if name == "latest":
         timestamp = max(remote)
+    elif name.isdigit():
+        newest_first = sorted(remote, reverse=True)
+        if not 1 <= int(name) <= len(newest_first):
+            print(f"There are {len(newest_first)} off-site backups: choose 1 (the newest) to {len(newest_first)}. "
+                  "See: python -m app.backups list", file=sys.stderr)
+            return 1
+        timestamp = newest_first[int(name) - 1]
     else:
         match = re.search(r"billing-(\d+)", name)
         timestamp = int(match.group(1)) if match else -1
@@ -394,7 +402,7 @@ def main(arguments: list[str]) -> int:
     fetch_parser = commands.add_parser(
         "fetch", help="download and decrypt an off-site backup; the private key is read from standard input"
     )
-    fetch_parser.add_argument("name", help="latest, or a name from `list`")
+    fetch_parser.add_argument("name", help="latest, a name from `list`, or its number there: 1 is the newest")
     args = parser.parse_args(arguments)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")

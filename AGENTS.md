@@ -10,7 +10,8 @@ docker compose run --rm api python -m app.config check           # validate .env
 docker compose run --rm api python -m app.config check --online  # also test storage, RunPod, Google Play for real
 docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents
 docker compose up -d --build                                     # the stack; OUTSOURCE_PROVIDER in .env switches RunPod on
-python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start, status, cancel
+python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start (also first start), status, cancel
+python scripts/server.py restore 2                               # billing database from an off-site backup: latest, a name, or Nth newest
 docker compose exec api python -m app.admin status              # live picture; also jobs, user, billing, limits, audit
 ```
 
@@ -53,6 +54,7 @@ For guided setup, use the skills in `.claude/skills/`: `setup-runpod` for outsou
 
 - `Set-Content -NoNewline <file> <value>` swaps its arguments in Windows PowerShell 5.1 and creates a file named after the secret. Always use `Set-Content -Path <file> -Value <value> -NoNewline`.
 - Only `secrets/` is git-ignored for secrets: check `git status` for stray files after writing one.
-- The services run as user ID 10001. Volumes from older versions belong to root, and the services then refuse to start: the fix is in "Running as a non-root user" in `docs/setup.md`.
+- The services run as user ID 10001. The `prepare` Compose service (`app/prepare.py`) gives them `/data` and `billing-data` before every start; it must never touch the PostgreSQL cluster.
+- Starting without `secrets/postgres_password` makes Docker create an empty folder in its place. `scripts/server.py start` replaces it with a generated password.
 - The RunPod image installs PyTorch for a fixed CUDA version, `RUNPOD_CUDA_VERSION` in `app/requirements.py`; a test keeps `Dockerfile.runpod` in sync with it. pip's default PyTorch targets a newer CUDA and fails on hosts whose driver does not support it.
 - Every image build is about 8 GB. When Docker Desktop's disk fills up, builds fail with `error reading from server: EOF` and Docker stops starting. See "Freeing disk space" in `docs/setup.md`.
