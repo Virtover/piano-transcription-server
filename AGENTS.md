@@ -11,7 +11,7 @@ docker compose run --rm api python -m app.config check --online  # also test sto
 docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents
 docker compose up -d --build                                     # the stack; OUTSOURCE_PROVIDER in .env switches RunPod on
 python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start (also first start), status, cancel
-python scripts/server.py restore 2                               # billing database from an off-site backup: latest, a name, or Nth newest
+python scripts/server.py restore 2                               # billing database from a backup: latest, a name, or Nth newest; --from local, --fallback
 docker compose exec api python -m app.admin status              # live picture; also jobs, user, billing, limits, audit
 ```
 

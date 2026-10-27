@@ -5,7 +5,7 @@
     python scripts/server.py start                       # build, prepare, start, wait until ready
     python scripts/server.py status
     python scripts/server.py cancel                      # also stops a waiting script
-    python scripts/server.py restore [latest|NAME|N]     # billing database from an off-site backup
+    python scripts/server.py restore [latest|NAME|N]     # billing database from a backup; --from local, --fallback
 
 Runs on the host with only the Python standard library. On a new
 installation, start creates .env from .env.example and a random PostgreSQL
@@ -16,10 +16,13 @@ the current version keeps serving; if the build fails, the restart is
 cancelled. At the planned time, running jobs get up to --grace to finish.
 Queued jobs survive both a restart and a shutdown.
 
-restore asks for the off-site backups' private key without showing it, or
-reads it from standard input when it is piped. It fetches and checks the
-backup first, then stops the API and the workers, takes a safety backup of
-the current database, restores in one transaction, and starts again.
+restore takes an off-site backup by default, or one from billing-data/backups
+with --from local; --fallback tries the other place when the first has no
+such backup or cannot be reached. For an off-site backup it asks for the
+private key without showing it, or reads it from standard input when it is
+piped, and fetches and checks the backup first. Then it stops the API and
+the workers, takes a safety backup of the current database, restores in one
+transaction, and starts again.
 """
 
 import argparse
@@ -49,6 +52,8 @@ OUTSOURCE_NOTE = "--outsource is no longer needed: OUTSOURCE_PROVIDER in .env tu
 BILLING_SERVICES = ["api", "worker", "remote-worker", "cleanup"]
 # The last line of `python -m app.backups fetch`.
 FETCHED = re.compile(r"saved and checked: (/billing/\S+)")
+# app.backups.BACKUP_FILE_PATTERN: the automatic backups in billing-data/backups.
+LOCAL_BACKUP = re.compile(r"^billing-(\d+)\.(?:sqlite3|dump)$")
 PG_RESTORE = ["pg_restore", "-U", "billing", "-d", "billing", "--clean", "--if-exists", "--no-owner",
               "--single-transaction", "--exit-on-error"]
 
@@ -398,26 +403,77 @@ def confirm(question: str) -> bool:
     return input(question).strip().lower() in ("y", "yes")
 
 
-def restore(args, stack: Stack, clock: Clock) -> int:
+def remote_backup(which: str, stack: Stack) -> tuple[Path | None, str]:
+    """Download, decrypt, and check an off-site backup. Returns the file on
+    the host, or why there is none."""
     key = read_key()
     if "AGE-SECRET-KEY-" not in key:
-        say("no private key given (AGE-SECRET-KEY-...): nothing was changed")
-        return 1
-    say(f"fetching and checking off-site backup {args.backup}")
-    code, output = stack.fetch_backup(args.backup, key)
+        return None, "no private key given (AGE-SECRET-KEY-...)"
+    say(f"fetching and checking off-site backup {which}")
+    code, output = stack.fetch_backup(which, key)
     del key
     if output:
         print(output, flush=True)
     fetched = FETCHED.search(output)
     if code != 0 or not fetched:
-        say("fetching failed: nothing was changed")
-        return code or 1
-    dump = stack.host_path(fetched.group(1))
+        return None, "fetching the off-site backup failed"
+    return stack.host_path(fetched.group(1)), ""
+
+
+def local_backup(which: str, stack: Stack) -> tuple[Path | None, str]:
+    """A backup in billing-data/backups: latest, a name, or a number counted
+    from the newest, as `python -m app.backups list` shows them."""
+    folder = stack.root / "billing-data" / "backups"
+    found = {}
+    if folder.is_dir():
+        for path in folder.iterdir():
+            match = LOCAL_BACKUP.match(path.name)
+            if match and path.is_file():
+                found[int(match.group(1))] = path
+    newest_first = [found[timestamp] for timestamp in sorted(found, reverse=True)]
+    if not newest_first:
+        return None, "there are no local backups in billing-data/backups"
+    if which == "latest":
+        chosen = newest_first[0]
+    elif which.isdigit():
+        if not 1 <= int(which) <= len(newest_first):
+            return None, f"there are {len(newest_first)} local backups: choose 1 (the newest) to {len(newest_first)}"
+        chosen = newest_first[int(which) - 1]
+    else:
+        match = re.search(r"billing-(\d+)", which)
+        chosen = found.get(int(match.group(1))) if match else None
+        if chosen is None:
+            return None, f"no local backup named {which}"
+    if chosen.suffix != ".dump":
+        return None, f"{chosen.name} is a legacy SQLite backup; PostgreSQL cannot restore it"
+    say(f"using local backup {chosen.name}")
+    return chosen, ""
+
+
+BACKUP_SOURCES = {"remote": remote_backup, "local": local_backup}
+
+
+def restore(args, stack: Stack, clock: Clock) -> int:
+    sources = [args.source]
+    if args.fallback:
+        sources += [source for source in BACKUP_SOURCES if source != args.source]
+    dump = None
+    for position, source in enumerate(sources):
+        dump, problem = BACKUP_SOURCES[source](args.backup, stack)
+        if dump is not None:
+            break
+        if position + 1 < len(sources):
+            # A number or "latest" picks from the other place's own list.
+            say(f"{problem}; trying the {sources[position + 1]} backups")
+        else:
+            say(f"{problem}: nothing was changed")
+            return 1
     if not args.yes:
         if not sys.stdin.isatty():
             say("standard input is not a terminal, so nothing can be asked: add --yes. Nothing was changed")
             return 1
-        if not confirm(f"Replace the live billing database with {dump.name}? Running jobs are interrupted. [y/N] "):
+        if not confirm(f"Replace the live billing database with {dump.name} ({source})? "
+                       "Running jobs are interrupted. [y/N] "):
             say("cancelled: nothing was changed")
             return 0
     if stack.start_postgres() != 0:
@@ -474,10 +530,14 @@ def parse_arguments(arguments: list[str]) -> argparse.Namespace:
     start_parser = commands.add_parser("start", help="start the server again")
     profiles(start_parser)
 
-    restore_parser = commands.add_parser("restore", help="replace the billing database with an off-site backup")
+    restore_parser = commands.add_parser("restore", help="replace the billing database with a backup")
     restore_parser.add_argument("backup", nargs="?", default="latest",
                                 help="latest (default), a name, or a number from `python -m app.backups list`: "
                                      "1 is the newest, 2 the one before")
+    restore_parser.add_argument("--from", dest="source", choices=list(BACKUP_SOURCES), default="remote",
+                                help="off-site backups (remote, the default) or billing-data/backups (local)")
+    restore_parser.add_argument("--fallback", action="store_true",
+                                help="if there is no such backup there, or it cannot be fetched, use the other place")
     restore_parser.add_argument("--yes", action="store_true", help="do not ask before replacing the database")
     profiles(restore_parser)
 

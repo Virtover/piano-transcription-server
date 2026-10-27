@@ -326,8 +326,9 @@ def keygen() -> int:
 def list_backups(store_factory: Callable | None = None) -> int:
     local = local_backups(settings.billing.backup_dir)
     print(f"Local ({settings.billing.backup_dir}): {len(local)}")
-    for timestamp, path in sorted(local.items(), reverse=True):
-        print(f"  {_when(timestamp)}  {path.name}  {path.stat().st_size:,} bytes")
+    # Numbered newest first, as `scripts/server.py restore --from local` counts them.
+    for number, (timestamp, path) in enumerate(sorted(local.items(), reverse=True), 1):
+        print(f"  {number:>3}. {_when(timestamp)}  {path.name}  {path.stat().st_size:,} bytes")
     if not settings.offsite.enabled:
         print("Off-site: off (OFFSITE_BACKUP_BUCKET is not set)")
         return 0

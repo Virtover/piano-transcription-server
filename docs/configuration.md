@@ -463,13 +463,13 @@ The off-site history follows the same steps as the local one, decided from the c
 
 ### Restoring a backup
 
-To replace the live billing database with an off-site backup, run on any system:
+To replace the live billing database with a backup, run on any system:
 
 ```shell
 python scripts/server.py restore
 ```
 
-It asks for the private key without showing it, so the key is not stored anywhere and does not appear in the shell history. Then it:
+By default it takes an off-site backup, and asks for the private key without showing it, so the key is not stored anywhere and does not appear in the shell history. Then it:
 
 1. Downloads, decrypts, and checks the backup with `pg_restore --list`, into `./billing-data/restore`. If this fails, nothing has changed.
 2. Asks before going on, then stops the API and the workers. Running jobs are interrupted.
@@ -477,7 +477,15 @@ It asks for the private key without showing it, so the key is not stored anywher
 4. Restores with `pg_restore --clean --if-exists --no-owner --single-transaction --exit-on-error`, so a failed restore leaves the database as it was.
 5. Starts the stack again and waits until `/ready` answers.
 
-Without an argument it restores the newest off-site backup. Give a name, or a number counted from the newest, as `python -m app.backups list` shows them: `restore 2` is the one before the newest. The safety backup is also copied off-site when off-site copies are on, so after a restore it is number 1.
+Without an argument it restores the newest backup. Give a name, or a number counted from the newest, as `python -m app.backups list` shows them: `restore 2` is the one before the newest. The safety backup is also kept, and copied off-site when off-site copies are on, so after a restore it is number 1 in both lists.
+
+| Option | Backups used |
+| --- | --- |
+| none, or `--from remote` | Off-site |
+| `--from local` | `./billing-data/backups`; no key is needed |
+| `--fallback` | Also the other place, when the first has no such backup, or it cannot be fetched, for example because the storage cannot be reached or no key was given |
+
+With `--fallback`, `latest` or a number picks from the other place's own list, so `restore 2 --fallback` may restore a different point in time than the off-site number 2 would have. A name is the same backup in both places.
 
 For automation, pipe the key in and add `--yes`, which skips the question:
 

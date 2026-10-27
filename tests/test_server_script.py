@@ -683,3 +683,81 @@ def test_container_paths_map_to_billing_data(tmp_path):
     stack = server.Stack([], root=tmp_path)
 
     assert stack.host_path("/billing/restore/billing-1.dump") == tmp_path / "billing-data" / "restore" / "billing-1.dump"
+
+
+@pytest.fixture
+def local_backups(tmp_path):
+    folder = tmp_path / "billing-data" / "backups"
+    folder.mkdir(parents=True)
+    for name in ("billing-1000.sqlite3", "billing-2000.dump", "billing-3000.dump", "billing-3000.dump.tmp"):
+        (folder / name).write_bytes(b"PGDMP")
+    return folder
+
+
+def local_run(arguments, root, **options):
+    clock = FakeClock()
+    stack = RestoreStack(clock, **options)
+    stack.root = root
+    return server.main(arguments, stack, clock), stack
+
+
+def test_local_pattern_matches_the_backups():
+    from app import backups
+
+    assert server.LOCAL_BACKUP.pattern == backups.BACKUP_FILE_PATTERN.pattern
+
+
+@pytest.mark.parametrize(("which", "name"), [("latest", "billing-3000.dump"), ("2", "billing-2000.dump"),
+                                              ("billing-2000.dump", "billing-2000.dump")])
+def test_local_restore_needs_no_key(terminal, local_backups, which, name):
+    terminal["key"] = ""
+
+    code, stack = local_run(["restore", which, "--from", "local"], local_backups.parent.parent)
+
+    assert code == 0
+    assert "fetch" not in [step[0] for step in stack.steps]
+    assert ("restore", local_backups / name) in stack.steps
+
+
+@pytest.mark.parametrize(("which", "problem"), [("3", "is a legacy SQLite backup"), ("4", "choose 1 (the newest) to 3"),
+                                                 ("billing-9", "no local backup named billing-9")])
+def test_unusable_local_backup_changes_nothing(terminal, local_backups, capsys, which, problem):
+    code, stack = local_run(["restore", which, "--from", "local"], local_backups.parent.parent)
+
+    assert code == 1
+    assert stack.steps == []
+    assert problem in capsys.readouterr().out
+
+
+def test_failed_fetch_falls_back_to_local(terminal, local_backups, capsys):
+    code, stack = local_run(["restore", "--fallback"], local_backups.parent.parent, fetch_code=1)
+
+    assert code == 0
+    assert stack.steps[0][0] == "fetch"
+    assert ("restore", local_backups / "billing-3000.dump") in stack.steps
+    assert "trying the local backups" in capsys.readouterr().out
+
+
+def test_missing_key_falls_back_to_local(terminal, local_backups):
+    terminal["key"] = ""
+
+    code, stack = local_run(["restore", "--fallback"], local_backups.parent.parent)
+
+    assert code == 0
+    assert ("restore", local_backups / "billing-3000.dump") in stack.steps
+
+
+def test_missing_local_backup_falls_back_to_remote(terminal, tmp_path, capsys):
+    code, stack = local_run(["restore", "--from", "local", "--fallback"], tmp_path)
+
+    assert code == 0
+    assert stack.steps[0] == ("fetch", "latest", KEY)
+    assert "trying the remote backups" in capsys.readouterr().out
+
+
+def test_both_places_failing_changes_nothing(terminal, tmp_path, capsys):
+    code, stack = local_run(["restore", "--fallback"], tmp_path, fetch_code=1)
+
+    assert code == 1
+    assert [step[0] for step in stack.steps] == ["fetch"]
+    assert "there are no local backups in billing-data/backups: nothing was changed" in capsys.readouterr().out
