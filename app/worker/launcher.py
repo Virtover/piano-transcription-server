@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 
 from app.config import ensure_valid, settings
+from app.error_report import SERVICE_ENVIRONMENT
 from app.transcription.device import (
     cpu_batch_size,
     cpu_thread_count,
@@ -134,6 +135,8 @@ def main(arguments: list[str] | None = None) -> None:
         plan = plan_worker(cuda_job_capacities())
         queue = LOCAL_QUEUE
 
+    # Read by app.worker.tasks in each Dramatiq process, which reports its errors.
+    os.environ[SERVICE_ENVIRONMENT] = "remote-worker" if role == "remote" else "worker"
     if plan.cpu_threads:
         # Read by the OpenMP and MKL libraries themselves.
         os.environ["OMP_NUM_THREADS"] = str(plan.cpu_threads)

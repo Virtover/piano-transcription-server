@@ -95,6 +95,27 @@ def test_failed_job_releases_reservation(worker, monkeypatch):
     assert billing.get_balance("user") == 10
 
 
+@pytest.mark.parametrize(
+    ("error", "reported"),
+    [(RuntimeError("CUDA error"), True), (UserFacingError("This file has no audio"), False)],
+    ids=["unknown cause", "the user's mistake"],
+)
+def test_failed_job_is_reported_only_without_a_known_cause(worker, monkeypatch, error, reported):
+    _, billing = worker
+    queue_job(billing)
+    reports = []
+    monkeypatch.setattr(tasks.error_report, "report_exception", lambda e, context: reports.append((e, context)))
+
+    def transcribe_source(**kwargs):
+        raise error
+
+    install_pipeline(monkeypatch, transcribe_source)
+    tasks.transcribe_job.fn("job", "https://example.com/video")
+
+    assert job()["status"] == "failed"
+    assert reports == ([(error, {"Job": "job", "Backend": "local"})] if reported else [])
+
+
 def test_cancelled_job_is_partially_charged_and_cleaned_up(worker, monkeypatch):
     settings, billing = worker
     queue_job(billing, cost=10)

@@ -502,6 +502,46 @@ def check_offsite(config, store_factory: Callable | None = None) -> Result:
     )
 
 
+# --- Error reports ----------------------------------------------------------
+
+ERROR_REPORT_HINTS = {
+    401: "The website refused the token. Write the same token to secrets/error_report_token and to the website's "
+         "SERVER_ERROR_TOKEN.",
+    404: "Nothing receives reports at this address. Check ERROR_REPORT_URL, and that the website is up to date.",
+    503: "The website has no SERVER_ERROR_TOKEN set, so it does not accept reports yet.",
+}
+
+
+def check_error_report(config, http=requests) -> Result:
+    """Sends a test report, which the website shows as an info entry."""
+    url = config.error_report.url
+    try:
+        response = http.post(
+            url,
+            json={
+                "service": "check --online",
+                "level": "INFO",
+                "type": "TestReport",
+                "message": "Test report from python -m app.config check --online",
+                "test": True,
+            },
+            headers={"Authorization": f"Bearer {config.secrets.error_report_token.get_secret_value()}"},
+            timeout=REQUEST_TIMEOUT,
+            # A redirect is a wrong address; the token must not follow it.
+            allow_redirects=False,
+        )
+    except Exception as error:
+        return Result("Error reports", "fail", f"{url}: {type(error).__name__}",
+                      "The website cannot be reached from this server. Check ERROR_REPORT_URL.")
+    if 300 <= response.status_code < 400:
+        return Result("Error reports", "fail", f"{url}: redirected (HTTP {response.status_code})",
+                      "Set ERROR_REPORT_URL to the final address, with https:// and the exact host.")
+    if response.status_code >= 300:
+        return Result("Error reports", "fail", f"{url}: HTTP {response.status_code}",
+                      ERROR_REPORT_HINTS.get(response.status_code))
+    return Result("Error reports", "ok", f"{url} accepted a test report")
+
+
 # --- Running ----------------------------------------------------------------
 
 def run_checks(config) -> list[Result]:
@@ -524,6 +564,10 @@ def run_checks(config) -> list[Result]:
         results.append(check_offsite(config))
     else:
         results.append(Result("Off-site backups", "skip", "OFFSITE_BACKUP_BUCKET is not set"))
+    if config.error_report.url:
+        results.append(check_error_report(config))
+    else:
+        results.append(Result("Error reports", "skip", "ERROR_REPORT_URL is not set"))
     return results
 
 
