@@ -23,6 +23,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 from pydantic import BeforeValidator, Field, SecretStr, ValidationError, field_validator
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 SECRETS_DIR = "/run/secrets"
 # Unknown variables with these prefixes are reported as possible typos.
-CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_", "OFFSITE_")
+CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_", "OFFSITE_", "ERROR_REPORT_")
 MIN_SERVER_PASSWORD_LENGTH = 12
 # Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
 COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP"}
@@ -290,6 +291,8 @@ class SecretSettings(BaseSettings):
     # Optional. When present, every request except /health and /ready needs it.
     server_password: SecretStr | None = None
     billing_database_url: SecretStr | None = None
+    # Sent with every error report to ERROR_REPORT_URL.
+    error_report_token: SecretStr | None = None
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
@@ -376,6 +379,30 @@ class TunnelSettings(BaseSettings):
         return bool(profiles & {TUNNEL_PROFILE, "*"})
 
 
+class ErrorReportSettings(BaseSettings):
+    """Optional: errors of the API and the workers are sent to a website,
+    such as the Piano Weave website's Error Monitor (app/error_report.py)."""
+
+    model_config = _group_config("ERROR_REPORT_")
+
+    # The endpoint that receives the reports, such as https://pianoweave.com/api/server-errors.
+    url: str | None = None
+
+    @field_validator("url")
+    @classmethod
+    def _http_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        parsed = urlsplit(value)
+        if parsed.scheme not in ("https", "http") or not parsed.hostname:
+            raise ValueError("must be a URL such as https://pianoweave.com/api/server-errors")
+        # Plain HTTP would expose the token; only this machine may be reached without TLS.
+        if parsed.scheme == "http" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+            raise ValueError("must use https://, because the reports carry the error_report_token")
+        return value
+
+
 class RunPodSettings(BaseSettings):
     model_config = _group_config("RUNPOD_")
 
@@ -396,6 +423,7 @@ GROUPS: dict[str, type[BaseSettings]] = {
     "runpod": RunPodSettings,
     "offsite": OffsiteSettings,
     "tunnel": TunnelSettings,
+    "error_report": ErrorReportSettings,
     "secrets": SecretSettings,
 }
 
@@ -413,6 +441,7 @@ class Settings:
     runpod: RunPodSettings
     offsite: OffsiteSettings
     tunnel: TunnelSettings
+    error_report: ErrorReportSettings
     secrets: SecretSettings
     secrets_dir: str = SECRETS_DIR
 
@@ -619,6 +648,11 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
                 problems.append("The Google Play service-account secret is not valid JSON")
     if role in ("api", "all") and config.offsite.enabled:
         problems.extend(offsite_problems(config))
+    # The cleanup service has no secrets, so it sends no reports.
+    if role in ("api", "worker", "remote", "all") and config.error_report.url and config.secrets.error_report_token is None:
+        problems.append(
+            f"ERROR_REPORT_URL needs the secret file {config.secrets_dir}/error_report_token"
+        )
     if role == "all" and config.tunnel.enabled:
         # Only cloudflared reads the token, so only `check` looks for it.
         token = Path(config.secrets_dir) / TUNNEL_TOKEN_FILE

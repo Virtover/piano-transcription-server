@@ -7,7 +7,7 @@
 * **Secrets are files in `./secrets`.** Compose mounts the folder read-only at `/run/secrets`. The file name is the setting name. Secrets are never read from `.env` or the environment, and never appear in logs or error messages. See [Secrets](#-secrets).
 * **The process environment overrides `.env`.** Empty values count as unset.
 
-All settings are validated when a service starts. An invalid value stops the service with a message that names the variable. A variable that starts with `WORKER_`, `BILLING_`, `OUTSOURCE_`, `RUNPOD_`, or `GOOGLE_PLAY_` but is not a known setting is reported as a warning with the closest known name, for example `Unknown setting WORKER_BATCHSIZE; did you mean WORKER_BATCH_SIZE?`.
+All settings are validated when a service starts. An invalid value stops the service with a message that names the variable. A variable that starts with `WORKER_`, `BILLING_`, `OUTSOURCE_`, `RUNPOD_`, `GOOGLE_PLAY_`, `CLOUDFLARE_`, or `ERROR_REPORT_` but is not a known setting is reported as a warning with the closest known name, for example `Unknown setting WORKER_BATCHSIZE; did you mean WORKER_BATCH_SIZE?`.
 
 ### ✅ Checking the configuration
 
@@ -29,6 +29,7 @@ docker compose run --rm api python -m app.config check --online
 | RunPod | `OUTSOURCE_PROVIDER=runpod` | The endpoint's health, and its settings against the requirements below: image, `OUTSOURCE_STORAGE_ENDPOINT`, allowed CUDA versions, execution timeout, workers, scaling, and idle timeout. |
 | Google sign-in | `BILLING_PROVIDER=google_play` | The format of `GOOGLE_OAUTH_CLIENT_IDS`. Google can only confirm a client ID with a signed-in user's token. |
 | Google Play | `BILLING_PROVIDER=google_play` | Lists the products with the service account and compares them with `BILLING_PRODUCTS`. |
+| Error reports | `ERROR_REPORT_URL` is set | Sends a test report, which the website shows as an info entry. |
 
 Each result is `OK`, `WARN`, `FAIL`, or `SKIP`, and every warning or failure names the likely fix. The command exits with code `1` if any check fails. It never prints secrets or presigned URLs.
 
@@ -194,6 +195,16 @@ Optional, and on when `OFFSITE_BACKUP_BUCKET` is set. Then the other values and 
 | `OFFSITE_BACKUP_REGION` | `auto` | Storage region. `auto` for Cloudflare R2. |
 | `OFFSITE_BACKUP_RECIPIENT` | unset | The age public key (`age1...`) backups are encrypted to. Not a secret; the private key stays off this server. |
 
+### Error reports
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ERROR_REPORT_URL` | unset | Where the API and the workers send their errors, such as the Piano Weave website's `https://pianoweave.com/api/server-errors`. Needs the secret file `error_report_token`. Must use `https://`, so the token is never sent in the clear; plain `http://` is accepted only for `localhost`. |
+
+A report is sent for every error the API or a worker logs, and for every job that fails without a known cause: a failure such as a private video or an unsupported file is the user's, not the server's. Each report holds the error's type, message, traceback, and where it happened, never the user's file. Before a report is sent, every secret file's value, passwords in connection URLs, and the query of every link (where signed storage links keep their signature) are replaced. Redirects are not followed, so the token only goes to `ERROR_REPORT_URL`. The same error is sent at most once a minute, and at most 30 reports a minute in total. The cleanup service has no secrets, so it sends none.
+
+The reports are sent from the server to the website, so they also work when the server is reachable only through the tunnel. They cannot tell the website that the server is down: a stopped server sends nothing. The website's status monitor of `/ready` covers that.
+
 ### Container wiring
 
 Set by `docker-compose.yml`. Change them only when running the services outside Docker.
@@ -237,6 +248,8 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `offsite_backup_secret_key` | Optional. Secret access key for the off-site backup bucket. |
 | `server_password` | Optional. When present, every request except `/health` and `/ready` needs this password, as the `X-Server-Password` header or HTTP Basic auth with any user name. At least 12 characters; the API refuses to start otherwise. See [Password protection](setup.md#-password-protection). |
 | `postgres_password` | PostgreSQL password used by the API and workers. Mount it as `secrets/postgres_password`; never put it in `.env`. |
+
+| `error_report_token` | Optional. The token sent with every error report to `ERROR_REPORT_URL`. The website must have the same token. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
 
 The Cloudflare tunnel token is in a folder of its own, `secrets/cloudflare/tunnel_token`, because only the `cloudflared` service gets that folder. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
 

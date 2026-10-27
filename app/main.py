@@ -9,7 +9,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from redis import Redis
 
-from app import maintenance
+from app import error_report, maintenance
 from app.auth import server_password_matches, server_password_required
 from app.api.routes import transcriptions as transcription_routes
 from app.api.routes.transcriptions import (
@@ -140,6 +140,7 @@ def sync_billing_catalog() -> None:
     problem = backups.replaced_database_problem(Billing(), settings.billing.backup_dir)
     if problem:
         raise RuntimeError(problem)
+    error_report.install("api")
     # The restart or shutdown a past notice announced has happened.
     maintenance.clear_past(transcription_routes.redis)
     recover_active_jobs("Transcription interrupted because the server restarted")

@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import shutil
 import threading
 import time
@@ -12,10 +13,10 @@ from dramatiq.brokers.redis import RedisBroker
 from redis import Redis
 from redis.exceptions import WatchError
 
-from app import job_limits
+from app import error_report, job_limits
 from app.config import settings
 from app.billing import Billing, cancelled_cost
-from app.errors import detail, error_code, public_message
+from app.errors import GENERIC_MESSAGE, detail, error_code, public_message
 from app.outsource import routing
 from app.transcription.audio import remove_audio_files
 from app.transcription.audio import check_midi
@@ -38,6 +39,10 @@ INTERRUPTED = "transcription_interrupted"
 INVALID_RESULT = "result_unavailable"
 
 logger = logging.getLogger(__name__)
+
+# Dramatiq's processes import this module; the API and cleanup install reporting themselves.
+if os.environ.get(error_report.SERVICE_ENVIRONMENT):
+    error_report.install(os.environ[error_report.SERVICE_ENVIRONMENT])
 
 
 broker = RedisBroker(
@@ -527,6 +532,9 @@ def run_job(
         if job.get("user_id"):
             billing.release(job_id)
         logger.warning("Job %s failed", job_id, exc_info=e)
+        if public_message(e) == GENERIC_MESSAGE:
+            # No known cause such as a private video: probably a bug or a broken setup.
+            error_report.report_exception(e, {"Job": job_id, "Backend": backend})
         update_job(
             job_id,
             status="failed",
