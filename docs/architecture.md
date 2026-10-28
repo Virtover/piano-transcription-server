@@ -89,6 +89,7 @@ python scripts/server.py restart 5m                  # restart in 5 minutes, for
 python scripts/server.py restart 10m --reason "Faster transcription" --grace 10m
 python scripts/server.py stop 10m --back-in 2h       # shut down in 10 minutes, back in about 2 hours
 python scripts/server.py start                       # start again and wait until ready
+python scripts/server.py start --legacy-gpu          # worker for older GPUs such as the GTX 1050 Ti
 python scripts/server.py status
 python scripts/server.py cancel                      # also stops a waiting script
 ```

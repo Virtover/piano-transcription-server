@@ -223,6 +223,8 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 
 `API_BIND_ADDRESS` in `.env` is read by Docker Compose, not by the server: the network address the API's port `8000` is published on. The secure default is `127.0.0.1`, which keeps direct HTTP local-only. Set `0.0.0.0` only when clients on the network require direct access, and use HTTPS through a tunnel or reverse proxy for public access. See [Password protection](setup.md#-password-protection).
 
+`WORKER_GPU_BUILD` in `.env` is read by Docker Compose when it builds the worker image: `current` (default) or `legacy`. The default installs PyTorch's CUDA 13 build, which no longer supports older NVIDIA GPUs such as the GTX 10 series (Pascal, for example the GTX 1050 Ti); on them the worker fails with "no kernel image is available". `legacy` installs the same PyTorch version built for CUDA 12.6, which still supports them, on a CUDA 12.6 base image, so it also runs with older drivers. The build fails if that PyTorch lacks Pascal support. `python scripts/server.py start --legacy-gpu` (also `restart` and `restore`) builds `legacy` for that run only; set it in `.env` to keep it. Rebuild after changing it: `docker compose up -d --build worker`.
+
 Default for `SOURCE_URL_ALLOWED_HOSTS`:
 
 ```env

@@ -59,6 +59,21 @@ def test_runpod_torch_is_pinned():
     assert re.search(r"torch==[\d.]+ torchaudio==[\d.]+", (ROOT / "Dockerfile.runpod").read_text(encoding="utf-8"))
 
 
+def test_legacy_worker_build_matches_the_compose_switch():
+    import yaml
+
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    dockerfile = (ROOT / "Dockerfile.worker").read_text(encoding="utf-8")
+
+    assert compose["services"]["worker"]["build"]["args"]["GPU_BUILD"] == "${WORKER_GPU_BUILD:-current}"
+    assert "ARG GPU_BUILD=current" in dockerfile
+    assert "FROM base-${GPU_BUILD}" in dockerfile
+    for build in ("current", "legacy"):
+        assert f"AS base-{build}\n" in dockerfile
+    # The legacy build checks that torch still includes Pascal GPUs.
+    assert "'sm_61' in flags" in dockerfile
+
+
 def test_api_bind_address_is_configurable():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 

@@ -1,4 +1,15 @@
-FROM nvidia/cuda:12.8.1-base-ubuntu22.04
+# GPU_BUILD=legacy (WORKER_GPU_BUILD in .env, or --legacy-gpu of
+# scripts/server.py) builds for older NVIDIA GPUs such as the GTX 10 series:
+# PyTorch's default CUDA 13 build no longer includes them. The base image only
+# sets the driver the container requires; torch brings its own CUDA libraries.
+ARG GPU_BUILD=current
+FROM nvidia/cuda:12.8.1-base-ubuntu22.04 AS base-current
+FROM nvidia/cuda:12.6.3-base-ubuntu22.04 AS base-legacy
+FROM base-${GPU_BUILD}
+
+ARG GPU_BUILD
+# PyTorch's CUDA 12.6 build, the newest that still includes Pascal (sm_61).
+ARG LEGACY_TORCH_INDEX=https://download.pytorch.org/whl/cu126
 
 WORKDIR /app
 
@@ -26,7 +37,14 @@ RUN apt-get update \
 
 COPY requirements.worker.txt .
 
+# For legacy, torch and torchaudio come from PyTorch's index at the versions
+# pinned in requirements.worker.txt; 2.14.1+cu126 satisfies torch==2.14.1.
 RUN python3 -m pip install --upgrade pip setuptools wheel \
+    && if [ "$GPU_BUILD" = legacy ]; then \
+        pip install --no-cache-dir --index-url "$LEGACY_TORCH_INDEX" \
+            $(grep -E '^(torch|torchaudio)==' requirements.worker.txt) \
+        && python3 -c "import torch; flags = torch._C._cuda_getArchFlags(); assert 'sm_61' in flags, f'torch {torch.__version__} lacks Pascal GPUs: {flags}'"; \
+    fi \
     && pip install --no-cache-dir -r requirements.worker.txt
 
 # The worker runs untrusted media through yt-dlp and ffmpeg, so not as root.

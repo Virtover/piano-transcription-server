@@ -3,6 +3,7 @@
     python scripts/server.py restart 5m                  # announce, build, wait, drain, restart
     python scripts/server.py stop 10m --back-in 2h       # announce, wait, drain, stop everything
     python scripts/server.py start                       # build, prepare, start, wait until ready
+    python scripts/server.py start --legacy-gpu          # worker for older GPUs such as the GTX 1050 Ti
     python scripts/server.py status
     python scripts/server.py cancel                      # also stops a waiting script
     python scripts/server.py restore [latest|NAME|N]     # billing database from a backup; --from local, --fallback
@@ -13,7 +14,9 @@ password in secrets/postgres_password, which is never printed. Clients see the
 notice in GET /api/server-info, in job status, and in the X-Server-Maintenance
 headers. For a restart, the new images are built while the countdown runs and
 the current version keeps serving; if the build fails, the restart is
-cancelled. At the planned time, running jobs get up to --grace to finish.
+cancelled. --legacy-gpu on start, restart, and restore builds the worker for
+older NVIDIA GPUs, such as the GTX 10 series, for that run;
+WORKER_GPU_BUILD=legacy in .env makes it permanent. At the planned time, running jobs get up to --grace to finish.
 Queued jobs survive both a restart and a shutdown.
 
 restore takes an off-site backup by default, or one from billing-data/backups
@@ -47,6 +50,8 @@ STATUS_INTERVAL = 10
 DRAIN_INTERVAL = 5
 # A shutdown stops every service, whichever profiles started it.
 ALL_PROFILES = ["*"]
+# docker-compose.yml passes it to Dockerfile.worker as GPU_BUILD.
+GPU_BUILD_VARIABLE = "WORKER_GPU_BUILD"
 OUTSOURCE_NOTE = "--outsource is no longer needed: OUTSOURCE_PROVIDER in .env turns outsourcing on or off"
 # Everything that uses the billing database; PostgreSQL keeps running.
 BILLING_SERVICES = ["api", "worker", "remote-worker", "cleanup"]
@@ -121,6 +126,14 @@ def share_billing_data(environment) -> None:
     group, so backups can be copied, moved, or deleted without sudo."""
     if hasattr(os, "getgid") and os.getgid() != 0:
         environment.setdefault("BILLING_DATA_GROUP", str(os.getgid()))
+
+
+def select_gpu_build(args, environment) -> None:
+    """Build the worker for older GPUs when asked. Set in the environment,
+    it overrides .env for every docker compose command of this run."""
+    if getattr(args, "legacy_gpu", False):
+        environment[GPU_BUILD_VARIABLE] = "legacy"
+        say("building the worker for older GPUs (GTX 10 series and similar)")
 
 
 class Stack:
@@ -509,6 +522,8 @@ def parse_arguments(arguments: list[str]) -> argparse.Namespace:
         subparser.add_argument("--profile", action="append", default=[], help="Compose profile; repeatable")
         # Accepted so older commands keep working; the remote worker always runs now.
         subparser.add_argument("--outsource", action="store_true", help=argparse.SUPPRESS)
+        subparser.add_argument("--legacy-gpu", action="store_true",
+                               help="build the worker for older NVIDIA GPUs such as the GTX 1050 Ti")
 
     def timing(subparser, noun):
         subparser.add_argument("delay", type=parse_duration, help=f"time until the {noun}, for example 5m or 30s")
@@ -555,6 +570,7 @@ def main(arguments: list[str], stack: Stack | None = None, clock: Clock | None =
         say(OUTSOURCE_NOTE)
     if stack is None:
         share_billing_data(os.environ)
+        select_gpu_build(args, os.environ)
     stack = stack or Stack(args.profile)
     clock = clock or Clock()
     try:

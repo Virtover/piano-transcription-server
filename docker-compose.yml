@@ -69,6 +69,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
+      args:
+        # legacy builds for older GPUs such as the GTX 10 series; see
+        # WORKER_GPU_BUILD in docs/configuration.md.
+        GPU_BUILD: ${WORKER_GPU_BUILD:-current}
     env_file:
       - .env
     environment: *wiring

@@ -417,6 +417,24 @@ def test_billing_data_is_shared_with_the_users_group(monkeypatch, gid, expected)
     assert environment.get("BILLING_DATA_GROUP") == expected
 
 
+@pytest.mark.parametrize("action", [["start"], ["restart", "5m"], ["restore", "--from", "local"]])
+def test_legacy_gpu_selects_the_older_worker_build(action):
+    environment = {}
+
+    server.select_gpu_build(server.parse_arguments(action + ["--legacy-gpu"]), environment)
+
+    assert environment == {"WORKER_GPU_BUILD": "legacy"}
+
+
+def test_without_legacy_gpu_the_env_file_decides():
+    # Nothing set here, so WORKER_GPU_BUILD in .env, if any, still applies.
+    environment = {}
+
+    server.select_gpu_build(server.parse_arguments(["start"]), environment)
+
+    assert environment == {}
+
+
 def test_existing_files_are_never_changed(checkout):
     (checkout / ".env").write_text("MAX_ACTIVE_JOBS=5\n", encoding="utf-8")
     (checkout / "secrets").mkdir()
