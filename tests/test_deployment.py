@@ -71,7 +71,7 @@ def test_legacy_worker_build_matches_the_compose_switch():
     for build in ("current", "legacy"):
         assert f"AS base-{build}\n" in dockerfile
     # The legacy build checks that torch still includes Pascal GPUs.
-    assert "'sm_61' in flags" in dockerfile
+    assert "{'sm_60', 'sm_61'} & set(flags.split())" in dockerfile
 
 
 def test_api_bind_address_is_configurable():

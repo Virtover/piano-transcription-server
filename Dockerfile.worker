@@ -8,7 +8,8 @@ FROM nvidia/cuda:12.6.3-base-ubuntu22.04 AS base-legacy
 FROM base-${GPU_BUILD}
 
 ARG GPU_BUILD
-# PyTorch's CUDA 12.6 build, the newest that still includes Pascal (sm_61).
+# PyTorch's CUDA 12.6 build, the newest that still includes Pascal. Its sm_60
+# kernels also run on sm_61 cards such as the GTX 1050 Ti.
 ARG LEGACY_TORCH_INDEX=https://download.pytorch.org/whl/cu126
 
 WORKDIR /app
@@ -43,7 +44,7 @@ RUN python3 -m pip install --upgrade pip setuptools wheel \
     && if [ "$GPU_BUILD" = legacy ]; then \
         pip install --no-cache-dir --index-url "$LEGACY_TORCH_INDEX" \
             $(grep -E '^(torch|torchaudio)==' requirements.worker.txt) \
-        && python3 -c "import torch; flags = torch._C._cuda_getArchFlags(); assert 'sm_61' in flags, f'torch {torch.__version__} lacks Pascal GPUs: {flags}'"; \
+        && python3 -c "import torch; flags = torch._C._cuda_getArchFlags(); assert {'sm_60', 'sm_61'} & set(flags.split()), f'torch {torch.__version__} lacks Pascal GPUs: {flags}'"; \
     fi \
     && pip install --no-cache-dir -r requirements.worker.txt
 
