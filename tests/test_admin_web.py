@@ -114,6 +114,16 @@ def test_only_rs256_is_accepted():
         verifier().verify(unsigned)
 
 
+def test_a_wrong_team_domain_is_named():
+    keys = Keys()
+    other_team = token(key=OTHER_KEY, kid="their-key", iss="https://pianoweave.cloudflareaccess.com")
+
+    with pytest.raises(access.Denied, match="issued by 'https://pianoweave.cloudflareaccess.com', but CLOUDFLARE_ACCESS_TEAM_DOMAIN gives"):
+        verifier(keys).verify(other_team)
+    # Refused before anything is fetched or trusted.
+    assert keys.calls == 0
+
+
 def test_a_single_audience_is_accepted():
     assert verifier().verify(token(aud=AUD)) == "chris@example.com"
 

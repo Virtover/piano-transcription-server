@@ -42,12 +42,24 @@ def keys_url(team_domain: str) -> str:
     return f"https://{team_domain}/cdn-cgi/access/certs"
 
 
-def _header(token: str) -> dict:
-    segment = token.split(".", 1)[0]
+def _segment(token: str, index: int) -> dict:
+    """A part of the token, decoded but not verified."""
     try:
-        return json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
-    except ValueError as error:
+        segment = token.split(".")[index]
+        data = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+    except (IndexError, ValueError) as error:
         raise Denied("the token is not a JWT") from error
+    if not isinstance(data, dict):
+        raise Denied("the token is not a JWT")
+    return data
+
+
+def _header(token: str) -> dict:
+    return _segment(token, 0)
+
+
+def _claims(token: str) -> dict:
+    return _segment(token, 1)
 
 
 class AccessVerifier:
@@ -96,6 +108,14 @@ class AccessVerifier:
         key_id = header.get("kid")
         if not isinstance(key_id, str):
             raise Denied("the token names no key")
+        # Read before the signature is checked, only to refuse: a token from
+        # another team would otherwise fail as an unknown key, which hides
+        # a wrong CLOUDFLARE_ACCESS_TEAM_DOMAIN.
+        issuer = _claims(token).get("iss")
+        if issuer != self.issuer:
+            raise Denied(
+                f"the token was issued by {issuer!r}, but CLOUDFLARE_ACCESS_TEAM_DOMAIN gives {self.issuer}"
+            )
         try:
             claims = jwt.decode(token, certs={key_id: self.key(key_id)}, clock_skew_in_seconds=CLOCK_SKEW_SECONDS)
         except (ValueError, auth_exceptions.GoogleAuthError) as error:
