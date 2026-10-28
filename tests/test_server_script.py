@@ -92,6 +92,10 @@ class FakeStack:
         self.prepared_at = self.clock.now()
         return []
 
+    def reload_redis_users(self):
+        self.reloaded_at = self.clock.now()
+        return getattr(self, "reload_problem", "")
+
     def start_build(self):
         self.build = FakeBuild(self.clock, self.clock.now() + self.build_seconds, self.build_code)
         return self.build
@@ -494,6 +498,37 @@ def test_password_is_readable_by_the_containers_whatever_the_umask(checkout):
     assert (checkout / "secrets" / "redis").stat().st_mode & 0o777 == 0o755
     assert (checkout / "secrets" / "postgres_password").stat().st_mode & 0o777 == 0o644
     assert (checkout / "secrets" / "redis" / "app").stat().st_mode & 0o777 == 0o644
+
+
+@pytest.mark.parametrize("action", [["restart", "1m"], ["start"]])
+def test_redis_reads_its_users_again_after_the_stack_is_up(action):
+    code, stack, _ = run(action)
+
+    assert code == 0
+    # An update may add a Redis user without recreating Redis.
+    assert stack.reloaded_at >= stack.up_call[0]
+
+
+def test_a_failed_reload_says_how_to_fix_it(capsys):
+    clock = FakeClock()
+    stack = FakeStack(clock)
+    stack.reload_problem = "NOPERM"
+
+    assert server.main(["start"], stack, clock) == 0
+    assert "docker compose restart redis" in capsys.readouterr().out
+
+
+def test_reloading_redis_users_runs_the_start_script():
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="OK\n", stderr="")
+
+    assert server.Stack([], run=fake_run).reload_redis_users() == ""
+    assert calls == [["docker", "compose", "exec", "-T", "redis", "sh", "/redis/start.sh", "reload"]]
+    refused = server.Stack([], run=lambda command, **kwargs: SimpleNamespace(returncode=0, stdout="ERR Error in user declaration", stderr=""))
+    assert refused.reload_redis_users() == "ERR Error in user declaration"
 
 
 def test_restart_creates_missing_files_before_announcing(monkeypatch):

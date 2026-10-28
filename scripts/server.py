@@ -197,6 +197,16 @@ class Stack:
         result = self._run(self.compose() + ["exec", "-T", "api", "python", "-c", probe], capture_output=True, text=True)
         return result.returncode == 0
 
+    def reload_redis_users(self) -> str:
+        """Make the running Redis read its users again (redis/start.sh reload).
+        Returns what went wrong, or an empty string."""
+        result = self._run(self.compose() + ["exec", "-T", "redis", "sh", "/redis/start.sh", "reload"],
+                           capture_output=True, text=True)
+        answer = (result.stdout or "").strip()
+        if result.returncode != 0 or answer != "OK":
+            return (result.stderr or answer).strip() or f"exit code {result.returncode}"
+        return ""
+
     def redis(self, *arguments: str) -> str:
         result = self._run(self.compose() + ["exec", "-T", "redis", "sh", "-c", REDIS_CLI, "redis-cli", *arguments],
                            capture_output=True, text=True)
@@ -388,6 +398,15 @@ def prepare(stack: Stack) -> bool:
     return True
 
 
+def reload_redis_users(stack: Stack) -> None:
+    """Redis builds its users only when its container starts, and an update
+    that adds a user or password may not recreate it."""
+    problem = stack.reload_redis_users()
+    if problem:
+        say(f"Redis did not reload its users ({problem}); a new Redis user cannot sign in until: "
+            "docker compose restart redis")
+
+
 def restart(args, stack: Stack, clock: Clock) -> int:
     if not prepare(stack):
         return 1
@@ -407,6 +426,7 @@ def restart(args, stack: Stack, clock: Clock) -> int:
         except RuntimeError:
             say("could not remove the notice; it expires on its own")
         return code
+    reload_redis_users(stack)
     if not wait_ready(stack, clock):
         say(f"the API is not ready after {READY_TIMEOUT} s; check `docker compose logs api`. "
             "The notice expires on its own.")
@@ -442,6 +462,7 @@ def start(args, stack: Stack, clock: Clock) -> int:
     if code != 0:
         say(f"docker compose failed with exit code {code}")
         return code
+    reload_redis_users(stack)
     if not wait_ready(stack, clock):
         say(f"the API is not ready after {READY_TIMEOUT} s; check `docker compose logs api`")
         return 1

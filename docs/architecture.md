@@ -123,7 +123,7 @@ Redis holds every job, the queues, and the [limits](administration.md#-limits), 
 
 Each user's password is a file in `secrets/redis`, which `scripts/server.py start` and `restart` create when it is missing. At every start, `redis/start.sh` gives Redis the users with the SHA-256 hash of each password, so no password is in a file Redis reads, a command line, or `docker inspect`. Only the `redis` service sees the whole folder. The others get their own password at `/run/redis/password` (`REDIS_PASSWORD_FILE`), and those that mount `secrets/` have `secrets/redis` covered by an empty folder, so a worker that processes a malicious file cannot read the `operator` password.
 
-`check --online` confirms that Redis refuses a client without a password and that the `app` user cannot read Redis's configuration. To change a password, replace its file and recreate Redis and the services: `docker compose up -d --force-recreate`.
+`check --online` confirms that Redis refuses a client without a password and that the `app` user cannot read Redis's configuration. Redis builds its users when it starts, and `scripts/server.py start` and `restart` make it read them again afterwards (`redis/start.sh reload`), so a user or password added by an update takes effect without restarting Redis. A reload that fails keeps the users Redis has. After changing a password file by hand, run `docker compose exec redis sh /redis/start.sh reload`, then restart the services that use it.
 
 ### 🩺 Job diagnostics
 
