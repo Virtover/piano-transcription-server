@@ -1,13 +1,30 @@
 """`user`: one account's balance and history, credits and debits by hand,
-and account deletion."""
+and account deletion. `users find`: accounts by part of their email."""
 
 from app import controls
-from app.admin.common import AdminError, audit, confirm, find_user, print_json, shorten, span, table, when
-from app.billing import deleted_user_target, period_seconds
+from app.admin.common import (
+    AdminError,
+    ask_reason,
+    billing_enabled,
+    check_reason,
+    ensure_audit_log,
+    find_user,
+    finish,
+    print_json,
+    proceed,
+    say,
+    shorten,
+    span,
+    table,
+    when,
+)
+from app.billing import period_seconds
 from app.config import settings
 from app.worker import tasks
 
 RECENT = 10
+FOUND = 20
+SEARCH_LENGTH = 3
 
 
 # --- Data ---------------------------------------------------------------------
@@ -65,6 +82,25 @@ def account(who: str) -> dict:
     }
 
 
+def find(text: str, limit: int = FOUND) -> list[dict]:
+    """Accounts whose email address or user ID contains text, for when only
+    part of it is known."""
+    if not billing_enabled():
+        raise AdminError("Billing is off (BILLING_PROVIDER=none), so there are no user accounts")
+    text = text.strip().lower()
+    if len(text) < SEARCH_LENGTH:
+        raise AdminError(f"Give at least {SEARCH_LENGTH} characters to search for")
+    # The text is matched as written: % and _ are not wildcards.
+    pattern = "%" + text.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
+    rows = tasks.billing.read(
+        "SELECT user_id, email, minutes FROM users "
+        "WHERE lower(email) LIKE ? ESCAPE '!' OR lower(user_id) LIKE ? ESCAPE '!' "
+        "ORDER BY email, user_id LIMIT ?",
+        (pattern, pattern, limit),
+    )
+    return [dict(row) for row in rows]
+
+
 def credit_plan(who: str, minutes: int) -> dict:
     """The balance before and after adding minutes, or taking them away
     when negative."""
@@ -81,9 +117,11 @@ def credit_plan(who: str, minutes: int) -> dict:
 
 
 def credit(who: str, minutes: int, actor: str, reason: str | None = None) -> dict:
+    """Add minutes, or take them away when negative. The balance change and
+    its audit entry are written together, or not at all."""
+    reason = check_reason(reason, required=True)
     plan = credit_plan(who, minutes)
-    balance = tasks.billing.adjust_minutes(plan["user_id"], minutes, reason)
-    audit(actor, "user.credit", plan["user_id"], f"{minutes:+d} minutes", reason)
+    balance = tasks.billing.adjust_minutes(plan["user_id"], minutes, reason, actor)
     return {**plan, "balance_after": balance}
 
 
@@ -94,12 +132,13 @@ def delete_plan(who: str) -> dict:
 
 def delete(who: str, actor: str, reason: str | None = None) -> dict:
     """Delete the account and its data, as DELETE /api/account does, and
-    any block on it."""
+    any block on it. The audit entry is written with the billing data, by a
+    hash of the account's ID."""
+    reason = check_reason(reason, required=True)
     plan = delete_plan(who)
-    tasks.delete_account(plan["user_id"])
+    ensure_audit_log()
+    tasks.delete_account(plan["user_id"], actor, reason)
     controls.unblock(tasks.redis, plan["user_id"])
-    # Logged by hash: the account's ID is personal data and now gone.
-    audit(actor, "user.delete", deleted_user_target(plan["user_id"]), None, reason)
     return plan
 
 
@@ -173,28 +212,45 @@ def run_show(args) -> None:
         )
 
 
+def run_find(args) -> None:
+    rows = find(args.text)
+    if args.json:
+        print_json(rows)
+        return
+    if not rows:
+        print("No user matches")
+        return
+    print(table(["User", "Email", "Minutes"], [[row["user_id"], row["email"], row["minutes"]] for row in rows]))
+    if len(rows) == FOUND:
+        print(f"\nShowing the first {FOUND}; search for more of the address.")
+
+
 def run_credit(args) -> None:
+    ask_reason(args)
     plan = credit_plan(args.user, args.minutes)
     label = plan["email"] or plan["user_id"]
-    if args.minutes < 0:
-        print(f"{label}: balance {plan['balance']} -> {plan['balance_after']} minutes")
-        if not confirm(f"Take {-args.minutes} minutes from {label}?", args.yes):
-            print("Nothing changed")
-            return
+    say(args, f"{label}: balance {plan['balance']} -> {plan['balance_after']} minutes")
+    if args.minutes > 0:
+        question = f"Add {args.minutes} minutes to {label}?"
+    else:
+        question = f"Take {-args.minutes} minutes from {label}?"
+    if not proceed(args, plan, question):
+        return
     result = credit(args.user, args.minutes, args.by, args.reason)
     if args.minutes > 0:
-        print(f"Credited {args.minutes} minutes to {label}; balance {result['balance_after']} minutes")
+        text = f"Credited {args.minutes} minutes to {label}; balance {result['balance_after']} minutes"
     else:
-        print(f"Took {-args.minutes} minutes from {label}; balance {result['balance_after']} minutes")
+        text = f"Took {-args.minutes} minutes from {label}; balance {result['balance_after']} minutes"
+    finish(args, result, text, ["user", plan["user_id"], "credit", str(-args.minutes), "--reason", "<why>"])
 
 
 def run_delete(args) -> None:
+    ask_reason(args)
     plan = delete_plan(args.user)
     label = plan["email"] or plan["user_id"]
-    print(f"{label}: {plan['minutes']} minutes, its jobs and their files, and its job records will be deleted.")
-    print("Purchases are kept without the user. This cannot be undone.")
-    if not confirm(f"Permanently delete the account of {label}?", args.yes):
-        print("Nothing changed")
+    say(args, f"{label}: {plan['minutes']} minutes, its jobs and their files, and its job records will be deleted.")
+    say(args, "Purchases are kept without the user. This cannot be undone.")
+    if not proceed(args, plan, f"Permanently delete the account of {label}?", typed=label):
         return
     delete(args.user, args.by, args.reason)
-    print(f"Deleted the account of {label}")
+    finish(args, plan, f"Deleted the account of {label}")

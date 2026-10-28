@@ -377,10 +377,10 @@ Example capacities with the default values:
 
 For billing configuration, uncomment the billing section of [.env.example](../.env.example) and follow the [Google Play billing guide](google-play-billing.md).
 
-To add minutes to a user by hand, take them away, or delete an account, use the admin commands in the API container, for example:
+To add minutes to a user by hand, take them away, or delete an account, use the admin commands, for example:
 
 ```shell
-docker compose exec api python -m app.admin user user@example.com credit 30 --reason "refund for a failed job"
+python scripts/admin.py user user@example.com credit 30 --reason "refund for a failed job"
 ```
 
 See [Administration](administration.md#-users).

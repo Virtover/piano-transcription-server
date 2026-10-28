@@ -7,6 +7,7 @@ import types
 import pytest
 
 from app import controls, maintenance
+from app.admin import common
 from app.admin.__main__ import main
 from app.billing import deleted_user_target
 from app.outsource import routing
@@ -27,8 +28,10 @@ def billed(api_context):
 
 
 def admin(capsys, *arguments, answer=None, monkeypatch=None):
-    """Run python -m app.admin; returns (exit code, output)."""
+    """Run python -m app.admin; returns (exit code, output). answer is what
+    the operator types in a terminal, for every question."""
     if answer is not None:
+        monkeypatch.setattr(common, "interactive", lambda: True)
         monkeypatch.setattr(builtins, "input", lambda question: answer)
     code = main(list(arguments))
     captured = capsys.readouterr()
@@ -196,7 +199,7 @@ def test_cancel_with_refund_charges_nothing(billed, capsys):
     job_id = submit(client)
     tasks.redis.hset(tasks.job_key(job_id), mapping={"status": "processing", "progress": "0.9"})
 
-    admin(capsys, "jobs", "cancel", job_id, "--refund", "--yes")
+    admin(capsys, "jobs", "cancel", job_id, "--refund", "--yes", "--reason", "stuck")
 
     assert balance(billing) == 30
     reservation = billing.read("SELECT status FROM transcription_reservations WHERE job_id = ?", (job_id,))[0]
@@ -207,7 +210,7 @@ def test_cancel_asks_first(billed, capsys, monkeypatch):
     client, _, billing = billed
     job_id = submit(client)
 
-    code, output = admin(capsys, "jobs", "cancel", job_id, answer="n", monkeypatch=monkeypatch)
+    code, output = admin(capsys, "jobs", "cancel", job_id, "--reason", "stuck", answer="n", monkeypatch=monkeypatch)
 
     assert code == 0 and "Nothing changed" in output
     assert tasks.redis.hget(tasks.job_key(job_id), "status") == "queued"
@@ -257,7 +260,7 @@ def test_requeued_job_can_be_charged_once_on_success(billed, capsys, monkeypatch
     client, _, billing = billed
     job_id = submit(client)
     fail(job_id, monkeypatch)
-    admin(capsys, "jobs", "requeue", job_id, "--yes")
+    admin(capsys, "jobs", "requeue", job_id, "--yes", "--reason", "retry")
 
     tasks.redis.hset(tasks.job_key(job_id), mapping={"status": "completed"})
     billing.settle_success(job_id)
@@ -271,11 +274,11 @@ def test_requeue_on_a_chosen_backend(billed, capsys, monkeypatch):
     job_id = submit(client)
     fail(job_id, monkeypatch)
 
-    code, output = admin(capsys, "jobs", "requeue", job_id, "--remote", "--yes")
+    code, output = admin(capsys, "jobs", "requeue", job_id, "--remote", "--yes", "--reason", "retry")
     assert code == 1 and "Outsourcing is off" in output
 
     settings.outsource.provider = "runpod"
-    code, output = admin(capsys, "jobs", "requeue", job_id, "--remote", "--yes")
+    code, output = admin(capsys, "jobs", "requeue", job_id, "--remote", "--yes", "--reason", "retry")
     assert code == 0, output
     assert tasks.redis.hget(tasks.job_key(job_id), "backend") == "remote"
     assert tasks.redis.sismember(routing.ACTIVE_KEYS["remote"], job_id)
@@ -298,7 +301,7 @@ def test_failed_requeue_leaves_the_job_failed(billed, capsys, monkeypatch):
     fail(job_id, monkeypatch)
     billing.adjust_minutes("user", -30, "test")
 
-    code, output = admin(capsys, "jobs", "requeue", job_id, "--yes")
+    code, output = admin(capsys, "jobs", "requeue", job_id, "--yes", "--reason", "retry")
 
     assert code == 1
     assert "Insufficient transcription minutes (HTTP 402)" in output
@@ -349,7 +352,7 @@ def test_unknown_user_and_billing_off(billed, capsys):
 def test_credit_adds_minutes_with_a_logged_reason(billed, capsys):
     _, _, billing = billed
 
-    code, output = admin(capsys, "user", "user@example.com", "credit", "15", "--reason", "refund for job abc", "--by", "chris")
+    code, output = admin(capsys, "user", "user@example.com", "credit", "15", "--reason", "refund for job abc", "--by", "chris", "--yes")
 
     assert code == 0
     assert "Credited 15 minutes to user@example.com; balance 45 minutes" in output
@@ -379,7 +382,7 @@ def test_credit_rejects_zero(billed, capsys):
 def test_delete_removes_the_account_and_anonymises_its_logs(billed, capsys):
     client, settings, billing = billed
     job_id = submit(client)
-    admin(capsys, "user", "user", "credit", "5", "--reason", "goodwill")
+    admin(capsys, "user", "user", "credit", "5", "--reason", "goodwill", "--yes")
     controls.block(tasks.redis, "user")
 
     code, output = admin(capsys, "user", "user@example.com", "delete", "--yes", "--reason", "deletion request")
@@ -397,7 +400,7 @@ def test_delete_removes_the_account_and_anonymises_its_logs(billed, capsys):
 def test_delete_asks_first(billed, capsys, monkeypatch):
     _, _, billing = billed
 
-    code, output = admin(capsys, "user", "user@example.com", "delete", answer="", monkeypatch=monkeypatch)
+    code, output = admin(capsys, "user", "user@example.com", "delete", "--reason", "request", answer="y", monkeypatch=monkeypatch)
 
     assert "Nothing changed" in output
     assert billing.read("SELECT * FROM users WHERE user_id = 'user'")
@@ -643,11 +646,11 @@ def test_actions_without_the_command_line(billed, monkeypatch):
     job_id = submit(client)
 
     assert jobs.cancel(job_id, False, "web:sam", "stuck")["job_id"] == job_id
-    assert users.credit("user@example.com", 5, "web:sam")["balance_after"] == 35
+    assert users.credit("user@example.com", 5, "web:sam", "goodwill")["balance_after"] == 35
     assert limits.block("user", 3600, "web:sam", "abuse")["expires_in"] == 3600
     assert limits.set_per_user_limit(None, None, "web:sam")["changed"] is False
     with pytest.raises(AdminError, match="this one is cancelled"):
-        jobs.cancel(job_id, False, "web:sam")
+        jobs.cancel(job_id, False, "web:sam", "stuck")
 
     assert [(row["actor"], row["action"]) for row in audit_rows(billing)] == [
         ("web:sam", "job.cancel"),
@@ -678,3 +681,259 @@ def test_job_show_prints_json(billed, capsys):
     _, output = admin(capsys, "jobs", "show", job_id, "--json")
 
     assert json.loads(output)["live"]["status"] == "queued"
+
+
+# --- Safety -------------------------------------------------------------------
+
+def test_without_a_terminal_nothing_is_asked_or_changed(billed, capsys, monkeypatch):
+    client, _, billing = billed
+    job_id = submit(client)
+    before = balance(billing)
+    monkeypatch.setattr(common, "interactive", lambda: False)
+    monkeypatch.setattr(builtins, "input", lambda question: pytest.fail("asked without a terminal"))
+
+    code, output = admin(capsys, "jobs", "cancel", job_id, "--reason", "stuck")
+    assert code == 1 and "not a terminal" in output and "add --yes" in output
+    code, output = admin(capsys, "user", "user", "credit", "5", "--reason", "goodwill")
+    assert code == 1 and "not a terminal" in output
+
+    assert tasks.redis.hget(tasks.job_key(job_id), "status") == "queued"
+    assert balance(billing) == before
+    assert audit_rows(billing) == []
+
+
+def test_adding_minutes_asks_first(billed, capsys, monkeypatch):
+    _, _, billing = billed
+
+    code, output = admin(capsys, "user", "user", "credit", "3000", "--reason", "goodwill", answer="n", monkeypatch=monkeypatch)
+
+    assert "balance 30 -> 3030 minutes" in output and "Nothing changed" in output
+    assert balance(billing) == 30
+
+
+def test_delete_needs_the_email_typed(billed, capsys, monkeypatch):
+    _, _, billing = billed
+
+    admin(capsys, "user", "user", "delete", "--reason", "request", answer="y", monkeypatch=monkeypatch)
+    assert billing.read("SELECT * FROM users WHERE user_id = 'user'")
+
+    code, output = admin(capsys, "user", "user", "delete", "--reason", "request", answer="User@Example.com ", monkeypatch=monkeypatch)
+    assert code == 0 and "Deleted the account of user@example.com" in output
+    assert billing.read("SELECT * FROM users WHERE user_id = 'user'") == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["user", "user", "credit", "5", "--yes"],
+        ["user", "user", "delete", "--yes"],
+        ["limits", "block", "user"],
+    ],
+)
+def test_changes_that_affect_a_user_need_a_reason(billed, capsys, arguments):
+    _, _, billing = billed
+
+    code, output = admin(capsys, *arguments)
+
+    assert code == 1 and "Give a --reason" in output
+    assert balance(billing) == 30
+    assert controls.blocked(tasks.redis, "user") is None
+    assert audit_rows(billing) == []
+
+
+def test_job_changes_need_a_reason(billed, capsys):
+    client, _, _ = billed
+    job_id = submit(client)
+
+    code, output = admin(capsys, "jobs", "cancel", job_id, "--yes")
+
+    assert code == 1 and "Give a --reason" in output
+    assert tasks.redis.hget(tasks.job_key(job_id), "status") == "queued"
+
+
+def test_a_missing_reason_is_asked_for_in_a_terminal(billed, capsys, monkeypatch):
+    _, _, billing = billed
+    answers = iter(["goodwill", "y"])
+    monkeypatch.setattr(common, "interactive", lambda: True)
+    monkeypatch.setattr(builtins, "input", lambda question: next(answers))
+
+    code, _ = admin(capsys, "user", "user", "credit", "5")
+
+    assert code == 0 and balance(billing) == 35
+    assert audit_rows(billing)[0]["reason"] == "goodwill"
+
+
+def test_reasons_cannot_contain_an_email_address(billed, capsys):
+    _, _, billing = billed
+
+    code, output = admin(capsys, "limits", "pause", "--reason", "asked by sam@example.org")
+
+    assert code == 1 and "Leave email addresses out" in output
+    assert controls.paused(tasks.redis) is None
+    assert audit_rows(billing) == []
+
+
+def test_changes_need_eight_characters_of_the_job_id(billed, capsys):
+    client, _, _ = billed
+    job_id = submit(client)
+
+    code, output = admin(capsys, "jobs", "cancel", job_id[:4], "--yes", "--reason", "stuck")
+    assert code == 1 and "at least 8 characters" in output
+    assert tasks.redis.hget(tasks.job_key(job_id), "status") == "queued"
+    # Reading accepts any unique prefix.
+    assert admin(capsys, "jobs", "show", job_id[:4])[0] == 0
+
+
+def test_a_user_that_matches_two_accounts_is_refused(billed, capsys):
+    _, _, billing = billed
+    with billing._connect() as connection:
+        connection.execute("INSERT INTO users (user_id, minutes) VALUES ('user@example.com', 0)")
+
+    code, output = admin(capsys, "user", "user@example.com", "credit", "5", "--reason", "goodwill", "--yes")
+
+    assert code == 1 and "matches several accounts" in output
+    assert balance(billing) == 30
+
+
+def test_reports_cannot_change_the_database(billed):
+    _, _, billing = billed
+
+    with pytest.raises(Exception, match="readonly|read-only|query_only"):
+        billing.read("UPDATE users SET minutes = 1000")
+    assert balance(billing) == 30
+
+
+def test_a_credit_is_not_made_without_its_audit_entry(billed, capsys, monkeypatch):
+    from app import billing as billing_module
+
+    _, _, billing = billed
+
+    def broken(*args):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(billing_module, "_log_admin_action", broken)
+    with pytest.raises(RuntimeError, match="disk full"):
+        admin(capsys, "user", "user", "credit", "5", "--reason", "goodwill", "--yes")
+
+    assert balance(billing) == 30
+    assert billing.read("SELECT * FROM minute_ledger WHERE kind = 'admin'") == []
+
+
+def test_a_change_waits_for_the_audit_log(billed, capsys, monkeypatch):
+    _, _, billing = billed
+
+    def unreachable():
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(billing, "check", unreachable)
+    code, output = admin(capsys, "limits", "pause")
+
+    assert code == 1 and "audit log cannot be reached" in output and "nothing was changed" in output
+    assert controls.paused(tasks.redis) is None
+
+
+def test_a_change_that_could_not_be_logged_says_so(billed, capsys, monkeypatch):
+    _, _, billing = billed
+
+    def broken(*args):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(billing, "log_admin_action", broken)
+    code, output = admin(capsys, "limits", "pause")
+
+    assert code == 1 and "The change was made, but the audit log could not be written" in output
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["jobs", "cancel", "JOB", "--reason", "stuck"],
+        ["jobs", "requeue", "FAILED", "--reason", "retry"],
+        ["user", "user", "credit", "5", "--reason", "goodwill"],
+        ["user", "user", "delete", "--reason", "request"],
+        ["limits", "pause", "--for", "1h"],
+        ["limits", "links", "off"],
+        ["limits", "sites", "reset"],
+        ["limits", "block", "user", "--reason", "abuse"],
+        ["limits", "per-user", "3"],
+    ],
+)
+def test_dry_run_changes_nothing(billed, capsys, monkeypatch, arguments):
+    client, _, billing = billed
+    job_id = submit(client)
+    failed = submit(client)
+    fail(failed, monkeypatch)
+    arguments = [{"JOB": job_id, "FAILED": failed}.get(argument, argument) for argument in arguments]
+    monkeypatch.setattr(builtins, "input", lambda question: pytest.fail("a dry run asked"))
+    before = (tasks.redis.hgetall(tasks.job_key(job_id)), tasks.redis.hgetall(tasks.job_key(failed)), balance(billing))
+
+    code, output = admin(capsys, *arguments, "--dry-run")
+
+    assert code == 0, output
+    assert output.strip().endswith("Dry run: nothing was changed")
+    assert before == (tasks.redis.hgetall(tasks.job_key(job_id)), tasks.redis.hgetall(tasks.job_key(failed)), balance(billing))
+    assert controls.paused(tasks.redis) is None and controls.links_off(tasks.redis) is None
+    assert controls.blocked(tasks.redis, "user") is None and controls.per_user_limit_override(tasks.redis) is None
+    assert audit_rows(billing) == []
+
+
+def test_changes_print_json(billed, capsys):
+    code, output = admin(capsys, "user", "user", "credit", "5", "--reason", "goodwill", "--json")
+    assert code == 1 and "--json cannot ask" in output
+
+    code, output = admin(capsys, "user", "user", "credit", "5", "--reason", "goodwill", "--json", "--dry-run")
+    assert json.loads(output) == {
+        "dry_run": True,
+        "plan": {"user_id": "user", "email": "user@example.com", "minutes": 5, "balance": 30, "balance_after": 35},
+    }
+
+    code, output = admin(capsys, "user", "user", "credit", "5", "--reason", "goodwill", "--json", "--yes")
+    assert json.loads(output)["result"]["balance_after"] == 35
+
+
+def test_changes_say_how_to_undo_them(billed, capsys, monkeypatch):
+    monkeypatch.setenv(common.COMMAND_VARIABLE, "python scripts/admin.py")
+
+    _, output = admin(capsys, "limits", "pause", "--for", "1h")
+    assert "Undo: python scripts/admin.py limits resume" in output
+    _, output = admin(capsys, "user", "user", "credit", "5", "--reason", "goodwill", "--yes")
+    assert "Undo: python scripts/admin.py user user credit -5 --reason '<why>'" in output
+
+
+def test_the_actor_defaults_to_who_runs_the_wrapper(billed, capsys, monkeypatch):
+    _, _, billing = billed
+    monkeypatch.setenv(common.ACTOR_VARIABLE, "chris")
+
+    admin(capsys, "limits", "pause")
+
+    assert audit_rows(billing)[0]["actor"] == "chris"
+
+
+def test_users_find_by_part_of_the_email(billed, capsys):
+    _, _, billing = billed
+    billing.credit_purchase("other", "starter", "token-2", "GPA.2", "other_name@example.com")
+
+    code, output = admin(capsys, "users", "find", "EXAMPLE")
+    assert code == 0 and "user@example.com" in output and "other_name@example.com" in output
+    # Wildcards are matched as written.
+    _, output = admin(capsys, "users", "find", "r_n")
+    assert "other_name@example.com" in output and "user@example.com" not in output
+    code, output = admin(capsys, "users", "find", "%%%")
+    assert code == 0 and "No user matches" in output
+    code, output = admin(capsys, "users", "find", "ab")
+    assert code == 1 and "at least 3 characters" in output
+
+
+def test_an_unreachable_service_is_reported_without_a_traceback(billed, capsys, monkeypatch):
+    from redis.exceptions import ConnectionError
+
+    def refused(*args, **kwargs):
+        raise ConnectionError("Error 111 connecting to redis:6379. Connection refused.")
+
+    monkeypatch.setattr(tasks.redis, "pipeline", refused)
+
+    code, output = admin(capsys, "limits")
+
+    assert code == 2 and "cannot be reached" in output and "Traceback" not in output
+    with pytest.raises(ConnectionError):
+        main(["--debug", "limits"])

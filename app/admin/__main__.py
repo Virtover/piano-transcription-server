@@ -7,29 +7,49 @@ billing database:
     docker compose exec api python -m app.admin billing --per month
     docker compose exec api python -m app.admin limits
 
-Every change is written to the audit log (`audit`). Destructive changes show
-what they will do and ask first; --yes skips the question. Commands that
-only read take --json.
+On the host, `python scripts/admin.py` runs them in the container for you.
+
+Every change is written to the audit log (`audit`), and the destructive ones
+and those that affect a user need a --reason. Changes to jobs and users show
+what they will do and ask first; --yes skips the question, and deleting an
+account asks you to type its email. --dry-run shows a change without making
+it. Every command takes --json.
 """
 
 import argparse
 import sys
 
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
 from app.admin import audit, jobs, limits, report, status, users
-from app.admin.common import AdminError
+from app.admin.common import AdminError, default_actor
+
+# Errors that mean a service is not reachable, not a fault of the command.
+UNREACHABLE: tuple[type[Exception], ...] = (RedisConnectionError, RedisTimeoutError)
+try:
+    import psycopg
+
+    UNREACHABLE += (psycopg.OperationalError,)
+except ImportError:  # pragma: no cover - psycopg is installed with the API
+    pass
 
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="python -m app.admin", description="Operate the transcription server.")
+    root.add_argument("--debug", action="store_true", help="show the traceback when a service cannot be reached")
     commands = root.add_subparsers(dest="command", required=True)
 
     # Options of every command that only reads.
     reads = argparse.ArgumentParser(add_help=False)
     reads.add_argument("--json", action="store_true", help="print JSON instead of text")
     # Options of every command that changes something.
+    actor = default_actor()
     changes = argparse.ArgumentParser(add_help=False)
-    changes.add_argument("--by", default="admin", help="who is acting, for the audit log (default: admin)")
-    changes.add_argument("--reason", help="why, for the audit log")
+    changes.add_argument("--by", default=actor, help=f"who is acting, for the audit log (default: {actor})")
+    changes.add_argument("--reason", help="why, for the audit log; never an email address")
+    changes.add_argument("--dry-run", action="store_true", help="show what would change, and change nothing")
+    changes.add_argument("--json", action="store_true", help="print JSON; needs --yes where the command asks")
     asks = argparse.ArgumentParser(add_help=False)
     asks.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     expires = argparse.ArgumentParser(add_help=False)
@@ -70,6 +90,12 @@ def parser() -> argparse.ArgumentParser:
     command.set_defaults(run=users.run_credit)
     command = user_actions.add_parser("delete", parents=[changes, asks], help="delete the account and its data")
     command.set_defaults(run=users.run_delete)
+
+    command = commands.add_parser("users", help="find accounts")
+    user_searches = command.add_subparsers(dest="action", required=True)
+    command = user_searches.add_parser("find", parents=[reads], help="accounts whose email address or user ID contains the text")
+    command.add_argument("text", help=f"at least {users.SEARCH_LENGTH} characters, such as part of an email address")
+    command.set_defaults(run=users.run_find)
 
     command = commands.add_parser("billing", parents=[reads], help="minutes sold, free, and used; negative balances; job time")
     command.add_argument("--per", choices=sorted(report.PERIOD_FORMATS), default="day", help="group per day or month (default: day)")
@@ -116,6 +142,18 @@ def main(arguments: list[str]) -> int:
     except AdminError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    except UNREACHABLE as error:
+        if args.debug:
+            raise
+        print(
+            f"error: Redis or the billing database cannot be reached ({type(error).__name__}: {error}). "
+            "Is the stack running? --debug shows the traceback.",
+            file=sys.stderr,
+        )
+        return 2
+    except (EOFError, KeyboardInterrupt):
+        print("\nStopped. Nothing more was changed", file=sys.stderr)
+        return 130
     return 0
 
 

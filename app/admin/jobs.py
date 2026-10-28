@@ -11,14 +11,19 @@ from fastapi import HTTPException
 from app import job_limits
 from app.admin.common import (
     AdminError,
+    ask_reason,
     audit,
     billing_enabled,
-    confirm,
+    check_reason,
+    ensure_audit_log,
     find_job,
     find_user,
+    finish,
     parse_duration,
     print_json,
+    proceed,
     row_dict,
+    say,
     shorten,
     span,
     table,
@@ -93,7 +98,7 @@ def job_details(job: str) -> dict:
 def cancel_plan(job: str, refund: bool = False) -> dict:
     """What cancelling the job would do, or AdminError if it cannot be
     cancelled. charge is None when nothing is charged."""
-    job_id = find_job(job)
+    job_id = find_job(job, change=True)
     fields = tasks.redis.hgetall(tasks.job_key(job_id))
     status = fields.get("status")
     if status not in {"queued", "processing"}:
@@ -119,7 +124,9 @@ def cancel_plan(job: str, refund: bool = False) -> dict:
 def cancel(job: str, refund: bool, actor: str, reason: str | None = None) -> dict:
     """Cancel a queued or processing job, as its owner does, or charge
     nothing with refund. Returns the plan that was carried out."""
+    reason = check_reason(reason, required=True)
     plan = cancel_plan(job, refund)
+    ensure_audit_log()
     before = tasks.cancel_job(plan["job_id"], charge=not refund)
     if before not in {"queued", "processing"}:
         raise AdminError(f"The job changed meanwhile and is now {before}; nothing was done")
@@ -130,7 +137,7 @@ def cancel(job: str, refund: bool, actor: str, reason: str | None = None) -> dic
 def requeue_plan(job: str, backend: routing.Backend | None = None) -> dict:
     """What queueing a failed link job again would do, or AdminError if it
     cannot run again. backend None lets routing choose."""
-    job_id = find_job(job)
+    job_id = find_job(job, change=True)
     fields = tasks.redis.hgetall(tasks.job_key(job_id))
     if not fields:
         raise AdminError("The job is gone from Redis (jobs are kept for an hour after they end); ask the user to submit it again")
@@ -159,7 +166,9 @@ def requeue(job: str, backend: routing.Backend | None, actor: str, reason: str |
     On failure the job is left as it was."""
     from app.api.routes import transcriptions as transcription_routes
 
+    reason = check_reason(reason, required=True)
     plan = requeue_plan(job, backend)
+    ensure_audit_log()
     job_id, user_id = plan["job_id"], plan["user_id"]
     key = tasks.job_key(job_id)
     fields = tasks.redis.hgetall(key)
@@ -285,6 +294,7 @@ def run_show(args) -> None:
 
 
 def run_cancel(args) -> None:
+    ask_reason(args)
     plan = cancel_plan(args.job, args.refund)
     if not plan["billed"]:
         charge_text = "nothing is charged (billing is off)"
@@ -292,27 +302,27 @@ def run_cancel(args) -> None:
         charge_text = "nothing is charged (--refund)"
     else:
         charge_text = f"{plan['charge']} of {plan['full_cost']} minutes are charged, as when the user cancels"
-    print(
+    say(
+        args,
         f"Job {plan['job_id']}: {plan['status']} on {plan['backend'] or '-'}, "
-        f"{plan['progress']:.0%} done, user {plan['user_id'] or '-'}"
+        f"{plan['progress']:.0%} done, user {plan['user_id'] or '-'}",
     )
-    print(f"Cancelling it: {charge_text}.")
-    if not confirm("Cancel this job?", args.yes):
-        print("Nothing changed")
+    say(args, f"Cancelling it: {charge_text}. This cannot be undone.")
+    if not proceed(args, plan, "Cancel this job?"):
         return
-    cancel(args.job, args.refund, args.by, args.reason)
-    print("Cancelled")
+    result = cancel(args.job, args.refund, args.by, args.reason)
+    finish(args, result, "Cancelled")
 
 
 def run_requeue(args) -> None:
+    ask_reason(args)
     plan = requeue_plan(args.job, args.backend)
-    print(f"Job {plan['job_id']}: failed with: {plan['error']}")
+    say(args, f"Job {plan['job_id']}: failed with: {plan['error']}")
     where = f"the {plan['backend']} backend" if plan["backend"] else "the backend routing chooses"
     cost = "it is charged again like a new submission" if plan["charged"] else "nothing is charged"
-    print(f"Queueing it again on {where}; {cost}.")
-    if not confirm("Queue this job again?", args.yes):
-        print("Nothing changed")
+    say(args, f"Queueing it again on {where}; {cost}.")
+    if not proceed(args, plan, "Queue this job again?"):
         return
     result = requeue(args.job, args.backend, args.by, args.reason)
     balance = f"; the user has {result['minutes']} minutes left" if result["minutes"] is not None else ""
-    print(f"Queued on {result['backend']}{balance}")
+    finish(args, result, f"Queued on {result['backend']}{balance}")

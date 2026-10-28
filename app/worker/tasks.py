@@ -224,11 +224,12 @@ def delete_user_jobs(user_id: str) -> None:
     job_limits.forget_user(redis, user_id)
 
 
-def delete_account(user_id: str) -> bool:
+def delete_account(user_id: str, actor: str | None = None, reason: str | None = None) -> bool:
     """Delete a user's jobs, files, and billing data. Jobs go first: a running
-    worker then sees its job as cancelled and stops without charging."""
+    worker then sees its job as cancelled and stops without charging. With
+    an actor, an administrator's audit entry is written with the data."""
     delete_user_jobs(user_id)
-    return billing.delete_user(user_id)
+    return billing.delete_user(user_id, actor, reason)
 
 
 def cancel_job(job_id: str, charge: bool = True) -> str | None:

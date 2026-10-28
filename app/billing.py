@@ -545,9 +545,11 @@ class Billing:
             ).fetchone()
         return user["user_id"] if user else None
 
-    def adjust_minutes(self, user_id: str, minutes: int, reason: str) -> int:
+    def adjust_minutes(self, user_id: str, minutes: int, reason: str, actor: str | None = None) -> int:
         """Add minutes to a user's balance by hand, or take them away when
-        negative. Returns the new balance, which can be below zero."""
+        negative. Returns the new balance, which can be below zero. With an
+        actor, the audit entry is written in the same transaction, so the
+        change is never made without it."""
         with self._connect() as connection:
             self._begin_write(connection)
             updated = connection.execute(
@@ -557,6 +559,8 @@ class Billing:
             if not updated:
                 raise ValueError(f"No billed user with ID {user_id}")
             _log_minutes(connection, user_id, "admin", minutes, reason)
+            if actor is not None:
+                _log_admin_action(connection, actor, "user.credit", user_id, f"{minutes:+d} minutes", reason)
             return connection.execute("SELECT minutes FROM users WHERE user_id = ?", (user_id,)).fetchone()["minutes"]
 
     def log_admin_action(
@@ -568,19 +572,22 @@ class Billing:
         reason: str | None = None,
     ) -> None:
         with self._connect() as connection:
-            connection.execute(
-                "INSERT INTO admin_actions (at, actor, action, target, detail, reason) VALUES (?, ?, ?, ?, ?, ?)",
-                (int(time.time()), actor, action, target, detail, reason),
-            )
+            _log_admin_action(connection, actor, action, target, detail, reason)
 
     def read(self, query: str, parameters: tuple = ()) -> list[sqlite3.Row]:
-        """Rows of a read-only query, for the admin commands' reports."""
+        """Rows of a query, for the admin commands' reports. It runs in a
+        read-only transaction, so the database refuses any change."""
         with closing(self._connect()) as connection:
+            if self._postgres:
+                connection.execute("SET TRANSACTION READ ONLY")
+            else:
+                connection.execute("PRAGMA query_only = ON")
             return connection.execute(query, parameters).fetchall()
 
-    def delete_user(self, user_id: str) -> bool:
+    def delete_user(self, user_id: str, actor: str | None = None, reason: str | None = None) -> bool:
         """Delete a user's account data. Purchases are kept without the user ID
-        so a purchase token cannot be credited twice."""
+        so a purchase token cannot be credited twice. With an actor, the
+        audit entry is written in the same transaction."""
         with self._connect() as connection:
             self._begin_write(connection)
             user = connection.execute(
@@ -611,6 +618,9 @@ class Billing:
                         "ON CONFLICT (user_hash) DO UPDATE SET free_grant_at = excluded.free_grant_at",
                         (_user_hash(user_id), user["free_grant_at"]),
                     )
+            if actor is not None:
+                # Logged by hash: the account's ID is personal data and now gone.
+                _log_admin_action(connection, actor, "user.delete", deleted_user_target(user_id), None, reason)
             return user is not None
 
     def record_job(self, job_id: str, job: dict[str, str]) -> None:
@@ -756,6 +766,20 @@ def period_seconds() -> int:
 def deleted_user_target(user_id: str) -> str:
     """How the audit log names a deleted user: by a hash, like deleted_users."""
     return "deleted:" + _user_hash(user_id)[:16]
+
+
+def _log_admin_action(
+    connection: sqlite3.Connection,
+    actor: str,
+    action: str,
+    target: str | None,
+    detail: str | None,
+    reason: str | None,
+) -> None:
+    connection.execute(
+        "INSERT INTO admin_actions (at, actor, action, target, detail, reason) VALUES (?, ?, ?, ?, ?, ?)",
+        (int(time.time()), actor, action, target, detail, reason),
+    )
 
 
 def _log_minutes(connection: sqlite3.Connection, user_id: str, kind: str, minutes: int, note: str | None = None) -> None:

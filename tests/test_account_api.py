@@ -165,8 +165,9 @@ def run_admin_delete(monkeypatch, *arguments, answer=None):
     from app.admin.__main__ import main
 
     if answer is not None:
+        monkeypatch.setattr("app.admin.common.interactive", lambda: True)
         monkeypatch.setattr("builtins.input", lambda prompt: answer)
-    return main(["user", *arguments])
+    return main(["user", *arguments, "--reason", "deletion request"])
 
 
 def test_admin_delete_command_removes_account(api_context, monkeypatch, capsys):
@@ -196,7 +197,11 @@ def test_admin_delete_command_asks_for_confirmation(api_context, monkeypatch, ca
     assert "Nothing changed" in capsys.readouterr().out
     assert billing.get_balance("owner") == 10
 
+    # Deletion cannot be undone, so y is not enough: the email is typed.
     run_admin_delete(monkeypatch, "owner@example.com", "delete", answer="y")
+    assert billing.get_balance("owner") == 10
+
+    run_admin_delete(monkeypatch, "owner@example.com", "delete", answer="owner@example.com")
     assert billing.get_balance("owner") == 0
     assert rows(settings, "SELECT * FROM users") == []
 

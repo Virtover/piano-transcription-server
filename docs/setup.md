@@ -102,7 +102,7 @@ Nothing needs to be done by hand. Docker creates a missing `billing-data` folder
 
 On Linux, the folders in `billing-data` keep the group of the user who ran `python scripts/server.py start` and are writable by it, so you can copy, move, or delete backups without `sudo`. The PostgreSQL cluster stays readable only by PostgreSQL.
 
-Admin commands such as `docker compose exec api python -m app.admin` run as the same user, so files they create stay usable by the services.
+Admin commands such as `python scripts/admin.py` run as the same user, so files they create stay usable by the services.
 
 ## 🎮 GPU and CPU execution
 

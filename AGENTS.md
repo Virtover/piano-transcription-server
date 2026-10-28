@@ -12,7 +12,7 @@ docker compose run --rm api python -m app.config requirements    # what external
 docker compose up -d --build                                     # the stack; OUTSOURCE_PROVIDER in .env switches RunPod on
 python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start (also first start), status, cancel
 python scripts/server.py restore 2                               # billing database from a backup: latest, a name, or Nth newest; --from local, --fallback
-docker compose exec api python -m app.admin status              # live picture; also jobs, user, billing, limits, audit
+python scripts/admin.py status                                  # live picture; also jobs, user, users find, billing, limits, audit
 ```
 
 `check --online` is the way to confirm a setup step worked. Code changes reach the containers only after a rebuild, for example `docker compose build api`.
@@ -32,7 +32,7 @@ docker compose exec api python -m app.admin status              # live picture; 
 | `app/backups.py` | `python -m app.backups`: billing backups, which are kept, and the encrypted off-site copies |
 | `app/error_report.py` | Optional error reports of the API and workers to `ERROR_REPORT_URL`, with secrets redacted |
 | `runpod/handler.py` | The RunPod Serverless handler, built with `Dockerfile.runpod` |
-| `app/admin/`, `app/controls.py` | `python -m app.admin`: status, jobs, users, the billing report, and temporary limits the API reads from Redis |
+| `app/admin/`, `app/controls.py`, `scripts/admin.py` | `python -m app.admin`: status, jobs, users, the billing report, and temporary limits the API reads from Redis; the host script runs it in the API container |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
 
 ## Conventions

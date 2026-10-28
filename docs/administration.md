@@ -1,26 +1,34 @@
 # 🛠️ Administration
 
-`python -m app.admin` shows what the server is doing and changes it while it runs: jobs, user accounts, the billing figures, and temporary limits. Run it in the `api` container, which has the billing database:
+`python scripts/admin.py` shows what the server is doing and changes it while it runs: jobs, user accounts, the billing figures, and temporary limits. Run it on the host, in the project folder:
 
 ```shell
-docker compose exec api python -m app.admin status
-docker compose exec api python -m app.admin --help
+python scripts/admin.py status
+python scripts/admin.py --help
 ```
 
-Each command has its own `--help`, for example `python -m app.admin jobs cancel --help`. The commands run as the same user as the services, so files they write stay usable by them.
+Each command has its own `--help`, for example `python scripts/admin.py jobs cancel --help`.
+
+The script runs `python -m app.admin` in the `api` container, which has the billing database, as the same user as the services, so files it writes stay usable by them. It adds two things to `docker compose exec api python -m app.admin`, which runs the same commands: the audit log names you by your user name on this machine, and without a terminal, as in a script or a pipe, the container gets none either.
 
 Every command that changes something:
 
-* writes an entry to the audit log, with who (`--by`, default `admin`), what, when, and why (`--reason`). See [Audit log](#-audit-log).
-* shows what it will change and asks first when the change is destructive: cancelling a job, queueing one again, taking minutes away, and deleting an account. `--yes` skips the question, for scripts.
+* writes an entry to the audit log, with who (`--by`, by default your user name), what, when, and why (`--reason`). A change to a balance or an account is saved together with its entry, so neither exists without the other. A change kept in Redis is made only when the audit log can be reached, and says so if its entry could not be written afterwards. See [Audit log](#-audit-log).
+* needs a reason when it is destructive or affects a user: cancelling a job or queueing it again, credits, deleting an account, and blocking a user. In a terminal, it asks for a missing one. A reason must not contain an email address, because reasons are kept after an account is deleted.
+* shows what it will change and asks first when it changes a job or a balance: cancelling a job, queueing it again, and adding or taking away minutes. Deleting an account asks you to type its email address. `--yes` skips the question, for scripts. Without a terminal and without `--yes`, nothing is asked and nothing changes.
+* shows what it would do with `--dry-run`, and changes nothing.
+* names a job by at least 8 characters of its ID, as the job list shows them. Commands that only read take any unique start.
+* prints the command that undoes it, when there is one.
 * behaves like the matching action of a user or of the server: a cancelled job is charged like one the user cancels, and a job queued again is checked, reserved, and routed like a new one.
 
-Commands that only read (`status`, `jobs`, `jobs show`, `user`, `billing`, `limits`, and `audit`) print JSON with `--json`, for scripts and monitoring. No output contains secrets or purchase tokens.
+Every command prints JSON with `--json`, for scripts and monitoring. A change prints `{"dry_run": true, "plan": ...}` or `{"dry_run": false, "result": ...}`, and needs `--yes` where it would ask. No output contains secrets or purchase tokens.
+
+When Redis or the billing database cannot be reached, a command says so in one line and exits with code 2; `--debug` before the command, as in `python scripts/admin.py --debug status`, shows the traceback.
 
 ## 📊 Status
 
 ```shell
-docker compose exec api python -m app.admin status
+python scripts/admin.py status
 ```
 
 The first thing to look at when users say the server is slow:
@@ -38,8 +46,8 @@ The first thing to look at when users say the server is slow:
 ## 🧾 Jobs
 
 ```shell
-docker compose exec api python -m app.admin jobs --failed --since 1d
-docker compose exec api python -m app.admin jobs show 3f2a9c1e
+python scripts/admin.py jobs --failed --since 1d
+python scripts/admin.py jobs show 3f2a9c1e
 ```
 
 `jobs` lists recent jobs from their [diagnostics records](architecture.md#-job-diagnostics), newest first, so jobs that ended long ago are included until `BILLING_JOB_DIAGNOSTICS_RETENTION`. Filter with `--failed` or `--status`, `--user` (email address or user ID), `--backend local` or `remote`, and `--since` (a duration such as `2h` or `7d`). `--limit` sets how many are listed (default 30).
@@ -55,23 +63,25 @@ A job is named by its ID or its first characters, as the list shows them.
 These commands need billing; without it there are no accounts.
 
 ```shell
-docker compose exec api python -m app.admin user user@example.com
-docker compose exec api python -m app.admin user user@example.com credit 30 --reason "refund for a failed job"
-docker compose exec api python -m app.admin user user@example.com credit -30 --reason "chargeback"
-docker compose exec api python -m app.admin user user@example.com delete --reason "deletion request by email"
+python scripts/admin.py user user@example.com
+python scripts/admin.py user user@example.com credit 30 --reason "refund for a failed job"
+python scripts/admin.py user user@example.com credit -30 --reason "chargeback"
+python scripts/admin.py user user@example.com delete --reason "deletion request by email"
+python scripts/admin.py users find example.com
 ```
 
-A user is named by email address or user ID. The email must belong to someone who has signed in at least once.
+A user is named by email address or user ID. The email must belong to someone who has signed in at least once. If a name matches two accounts, which happens only when one account's ID is another's email address, the command stops and asks for the user ID.
 
 * **`user <user>`** shows the balance, minutes reserved by running jobs, the last and next free-minute grant, a block, purchases with order IDs and whether they were voided, the latest balance changes, and recent jobs. A negative balance means a refunded purchase's minutes were already used; see [Refunds and chargebacks](google-play-billing.md#-refunds-and-chargebacks).
-* **`credit <minutes>`** adds minutes, or takes them away with a negative number, which asks first. The balance can go below zero. The reason is kept with the balance change and in the audit log.
-* **`delete`** deletes the account and its data, the same as `DELETE /api/account`, including running jobs and remaining minutes, and cannot be undone. It asks first. See **Account deletion** in the [API guide](api.md#-account-deletion) for what is kept. Use it for deletion requests that arrive by email or a web form.
+* **`credit <minutes>`** adds minutes, or takes them away with a negative number. It shows the balance before and after, and asks first. The balance can go below zero. The reason is kept with the balance change and in the audit log.
+* **`delete`** deletes the account and its data, the same as `DELETE /api/account`, including running jobs and remaining minutes, and cannot be undone. It asks you to type the account's email address, or its user ID if it has none. See **Account deletion** in the [API guide](api.md#-account-deletion) for what is kept. Use it for deletion requests that arrive by email or a web form.
+* **`users find <text>`** lists the accounts whose email address or user ID contains the text, at least 3 characters, for when you know only part of an address. `%` and `_` are matched as written.
 
 ## 💰 Billing
 
 ```shell
-docker compose exec api python -m app.admin billing --per month --since 365d
-docker compose exec api python -m app.admin billing --remote-price-per-hour 1.2
+python scripts/admin.py billing --per month --since 365d
+python scripts/admin.py billing --remote-price-per-hour 1.2
 ```
 
 Whether the price per minute covers the GPU time:
@@ -88,16 +98,16 @@ Times are in UTC.
 Temporary controls for abuse or a blocked video site. They apply to the next request, without editing `.env` or restarting, and never stop running or queued jobs.
 
 ```shell
-docker compose exec api python -m app.admin limits
-docker compose exec api python -m app.admin limits pause --message "Back at 18:00 UTC" --for 2h
-docker compose exec api python -m app.admin limits resume
-docker compose exec api python -m app.admin limits links off --for 1d
-docker compose exec api python -m app.admin limits links on
-docker compose exec api python -m app.admin limits sites reset youtube.com
-docker compose exec api python -m app.admin limits block user@example.com --reason "abuse" --for 7d
-docker compose exec api python -m app.admin limits unblock user@example.com
-docker compose exec api python -m app.admin limits per-user 1 --for 6h
-docker compose exec api python -m app.admin limits per-user default
+python scripts/admin.py limits
+python scripts/admin.py limits pause --message "Back at 18:00 UTC" --for 2h
+python scripts/admin.py limits resume
+python scripts/admin.py limits links off --for 1d
+python scripts/admin.py limits links on
+python scripts/admin.py limits sites reset youtube.com
+python scripts/admin.py limits block user@example.com --reason "abuse" --for 7d
+python scripts/admin.py limits unblock user@example.com
+python scripts/admin.py limits per-user 1 --for 6h
+python scripts/admin.py limits per-user default
 ```
 
 * **`limits`** shows what is active, and for how long.
@@ -112,7 +122,7 @@ docker compose exec api python -m app.admin limits per-user default
 ## 📜 Audit log
 
 ```shell
-docker compose exec api python -m app.admin audit
+python scripts/admin.py audit
 ```
 
 Lists the latest admin actions (`--limit`, default 30) with their time, who acted (`--by`), the action, its target (a job or user ID), details, and the reason. The log is the `admin_actions` table of the billing database, so the billing backups include it.
@@ -121,8 +131,8 @@ Lists the latest admin actions (`--limit`, default 30) with their time, who acte
 
 Each command is a data function in `app/admin/` that returns plain data, with the command line printing it. Another tool, such as an admin web page, calls the same functions, so it behaves exactly like the commands, including the audit log:
 
-* Reading: `status.collect()`, `jobs.list_jobs()`, `jobs.job_details()`, `users.account()`, `report.billing_report()`, `limits.current()`, and `audit.entries()`.
-* Changing: `jobs.cancel()`, `jobs.requeue()`, `users.credit()`, `users.delete()`, and the functions in `limits`. Each takes the actor and an optional reason for the audit log.
+* Reading: `status.collect()`, `jobs.list_jobs()`, `jobs.job_details()`, `users.account()`, `users.find()`, `report.billing_report()`, `limits.current()`, and `audit.entries()`.
+* Changing: `jobs.cancel()`, `jobs.requeue()`, `users.credit()`, `users.delete()`, and the functions in `limits`. Each takes the actor and a reason for the audit log. The reason is required by `jobs.cancel()`, `jobs.requeue()`, `users.credit()`, `users.delete()`, and `limits.block()`, and refused if it contains an email address.
 * Confirming: `jobs.cancel_plan()`, `jobs.requeue_plan()`, `users.credit_plan()`, and `users.delete_plan()` return what the matching change would do and change nothing. Show it before asking.
 
 A function that cannot do what was asked raises `AdminError` (in `app.admin.common`) with a message for the operator. Durations are in seconds. The functions need the billing database and Redis, so they run in the API container.
