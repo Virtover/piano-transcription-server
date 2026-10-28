@@ -1,7 +1,7 @@
-// The admin page. Everything shown is built from DOM nodes with textContent,
-// never parsed as HTML: job errors, links, and emails come from users. Charts
-// are drawn here from what the server already reports; nothing is collected
-// for them and nothing is loaded from elsewhere.
+// The server panel. Everything shown is built from DOM nodes with
+// textContent, never parsed as HTML: job errors, links, and emails come from
+// users. Charts are drawn here from what the server already reports; nothing
+// is collected for them and nothing is loaded from elsewhere.
 "use strict";
 
 const main = document.getElementById("main");
@@ -15,10 +15,31 @@ const STATUS_KIND = {
   cancelled: "quiet", preparing: "quiet", uploading: "quiet",
 };
 const DURATIONS = [["", "until removed"], ["30m", "30 minutes"], ["1h", "1 hour"], ["6h", "6 hours"], ["1d", "1 day"], ["7d", "7 days"]];
+// Icons as path data, drawn with the page's own SVG nodes.
+const ICONS = {
+  jobs: ["M9 18V5l12-2v13", "M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M18 19a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"],
+  users: ["M9 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M2 21a7 7 0 0 1 14 0", "M16 4a4 4 0 0 1 0 8", "M22 21a7 7 0 0 0-4-6.3"],
+  billing: ["M4 20V10", "M10 20V4", "M16 20v-7", "M22 20H2"],
+  limits: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z", "M8 12h8"],
+  audit: ["M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z", "M14 3v6h6", "M8 13h8", "M8 17h5"],
+  access: ["M6 10h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z", "M8 10V7a4 4 0 0 1 8 0v3"],
+  disk: ["M22 12H2", "M5.5 5h13l3.5 7v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6z", "M6 16h.01", "M10 16h.01"],
+  queue: ["M12 2 2 7l10 5 10-5z", "m2 17 10 5 10-5", "m2 12 10 5 10-5"],
+  backup: ["M12 8c4.4 0 8-1.3 8-3s-3.6-3-8-3-8 1.3-8 3 3.6 3 8 3z", "M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5", "M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"],
+  video: ["M6 5h12a4 4 0 0 1 4 4v6a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V9a4 4 0 0 1 4-4z", "m10 9 5 3-5 3z"],
+  shield: ["M12 3 4 6v6c0 5 3.4 8.3 8 9 4.6-.7 8-4 8-9V6z", "m9 12 2 2 4-4"],
+  alert: ["M12 9v4", "M12 17h.01", "M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"],
+  info: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 16v-4", "M12 8h.01"],
+  search: ["M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "m21 21-4.3-4.3"],
+  refresh: ["M21 12a9 9 0 1 1-2.6-6.4", "M21 3v6h-6"],
+  cloud: ["M17.5 19a4.5 4.5 0 1 0-1.4-8.8A7 7 0 1 0 4 15.5 3.5 3.5 0 0 0 7.5 19z"],
+  empty: ["M22 12h-6l-2 3h-4l-2-3H2", "M5.5 5h13l3.5 7v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6z"],
+};
 
 let me = null;
 let currentView = null;
 let refreshTimer = null;
+let lastStatus = null;
 
 // --- Building blocks -----------------------------------------------------------------
 
@@ -55,6 +76,15 @@ function svg(tag, attributes = {}, ...children) {
     else if (value !== null && value !== undefined) node.setAttribute(name, value);
   }
   return append(node, children);
+}
+
+function icon(name) {
+  return svg("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" },
+    (ICONS[name] || ICONS.info).map((d) => svg("path", { d })));
+}
+
+function iconTile(name, color) {
+  return el("div", { class: `ov-icon ${color}` }, icon(name));
 }
 
 const numbers = new Intl.NumberFormat("en");
@@ -99,6 +129,10 @@ function shortId(id) {
   return id ? String(id).slice(0, 8) : "–";
 }
 
+function plural(count, one, many) {
+  return `${fmt(count)} ${count === 1 ? one : many}`;
+}
+
 // --- Talking to the server ---------------------------------------------------------------
 
 async function api(path, options = {}) {
@@ -135,20 +169,39 @@ function toast(text, kind = "success") {
 
 // --- Page pieces -----------------------------------------------------------------------
 
+function liveStatus() {
+  if (!lastStatus) return null;
+  const online = Boolean(lastStatus.local_worker);
+  return el("span", { class: `live ${online ? "online" : "offline"}` }, el("span", { class: "dot" }), online ? "Worker online" : "No worker heartbeat");
+}
+
+function refreshButton(onclick) {
+  return el("button", { type: "button", class: "btn", onclick }, icon("refresh"), "Refresh");
+}
+
 function head(title, subtitle, ...right) {
   return el("div", { class: "adm-head" },
     el("div", {}, el("h1", { text: title }), subtitle ? el("p", { text: subtitle }) : null),
-    el("div", { class: "adm-head-right" }, right));
+    el("div", { class: "adm-head-right" }, liveStatus(), right));
 }
 
-function card(title, subtitle, ...content) {
-  return el("section", { class: "card" }, title ? el("h2", { text: title }) : null,
-    subtitle ? el("p", { class: "card-sub", text: subtitle }) : null, content);
+function cardHead(iconName, color, title, subtitle, end) {
+  return el("div", { class: "card-head" }, iconTile(iconName, color),
+    el("div", {}, el("h2", { text: title }), subtitle ? el("p", { text: subtitle }) : null),
+    end ? el("div", { class: "end" }, end) : null);
 }
 
-function stat(label, value, note) {
-  return el("div", { class: "stat" }, el("div", { class: "label", text: label }),
-    el("div", { class: "value", text: value }), note ? el("div", { class: "note" }, note) : null);
+function iconCard(iconName, color, title, subtitle, ...content) {
+  return el("section", { class: "card" }, cardHead(iconName, color, title, subtitle), content);
+}
+
+function stat(label, value, note, kind = "") {
+  return el("div", { class: `stat ${kind}` }, el("div", { class: "label", text: label }),
+    el("div", { class: "value" }, value), note ? el("div", { class: "note" }, note) : null);
+}
+
+function unit(value, suffix) {
+  return [String(value), el("small", { text: suffix })];
 }
 
 function badge(text, kind = "quiet") {
@@ -168,20 +221,30 @@ function facts(pairs) {
   return list;
 }
 
-function emptyState(text) {
-  return el("div", { class: "empty", text });
+function emptyState(text, iconName = "empty") {
+  return el("div", { class: "empty" }, icon(iconName), el("span", { text }));
 }
 
-function loading() {
-  return el("div", { class: "loading", text: "Loading…" });
+function skeleton(kind = "list") {
+  const bone = (size = "") => el("div", { class: `bone ${size}` });
+  if (kind === "dashboard") {
+    return el("div", { class: "skeleton", "aria-label": "Loading" },
+      el("div", { class: "row" }, bone("tall"), bone("tall"), bone("tall"), bone("tall")), bone("huge"));
+  }
+  return el("div", { class: "skeleton", "aria-label": "Loading" }, bone(), bone(), bone(), bone());
+}
+
+function alertBox(kind, text, iconName) {
+  return el("div", { class: `alert ${kind}`, role: kind === "error" ? "alert" : null },
+    icon(iconName || (kind === "error" || kind === "warn" ? "alert" : "info")), el("span", { text }));
 }
 
 function errorBox(error) {
-  return el("div", { class: "alert error", role: "alert", text: error.message || String(error) });
+  return alertBox("error", error.message || String(error));
 }
 
-function table(columns, rows, { onRow, empty = "Nothing to show" } = {}) {
-  if (!rows || !rows.length) return emptyState(empty);
+function table(columns, rows, { onRow, empty = "Nothing to show", emptyIcon } = {}) {
+  if (!rows || !rows.length) return emptyState(empty, emptyIcon);
   const headRow = el("tr", {}, columns.map((column) => el("th", { scope: "col", class: column.num ? "num" : null, text: column.label })));
   const body = rows.map((row) => {
     const line = el("tr", { class: onRow ? "clickable" : null },
@@ -199,10 +262,10 @@ function table(columns, rows, { onRow, empty = "Nothing to show" } = {}) {
 
 function meter(value, limit, label) {
   const share = limit ? Math.min(1, value / limit) : 0;
-  const fill = el("div", { class: `meter-fill ${share >= 0.9 ? "bad" : share >= 0.7 ? "warn" : ""}` });
-  fill.style.width = `${Math.round(share * 100)}%`;
-  return el("div", { class: "meter", role: "img", "aria-label": `${label}: ${value} of ${limit}` },
-    el("div", { class: "meter-track" }, fill),
+  const bar = el("div", { class: `meter-fill ${share >= 0.9 ? "bad" : share >= 0.7 ? "warn" : ""}` });
+  bar.style.width = `${Math.round(share * 100)}%`;
+  return el("div", { class: "meter", role: "img", "aria-label": `${label}: ${Math.round(share * 100)}%` },
+    el("div", { class: "meter-track" }, bar),
     el("div", { class: "meter-text" }, el("span", { text: label }), el("span", { text: `${Math.round(share * 100)}%` })));
 }
 
@@ -220,6 +283,25 @@ function segmented(options, selected, onChange) {
   return group;
 }
 
+// Colour-coded filter buttons, like the website's quick buttons.
+function chips(options, selected, onChange) {
+  const group = el("div", { class: "chips", role: "group" });
+  for (const [value, label, color] of options) {
+    const button = el("button", { type: "button", class: `qbtn ${color}`, "aria-pressed": String(value === selected), text: label });
+    button.addEventListener("click", () => {
+      for (const other of group.children) other.setAttribute("aria-pressed", "false");
+      button.setAttribute("aria-pressed", "true");
+      onChange(value);
+    });
+    group.append(button);
+  }
+  return group;
+}
+
+function qbtn(text, color, onclick) {
+  return el("button", { type: "button", class: `qbtn ${color}`, text, onclick });
+}
+
 function select(options, selected) {
   return el("select", { class: "pw-select" }, options.map(([value, label]) =>
     el("option", { value, text: label, selected: value === selected })));
@@ -231,6 +313,11 @@ function field(label, control, hint) {
 
 function input(attributes = {}) {
   return el("input", { class: "pw-input", type: "text", autocomplete: "off", spellcheck: "false", ...attributes });
+}
+
+function searchBox(attributes) {
+  const box = input(attributes);
+  return { box, node: el("span", { class: "search" }, icon("search"), box) };
 }
 
 // --- Charts ----------------------------------------------------------------------------
@@ -251,8 +338,8 @@ function columnPath(x, y, width, height, round) {
   return `M${x},${y + height}V${y + r}Q${x},${y} ${x + r},${y}H${x + width - r}Q${x + width},${y} ${x + width},${y + r}V${y + height}Z`;
 }
 
-function columnChart({ labels, series, format = fmt, unit = "", shortLabel = (label) => label }) {
-  const width = 520, height = 220, left = 40, right = 6, top = 12, bottom = 26;
+function columnChart({ labels, series, format = fmt, suffix = "", shortLabel = (label) => label }) {
+  const width = 520, height = 210, left = 40, right = 6, top = 12, bottom = 26;
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
   const totals = labels.map((_, index) => series.reduce((sum, one) => sum + (one.values[index] || 0), 0));
   const max = niceMax(Math.max(0, ...totals));
@@ -264,9 +351,9 @@ function columnChart({ labels, series, format = fmt, unit = "", shortLabel = (la
   for (let step = 0; step <= 4; step += 1) {
     const value = (max / 4) * step;
     chart.append(svg("line", { class: step ? "gridline" : "baseline", x1: left, x2: width - right, y1: y(value), y2: y(value) }),
-      svg("text", { class: "tick", x: left - 8, y: y(value) + 3, "text-anchor": "end" }, compact(value)));
+      svg("text", { class: "tick", x: left - 8, y: y(value) + 4, "text-anchor": "end" }, compact(value)));
   }
-  const every = Math.max(1, Math.ceil(labels.length / 8));
+  const every = Math.max(1, Math.ceil(labels.length / 7));
   const container = el("div", { class: "chart" });
   const tip = el("div", { class: "tooltip", hidden: true });
 
@@ -277,11 +364,10 @@ function columnChart({ labels, series, format = fmt, unit = "", shortLabel = (la
     let base = 0;
     const drawn = series.map((one) => ({ one, value: one.values[index] || 0 })).filter((part) => part.value > 0);
     drawn.forEach((part, position) => {
-      const isTop = position === drawn.length - 1;
       const y0 = y(base), y1 = y(base + part.value);
       // The 2px gap in the surface colour separates touching segments.
       const segmentHeight = Math.max(1, y0 - y1 - (position > 0 ? 2 : 0));
-      chart.append(svg("path", { class: part.one.cls, d: columnPath(x, y1, barWidth, segmentHeight, isTop ? 4 : 0) }));
+      chart.append(svg("path", { class: part.one.cls, d: columnPath(x, y1, barWidth, segmentHeight, position === drawn.length - 1 ? 4 : 0) }));
       base += part.value;
     });
     if (index % every === 0) {
@@ -291,8 +377,8 @@ function columnChart({ labels, series, format = fmt, unit = "", shortLabel = (la
       highlight.classList.add("on");
       fill(tip, el("strong", { text: label }),
         series.map((one) => el("div", {}, el("span", {}, series.length > 1 ? el("i", { class: one.cls }) : null, one.name),
-          el("b", { text: `${format(one.values[index] || 0)}${unit}` }))),
-        series.length > 1 ? el("div", {}, el("span", { text: "Total" }), el("b", { text: `${format(totals[index])}${unit}` })) : null);
+          el("b", { text: `${format(one.values[index] || 0)}${suffix}` }))),
+        series.length > 1 ? el("div", {}, el("span", { text: "Total" }), el("b", { text: `${format(totals[index])}${suffix}` })) : null);
       const box = chart.getBoundingClientRect();
       tip.style.left = `${((left + band * index + band / 2) / width) * box.width}px`;
       tip.style.top = `${(y(totals[index]) / height) * box.height}px`;
@@ -309,8 +395,9 @@ function columnChart({ labels, series, format = fmt, unit = "", shortLabel = (la
   return container;
 }
 
-function chartCard(title, subtitle, { labels, series, ...options }) {
-  if (!labels.length) return card(title, subtitle, emptyState("No data in this period"));
+function chartCard(title, subtitle, { labels, series, figure, ...options }) {
+  const headParts = el("div", {}, el("h2", { text: title }), el("p", { text: subtitle }));
+  if (!labels.length) return el("section", { class: "card" }, el("div", { class: "chart-head" }, headParts), emptyState("No data in this period", "billing"));
   const legend = series.length > 1
     ? el("div", { class: "legend" }, series.map((one) => el("span", {}, el("i", { class: one.cls }), one.name)))
     : null;
@@ -323,17 +410,18 @@ function chartCard(title, subtitle, { labels, series, ...options }) {
   const toggle = segmented([["chart", "Chart"], ["table", "Table"]], "chart", (view) => (view === "chart" ? showChart() : showTable()));
   showChart();
   return el("section", { class: "card" },
-    el("div", { class: "chart-head" }, el("div", {}, el("h2", { text: title }), el("p", { class: "card-sub", text: subtitle })), toggle),
+    el("div", { class: "chart-head" }, headParts, toggle),
+    figure ? el("div", { class: "chart-figure" }, figure) : null,
     legend, body);
 }
 
 function horizontalBars(items) {
   const max = Math.max(1, ...items.map((item) => item.value));
   return el("div", { class: "hbars" }, items.map((item) => {
-    const fill = el("div", { class: "fill" });
-    fill.style.width = `${(item.value / max) * 100}%`;
+    const bar = el("div", { class: "fill" });
+    bar.style.width = `${(item.value / max) * 100}%`;
     return el("div", { class: "hbar", role: "img", "aria-label": `${item.name}: ${item.value}` },
-      el("span", { class: "name", text: item.name }), el("div", { class: "track" }, fill), el("span", { class: "count", text: fmt(item.value) }));
+      el("span", { class: "name", text: item.name }), el("div", { class: "track" }, bar), el("span", { class: "count", text: fmt(item.value) }));
   }));
 }
 
@@ -363,29 +451,35 @@ function openModal({ title, subtitle, wide = false }) {
   return { body, foot, close: done, every: (seconds, tick) => { timer = setInterval(tick, seconds * 1000); } };
 }
 
-function planFacts(action, plan) {
+function steps(current) {
+  return el("div", { class: "steps" }, ["Reason", "Review and confirm"].map((name, index) =>
+    el("span", { class: index < current ? "done" : index === current ? "on" : "", text: `${index + 1} · ${name}` })));
+}
+
+function planSummary(action, plan) {
   if (action === "user.credit") {
-    return facts([["Account", plan.email || plan.user_id], ["Change", `${plan.minutes > 0 ? "+" : ""}${fmt(plan.minutes)} minutes`],
-      ["Balance", `${fmt(plan.balance)} → ${fmt(plan.balance_after)} minutes`]]);
+    return el("div", { class: "change-summary" },
+      el("div", { class: "delta" }, `${fmt(plan.balance)} min`, el("span", { class: "arrow", text: "→" }), `${fmt(plan.balance_after)} min`),
+      facts([["Account", plan.email || plan.user_id], ["Change", `${plan.minutes > 0 ? "+" : ""}${fmt(plan.minutes)} minutes`]]));
   }
   if (action === "job.cancel") {
     const charge = !plan.billed ? "nothing (billing is off)" : plan.refund ? "nothing (refund)" : `${fmt(plan.charge)} of ${fmt(plan.full_cost)} minutes`;
-    return facts([["Job", el("span", { class: "mono", text: plan.job_id })], ["Now", statusBadge(plan.status)],
-      ["Progress", `${Math.round((plan.progress || 0) * 100)}%`], ["Backend", plan.backend], ["Charged", charge]]);
+    return el("div", { class: "change-summary" }, facts([["Job", el("span", { class: "mono", text: plan.job_id })], ["Now", statusBadge(plan.status)],
+      ["Progress", `${Math.round((plan.progress || 0) * 100)}%`], ["Backend", plan.backend], ["Charged", charge]]));
   }
-  return facts(Object.entries(plan).map(([key, value]) => [key.replaceAll("_", " "),
-    typeof value === "boolean" ? (value ? "yes" : "no") : key.startsWith("expires") ? (value ? `in ${span(value)}` : "until removed") : value]));
+  return el("div", { class: "change-summary" }, facts(Object.entries(plan).map(([key, value]) => [key.replaceAll("_", " "),
+    typeof value === "boolean" ? (value ? "yes" : "no") : key.startsWith("expires") ? (value ? `for ${span(value)}` : "until removed") : value])));
 }
 
-// Every change: what it is and why, then the plan from the server, then one
-// confirmation within two minutes. The server keeps what was reviewed.
+// Every change: why, then the plan from the server, then one confirmation
+// within two minutes. The server keeps what was reviewed.
 function change(action, args, { title, describe, after }) {
   const modal = openModal({ title });
   const reason = input({ maxlength: "300", placeholder: REASON_REQUIRED.has(action) ? "Required; no email addresses" : "Optional; no email addresses" });
   const review = el("button", { type: "button", class: "btn gold", text: "Review" });
   const message = el("div");
-  modal.body.append(el("div", { class: "steps" }, el("span", { class: "on", text: "1 · Reason" }), el("span", { text: "2 · Confirm" })),
-    describe ? el("div", { class: "pw-field" }, describe) : null, field("Reason, kept in the audit log", reason), message);
+  modal.body.append(steps(0), describe ? el("div", { class: "pw-field" }, describe) : null,
+    field("Reason, kept in the audit log", reason), message);
   modal.foot.append(el("button", { type: "button", class: "btn", text: "Cancel", onclick: modal.close }), review);
   review.addEventListener("click", async () => {
     review.disabled = true;
@@ -411,10 +505,9 @@ function confirmStep(modal, action, planned, after) {
   };
   tick();
   modal.every(1, tick);
-  fill(modal.body, 
-    el("div", { class: "steps" }, el("span", { text: "1 · Reason" }), el("span", { class: "on", text: "2 · Confirm" })),
-    planned.serious ? el("div", { class: "alert warn", text: "This affects users at once." }) : null,
-    planFacts(action, planned.plan),
+  fill(modal.body, steps(1),
+    planned.serious ? alertBox("warn", "This affects users at once.") : null,
+    planSummary(action, planned.plan),
     el("p", { class: "pw-hint" }, "Reason: ", planned.reason || "none given"),
     message);
   fill(modal.foot, countdown, el("button", { type: "button", class: "btn", text: "Back out", onclick: modal.close }), confirm);
@@ -435,65 +528,94 @@ function canChange(action) {
   return me && me.actions.includes(action);
 }
 
+// --- Sidebar counts ----------------------------------------------------------------------
+
+function updateCounts(state) {
+  lastStatus = state;
+  const jobs = state.jobs.queued + state.jobs.processing;
+  document.getElementById("count-jobs").textContent = jobs ? String(jobs) : "";
+  const controls = state.controls;
+  const active = [controls.paused !== null, controls.links_off !== null, controls.per_user_limit !== null, controls.blocked_users > 0].filter(Boolean).length;
+  const limits = document.getElementById("count-limits");
+  limits.textContent = active ? String(active) : "";
+  limits.className = `count ${controls.paused !== null || controls.links_off !== null ? "alert-count" : ""}`;
+}
+
+async function loadStatus() {
+  const state = await api("/api/status");
+  updateCounts(state);
+  return state;
+}
+
 // --- Overview ----------------------------------------------------------------------------
 
 async function overview() {
-  fill(main, head("Overview", "What the server is doing now"), loading());
-  const refresh = el("button", { type: "button", class: "btn", text: "Refresh", onclick: () => overview() });
+  fill(main, head("Overview", "What the server is doing now"), skeleton("dashboard"));
   let state;
   try {
-    state = await api("/api/status");
+    state = await loadStatus();
   } catch (error) {
-    fill(main, head("Overview", "What the server is doing now", refresh), errorBox(error));
+    fill(main, head("Overview", "What the server is doing now", refreshButton(() => overview())), errorBox(error));
     return;
   }
   const jobs = state.jobs;
   const worker = state.local_worker;
   const remote = state.remote;
   const notice = state.maintenance;
-  const controlsActive = [
-    state.controls.paused !== null ? badge("submissions paused", "warn") : null,
-    state.controls.links_off !== null ? badge("links off", "warn") : null,
-    state.controls.per_user_limit !== null ? badge(`per-user limit ${state.controls.per_user_limit}`, "info") : null,
-    state.controls.blocked_users ? badge(`${state.controls.blocked_users} blocked`, "bad") : null,
+  const controls = state.controls;
+  const active = [
+    controls.paused !== null ? badge("submissions paused", "warn") : null,
+    controls.links_off !== null ? badge("links off", "warn") : null,
+    controls.per_user_limit !== null ? badge(`per-user limit ${controls.per_user_limit}`, "info") : null,
+    controls.blocked_users ? badge(plural(controls.blocked_users, "blocked user", "blocked users"), "bad") : null,
   ].filter(Boolean);
   const refused = (state.video_sites || []).filter((site) => site.refused || site.recovering);
+  const section = (view, iconName, color, title, text, summary) => el("button", { type: "button", class: "ov-card", onclick: () => open(view) },
+    iconTile(iconName, color), el("h3", { text: title }), el("p", { text }), el("div", { class: "summary", text: summary }));
 
-  fill(main, 
-    head("Overview", `Updated ${when(Date.now() / 1000)} · refreshes every ${REFRESH_SECONDS} s`, refresh),
-    notice ? el("div", { class: "alert warn", text: `Planned ${notice.action || "maintenance"}: ${notice.message || ""}` }) : null,
+  fill(main,
+    head("Overview", `Updated ${when(Date.now() / 1000)} · refreshes every ${REFRESH_SECONDS} s`, refreshButton(() => overview())),
+    notice ? alertBox("warn", `Planned ${notice.action}: ${notice.message}`) : null,
+    controls.paused !== null ? alertBox("warn", `New transcriptions are paused: ${controls.paused}`) : null,
     el("div", { class: "stats" },
-      el("div", { class: "stat" }, el("div", { class: "label", text: "Places used" }),
-        el("div", { class: "value", text: `${fmt(state.places.used)} / ${fmt(state.places.limit)}` }),
+      el("div", { class: "stat lit" }, el("div", { class: "label", text: "Places used" }),
+        el("div", { class: "value" }, unit(fmt(state.places.used), `/ ${fmt(state.places.limit)}`)),
         meter(state.places.used, state.places.limit || 1, "MAX_ACTIVE_JOBS")),
       stat("Queued", fmt(jobs.queued), `${fmt(jobs.preparing + jobs.uploading)} being checked or uploaded`),
       stat("Processing", fmt(jobs.processing), `${fmt(state.backends.local)} local · ${fmt(state.backends.remote)} remote`),
       stat("Local worker", worker ? "Online" : "No heartbeat",
-        worker ? `${worker.capacity} at once · avg ${span(worker.average_job_seconds)} · seen ${ago(worker.updated_at)}` : badge("check the worker", "bad")),
-      stat("Remote", remote.enabled ? `${fmt(remote.in_use)} / ${fmt(remote.limit)}` : "Off", remote.enabled ? "jobs on RunPod" : "OUTSOURCE_PROVIDER=none")),
+        worker ? `${worker.capacity} at once · avg ${span(worker.average_job_seconds)} · seen ${ago(worker.updated_at)}` : "Check the worker's log", worker ? "" : "alarm"),
+      stat("Remote", remote.enabled ? unit(fmt(remote.in_use), `/ ${fmt(remote.limit)}`) : "Off", remote.enabled ? "jobs on RunPod" : "OUTSOURCE_PROVIDER=none")),
+    el("div", { class: "ov-grid" },
+      section("jobs", "jobs", "blue", "Jobs", "Recent jobs with their full errors; cancel a stuck one.", `${fmt(jobs.queued)} queued · ${fmt(jobs.processing)} processing`),
+      section("users", "users", "violet", "Users", "Find an account: balance, purchases, history; change it or block it.", "Search by part of an address"),
+      section("billing", "billing", "gold", "Billing", "Minutes sold, given, and used; jobs per backend; remote GPU time.", "Charts per day or month"),
+      section("limits", "limits", active.length ? "red" : "green", "Limits", "Pause submissions, turn links off, block users, per-user limit.", active.length ? plural(active.length, "control active", "controls active") : "Nothing limited"),
+      section("audit", "audit", "teal", "Audit log", "Every admin action, from the command line and this page.", "Who did what, and why"),
+      section("access", "access", "red", "Access", "Lower this page's access, for example when a device is lost.", `Now ${me.effective}`)),
+    el("h2", { class: "section-title" }, "Server", el("small", { text: "live" })),
     el("div", { class: "grid two" },
-      card("Jobs by status", "Live, in Redis", horizontalBars(Object.entries(jobs).map(([name, value]) => ({ name, value })))),
-      card("Disk", state.disk ? state.disk.path : "Data folder not mounted",
+      iconCard("jobs", "blue", "Jobs by status", "In Redis now", horizontalBars(Object.entries(jobs).map(([name, value]) => ({ name, value })))),
+      iconCard("disk", "teal", "Disk", state.disk ? state.disk.path : "Data folder not mounted",
         state.disk ? [
           facts([["Job files", bytes(state.disk.jobs_bytes)], ["Free", `${bytes(state.disk.free_bytes)} of ${bytes(state.disk.total_bytes)}`]]),
           meter(state.disk.total_bytes - state.disk.free_bytes, state.disk.total_bytes, "Used"),
-        ] : emptyState("No data folder")),
-      card("Queues", "Messages not finished yet, including taken ones",
-        table([{ label: "Queue", key: "queue" }, { label: "Messages", num: true, key: "messages" }, { label: "Dead", num: true, key: "dead" }],
+        ] : emptyState("No data folder", "disk")),
+      iconCard("queue", "violet", "Queues", "Messages not finished yet, including taken ones",
+        table([{ label: "Queue", key: "queue" }, { label: "Messages", num: true, key: "messages" }, { label: "Dead", num: true, render: (row) => (row.dead ? badge(String(row.dead), "bad") : "0") }],
           Object.entries(state.queues).map(([queue, counts]) => ({ queue, ...counts })))),
-      card("Billing backups", null, facts([
+      iconCard("backup", "green", "Billing backups", null, facts([
         ["On this disk", fmt(state.backups.count)],
         ["Newest", state.backups.newest_at ? ago(state.backups.newest_at) : badge("none", "bad")],
         ["Off-site", !state.backups.offsite ? "off" : state.backups.offsite.error
           ? el("span", {}, badge("failing", "bad"), " ", state.backups.offsite.error)
           : `last copy ${ago(state.backups.offsite.succeeded_at)}`],
       ])),
-      card("Controls", "Temporary limits from the command line or this page",
-        controlsActive.length ? el("div", { class: "btn-row" }, controlsActive) : el("p", { class: "secondary", text: "None active" })),
-      card("Video sites", "Sites refusing this server, or recovering",
+      iconCard("shield", "gold", "Controls", "Temporary limits",
+        active.length ? el("div", { class: "chips" }, active) : el("p", { class: "secondary", text: "None active" })),
+      iconCard("video", "red", "Video sites", "Refusing this server, or recovering",
         refused.length ? table([{ label: "Site", key: "site" }, { label: "State", render: (row) => badge(row.refused ? "refused" : "recovering", row.refused ? "bad" : "warn") }], refused)
-          : el("p", { class: "secondary", text: "All sites accepted" })),
-    ),
+          : el("p", { class: "secondary", text: "All sites accepted" }))),
   );
 }
 
@@ -503,64 +625,66 @@ function jobs() {
   const filters = { status: "", backend: "", user: "", since: "1d" };
   const results = el("div");
   const load = async () => {
-    fill(results, loading());
+    fill(results, skeleton());
     try {
       const rows = await api("/api/jobs" + query({ ...filters, limit: 100 }));
-      fill(results, card(null, null, table([
+      fill(results, el("section", { class: "card" }, table([
         { label: "Created", render: (row) => when(row.created_at) },
         { label: "Job", render: (row) => el("span", { class: "mono", text: shortId(row.job_id) }) },
         { label: "User", render: (row) => row.email || row.user_id || "–" },
         { label: "Status", render: (row) => statusBadge(row.status) },
         { label: "Backend", key: "backend" },
         { label: "Length", num: true, render: (row) => span(row.duration_seconds) },
-        { label: "Error", render: (row) => (row.error ? String(row.error).slice(0, 80) : "–") },
-      ], rows, { onRow: (row) => openJob(row.job_id), empty: "No jobs match" })));
+        { label: "Error", render: (row) => (row.error ? el("span", { class: "err", text: String(row.error).split("\n")[0].slice(0, 70) }) : "–") },
+      ], rows, { onRow: (row) => openJob(row.job_id), empty: "No jobs match", emptyIcon: "jobs" })));
     } catch (error) {
       fill(results, errorBox(error));
     }
   };
-  const user = input({ placeholder: "email or user ID" });
-  user.addEventListener("change", () => { filters.user = user.value.trim(); load(); });
-  const backend = select([["", "Any"], ["local", "Local"], ["remote", "Remote"]], "");
+  const user = searchBox({ placeholder: "email or user ID" });
+  user.box.addEventListener("change", () => { filters.user = user.box.value.trim(); load(); });
+  const backend = select([["", "Any backend"], ["local", "Local"], ["remote", "Remote"]], "");
   backend.addEventListener("change", () => { filters.backend = backend.value; load(); });
   const since = select([["1h", "Last hour"], ["1d", "Last day"], ["7d", "Last 7 days"], ["30d", "Last 30 days"]], "1d");
   since.addEventListener("change", () => { filters.since = since.value; load(); });
-  fill(main, 
-    head("Jobs", "From job records, kept for 30 days; open one for everything known about it"),
-    el("div", { class: "pw-field" }, segmented([["", "All"], ["queued", "Queued"], ["processing", "Processing"], ["failed", "Failed"], ["completed", "Completed"], ["cancelled", "Cancelled"]],
+  fill(main,
+    head("Jobs", "From job records, kept for 30 days; open one for everything known about it", refreshButton(load)),
+    el("div", { class: "toolbar" }, chips([["", "All", "c-grey"], ["queued", "Queued", "c-blue"], ["processing", "Processing", "c-gold"],
+      ["failed", "Failed", "c-red"], ["completed", "Completed", "c-green"], ["cancelled", "Cancelled", "c-violet"]],
       "", (value) => { filters.status = value; load(); })),
-    el("div", { class: "filters" }, field("User", user), field("Backend", backend), field("Created", since)),
+    el("div", { class: "filters" }, field("User", user.node), field("Backend", backend), field("Created", since)),
     results);
   load();
 }
 
 async function openJob(job) {
   const modal = openModal({ title: `Job ${shortId(job)}`, subtitle: job, wide: true });
-  modal.body.append(loading());
+  modal.body.append(skeleton());
   try {
     const details = await api(`/api/jobs/${encodeURIComponent(job)}`);
     const live = details.live || {};
     const record = details.record || {};
     const status = live.status || record.status;
-    const parts = [
+    const error = record.error || live.error_detail || live.error;
+    fill(modal.body,
       facts([["Status", statusBadge(status)], ["User", record.email || record.user_id || live.user_id],
         ["Source", record.source_url || live.source_url || record.source], ["Backend", live.backend || record.backend],
         ["Progress", live.progress !== undefined ? `${Math.round(Number(live.progress) * 100)}%` : undefined],
         ["Created", when(record.created_at)], ["Started", when(record.started_at)], ["Finished", when(record.finished_at)],
-        ["Length", span(record.duration_seconds)], ["Cost", record.cost_minutes !== undefined ? `${fmt(record.cost_minutes)} minutes` : undefined],
+        ["Length", span(record.duration_seconds)], ["Cost", record.cost_minutes !== undefined && record.cost_minutes !== null ? `${fmt(record.cost_minutes)} minutes` : undefined],
         ["Reservation", details.reservation ? `${details.reservation.status}, ${fmt(details.reservation.reserved_minutes)} reserved` : undefined],
         ["Files", details.files ? details.files.join(", ") || "none" : undefined],
         ["In Redis", details.live ? "yes" : "no: ended over an hour ago, or never queued"]]),
-    ];
-    if (record.error) parts.push(el("h3", { class: "section-title", text: "Full error (users never see this)" }), el("pre", { class: "error-text", text: record.error }));
-    fill(modal.body, ...parts);
+      error ? el("div", { class: "error-item" }, el("strong", { text: "Error · users never see this" }),
+        el("div", { class: "first", text: String(error).split("\n")[0] }),
+        String(error).includes("\n") ? el("details", {}, el("summary", { text: "Full error" }), el("pre", { text: error })) : null) : null);
     if (canChange("job.cancel") && (status === "queued" || status === "processing")) {
       const refund = el("input", { type: "checkbox" });
       modal.foot.append(el("label", { class: "pw-check" }, refund, "Refund: charge nothing"),
-        el("button", { type: "button", class: "btn danger", text: "Cancel job…", onclick: () => {
+        qbtn("Cancel job…", "c-red", () => {
           change("job.cancel", { job: details.job_id, refund: refund.checked }, { title: `Cancel job ${shortId(details.job_id)}`,
             describe: el("p", { class: "secondary", text: refund.checked ? "Charged nothing." : "Charged like a user's own cancellation." }) });
-        } }));
+        }));
     }
     modal.foot.append(el("button", { type: "button", class: "btn", text: "Close", onclick: modal.close }));
   } catch (error) {
@@ -571,89 +695,89 @@ async function openJob(job) {
 // --- Users -----------------------------------------------------------------------------------
 
 function users() {
-  const text = input({ placeholder: "part of an email address, at least 3 characters" });
-  const results = el("div");
+  const text = searchBox({ placeholder: "part of an email address, at least 3 characters" });
+  const results = el("div", {}, emptyState("Search for an account by part of its email address", "users"));
   const search = async () => {
-    fill(results, loading());
+    fill(results, skeleton());
     try {
-      const rows = await api("/api/users" + query({ text: text.value.trim() }));
-      fill(results, card(null, null, table([
+      const rows = await api("/api/users" + query({ text: text.box.value.trim() }));
+      fill(results, el("section", { class: "card" }, table([
         { label: "Email", render: (row) => row.email || "–" },
         { label: "User ID", render: (row) => el("span", { class: "mono", text: row.user_id }) },
         { label: "Minutes", num: true, render: (row) => fmt(row.minutes) },
-      ], rows, { onRow: (row) => openUser(row.user_id), empty: "No user matches" })));
+      ], rows, { onRow: (row) => openUser(row.user_id), empty: "No user matches", emptyIcon: "users" })));
     } catch (error) {
       fill(results, errorBox(error));
     }
   };
-  text.addEventListener("keydown", (event) => { if (event.key === "Enter") search(); });
-  fill(main, 
+  text.box.addEventListener("keydown", (event) => { if (event.key === "Enter") search(); });
+  fill(main,
     head("Users", "Opening an account is written to the audit log"),
-    el("div", { class: "filters" }, field("Find", text), el("div", { class: "pw-field" }, el("button", { type: "button", class: "btn gold", text: "Find", onclick: search }))),
+    el("div", { class: "filters" }, field("Find", text.node), el("div", { class: "pw-field" }, el("button", { type: "button", class: "btn gold", onclick: search }, icon("search"), "Find"))),
     results);
 }
 
 async function openUser(who) {
   currentView = "users";
   setCurrent("users");
-  fill(main, head("Account", who), loading());
+  fill(main, head("Account", null), skeleton("dashboard"));
   let account;
   try {
     account = await api(`/api/users/${encodeURIComponent(who)}`);
   } catch (error) {
-    fill(main, head("Account", who), errorBox(error));
+    fill(main, head("Account", null), errorBox(error));
     return;
   }
-  const back = el("button", { type: "button", class: "btn", text: "← Users", onclick: () => open("users") });
-  const actions = [];
-  if (canChange("user.credit")) {
-    actions.push(el("button", { type: "button", class: "btn gold", text: "Change balance…", onclick: () => creditDialog(account) }));
-  }
+  const name = account.email || account.user_id;
+  const actions = [qbtn("← Users", "c-grey", () => open("users"))];
+  if (canChange("user.credit")) actions.push(qbtn("Change balance…", "c-gold", () => creditDialog(account)));
   if (account.blocked && canChange("limits.unblock")) {
-    actions.push(el("button", { type: "button", class: "btn", text: "Unblock…", onclick: () => change("limits.unblock", { user: account.user_id },
-      { title: `Unblock ${account.email || account.user_id}`, after: () => openUser(account.user_id) }) }));
+    actions.push(qbtn("Unblock…", "c-green", () => change("limits.unblock", { user: account.user_id }, { title: `Unblock ${name}`, after: () => openUser(account.user_id) })));
   } else if (!account.blocked && canChange("limits.block")) {
-    actions.push(el("button", { type: "button", class: "btn danger", text: "Block…", onclick: () => blockDialog(account) }));
+    actions.push(qbtn("Block…", "c-red", () => blockDialog(account)));
   }
-  fill(main, 
-    head(account.email || account.user_id, account.user_id, back, actions),
-    account.blocked ? el("div", { class: "alert error", text: `Blocked${account.blocked.expires_in ? ` for ${span(account.blocked.expires_in)} more` : ""}: ${account.blocked.reason || "no reason given"}` }) : null,
-    account.minutes < 0 ? el("div", { class: "alert warn", text: "The balance is negative: a refunded purchase's minutes were already used." }) : null,
+  fill(main,
+    el("div", { class: "adm-head" },
+      el("div", { class: "profile" }, el("div", { class: "avatar", text: (name || "?").charAt(0) }),
+        el("div", {}, el("h1", { text: name }), el("p", { text: account.user_id }))),
+      el("div", { class: "adm-head-right" }, account.blocked ? badge("blocked", "bad") : badge("active", "good"), el("div", { class: "chips" }, actions))),
+    account.blocked ? alertBox("error", `Blocked${account.blocked.expires_in ? ` for ${span(account.blocked.expires_in)} more` : ""}: ${account.blocked.reason || "no reason given"}`) : null,
+    account.minutes < 0 ? alertBox("warn", "The balance is negative: a refunded purchase's minutes were already used.") : null,
     el("div", { class: "stats" },
-      stat("Balance", `${fmt(account.minutes)} min`),
-      stat("Reserved", `${fmt(account.reserved_minutes)} min`, "by running jobs"),
-      stat("Available", `${fmt(account.available_minutes)} min`),
-      account.free_minutes ? stat("Free minutes", account.free_minutes.next_grant_at ? `next ${when(account.free_minutes.next_grant_at)}` : "on next request",
-        `last ${when(account.free_minutes.last_grant_at)}`) : null),
+      stat("Balance", unit(fmt(account.minutes), "min"), null, "lit"),
+      stat("Reserved", unit(fmt(account.reserved_minutes), "min"), "by running jobs"),
+      stat("Available", unit(fmt(account.available_minutes), "min")),
+      account.free_minutes ? stat("Free minutes", account.free_minutes.next_grant_at ? when(account.free_minutes.next_grant_at) : "next request",
+        `last given ${when(account.free_minutes.last_grant_at)}`) : null),
     el("div", { class: "grid two" },
-      card("Balance changes", "Newest first", table([
-        { label: "When", render: (row) => when(row.at) }, { label: "Kind", key: "kind" },
+      iconCard("billing", "gold", "Balance changes", "Newest first", table([
+        { label: "When", render: (row) => when(row.at) }, { label: "Kind", render: (row) => badge(row.kind, row.kind === "used" ? "quiet" : row.kind === "voided" ? "bad" : row.kind === "admin" ? "violet" : "good") },
         { label: "Minutes", num: true, render: (row) => `${row.minutes > 0 ? "+" : ""}${fmt(row.minutes)}` },
         { label: "Note", render: (row) => row.note || "–" },
       ], account.balance_changes, { empty: "No changes recorded" })),
-      card("Purchases", "Without purchase tokens", table([
+      iconCard("backup", "green", "Purchases", "Without purchase tokens", table([
         { label: "Product", key: "product_id" }, { label: "Order", render: (row) => el("span", { class: "mono", text: row.order_id || "–" }) },
         { label: "Minutes", num: true, render: (row) => fmt(row.minutes) },
         { label: "Voided", render: (row) => (row.voided_at ? badge(when(row.voided_at), "bad") : "–") },
       ], account.purchases, { empty: "No purchases" }))),
-    el("h2", { class: "section-title", text: "Recent jobs" }),
-    card(null, null, table([
+    el("h2", { class: "section-title" }, "Recent jobs", el("small", { text: "open one for details" })),
+    el("section", { class: "card" }, table([
       { label: "Created", render: (row) => when(row.created_at) },
       { label: "Job", render: (row) => el("span", { class: "mono", text: shortId(row.job_id) }) },
       { label: "Status", render: (row) => statusBadge(row.status) },
       { label: "Length", num: true, render: (row) => span(row.duration_seconds) },
       { label: "Cost", num: true, render: (row) => fmt(row.cost_minutes) },
-    ], account.jobs, { onRow: (row) => openJob(row.job_id), empty: "No jobs" })));
+    ], account.jobs, { onRow: (row) => openJob(row.job_id), empty: "No jobs", emptyIcon: "jobs" })));
 }
 
 function creditDialog(account) {
   const direction = { value: "add" };
   const minutes = input({ type: "number", min: "1", max: String(me.credit_limit), step: "1", inputmode: "numeric", placeholder: "minutes" });
-  const modal = openModal({ title: `Change the balance of ${account.email || account.user_id}` });
+  const modal = openModal({ title: `Change the balance of ${account.email || account.user_id}`, subtitle: `Now ${fmt(account.minutes)} minutes` });
   const message = el("div");
   modal.body.append(
     el("div", { class: "pw-field" }, segmented([["add", "Add minutes"], ["take", "Take minutes away"]], "add", (value) => { direction.value = value; })),
-    field("Minutes", minutes, `At most ${me.credit_limit} at once from this page. Now ${fmt(account.minutes)}.`), message);
+    field("Minutes", minutes, `At most ${me.credit_limit} at once from this page`), message);
   modal.foot.append(el("button", { type: "button", class: "btn", text: "Cancel", onclick: modal.close }),
     el("button", { type: "button", class: "btn gold", text: "Next", onclick: () => {
       const count = Number.parseInt(minutes.value, 10);
@@ -667,7 +791,7 @@ function creditDialog(account) {
 function blockDialog(account) {
   const duration = select(DURATIONS, "1d");
   const modal = openModal({ title: `Block ${account.email || account.user_id}` });
-  modal.body.append(el("p", { class: "secondary", text: "They cannot start transcriptions or check a link's cost. Running jobs continue; they never see the reason." }),
+  modal.body.append(el("p", { class: "secondary pw-field", text: "They cannot start transcriptions or check a link's cost. Running jobs continue; they never see the reason." }),
     field("For", duration));
   modal.foot.append(el("button", { type: "button", class: "btn", text: "Cancel", onclick: modal.close }),
     el("button", { type: "button", class: "btn danger", text: "Next", onclick: () => {
@@ -683,7 +807,7 @@ function billing() {
   const results = el("div");
   const price = input({ type: "number", min: "0", step: "0.01", placeholder: "e.g. 1.20", inputmode: "decimal" });
   const load = async () => {
-    fill(results, loading());
+    fill(results, skeleton("dashboard"));
     let report;
     try {
       report = await api("/api/billing" + query(settings));
@@ -693,65 +817,70 @@ function billing() {
     }
     const parts = [];
     const short = (label) => (settings.per === "day" ? label.slice(5) : label);
+    const per = settings.per;
     if (report.minutes) {
       const totals = report.minutes.total;
       const periods = report.minutes.periods;
       parts.push(el("div", { class: "stats" },
-        stat("Sold", `${fmt(totals.purchase)} min`), stat("Given free", `${fmt(totals.free)} min`),
-        stat("Used", `${fmt(Math.abs(totals.used))} min`), stat("Voided", `${fmt(Math.abs(totals.voided))} min`),
-        stat("By hand", `${totals.admin > 0 ? "+" : ""}${fmt(totals.admin)} min`)));
+        stat("Sold", unit(fmt(totals.purchase), "min"), null, "lit"), stat("Given free", unit(fmt(totals.free), "min")),
+        stat("Used", unit(fmt(Math.abs(totals.used)), "min")), stat("Voided", unit(fmt(Math.abs(totals.voided)), "min"), null, totals.voided ? "alarm" : ""),
+        stat("By hand", unit(`${totals.admin > 0 ? "+" : ""}${fmt(totals.admin)}`, "min"))));
       if (report.minutes.recorded_since && report.minutes.recorded_since > report.since) {
-        parts.push(el("div", { class: "alert info", text: `Balance changes are recorded since ${when(report.minutes.recorded_since)}; earlier ones are not counted.` }));
+        parts.push(alertBox("info", `Balance changes are recorded since ${when(report.minutes.recorded_since)}; earlier ones are not counted.`));
       }
       const labels = periods.map((row) => row.period);
       parts.push(el("div", { class: "grid two" },
-        chartCard("Minutes added", `Per ${settings.per}, UTC`, {
-          labels, shortLabel: short, unit: " min",
+        chartCard("Minutes added", `Sold and given free, per ${per}, UTC`, {
+          labels, shortLabel: short, suffix: " min",
+          figure: unit(fmt(totals.purchase + totals.free), "min in this period"),
           series: [
             { name: "Sold", cls: "s1", values: periods.map((row) => row.purchase) },
             { name: "Free", cls: "s2", values: periods.map((row) => row.free) },
           ],
         }),
-        chartCard("Minutes used", `By transcriptions, per ${settings.per}`, {
-          labels, shortLabel: short, unit: " min",
+        chartCard("Minutes used", `By transcriptions, per ${per}`, {
+          labels, shortLabel: short, suffix: " min",
+          figure: unit(fmt(Math.abs(totals.used)), "min in this period"),
           series: [{ name: "Used", cls: "s1", values: periods.map((row) => Math.abs(row.used)) }],
         })));
     } else {
-      parts.push(el("div", { class: "alert info", text: "Billing is off, so there are no minutes to report." }));
+      parts.push(alertBox("info", "Billing is off, so there are no minutes to report."));
     }
     const jobLabels = [...new Set(report.jobs.periods.map((row) => row.period))].sort();
     const jobsFor = (backend) => jobLabels.map((label) => {
       const row = report.jobs.periods.find((one) => one.period === label && one.backend === backend);
       return row ? row.jobs : 0;
     });
+    const completed = report.jobs.periods.reduce((sum, row) => sum + row.jobs, 0);
     const hours = report.jobs.remote_seconds / 3600;
     const cost = () => {
       const perHour = Number.parseFloat(price.value);
-      return Number.isFinite(perHour) && perHour >= 0 ? `≈ ${(hours * perHour).toFixed(2)} at ${perHour}/h` : "enter your price per hour";
+      return Number.isFinite(perHour) && perHour >= 0 ? `≈ ${(hours * perHour).toFixed(2)}` : "–";
     };
-    const costNote = el("span", { text: cost() });
-    price.oninput = () => { costNote.textContent = cost(); };
+    const costValue = el("span", { text: cost() });
+    price.oninput = () => { costValue.textContent = cost(); };
     parts.push(el("div", { class: "grid two" },
-      chartCard("Completed jobs", `Per ${settings.per} and backend; records are kept for ${span(report.jobs.records_kept_seconds)}`, {
-        labels: jobLabels, shortLabel: short,
+      chartCard("Completed jobs", `Per ${per} and backend; records are kept for ${span(report.jobs.records_kept_seconds)}`, {
+        labels: jobLabels, shortLabel: short, figure: unit(fmt(completed), "jobs"),
         series: [{ name: "Local", cls: "s1", values: jobsFor("local") }, { name: "Remote", cls: "s2", values: jobsFor("remote") }],
       }),
-      card("Remote GPU time", "From start to finish, including the download, so it overstates billed GPU time",
-        el("div", { class: "stats" }, stat("Hours", hours.toFixed(1)), el("div", { class: "stat" }, el("div", { class: "label", text: "Estimated cost" }), el("div", { class: "note" }, costNote))),
+      iconCard("cloud", "violet", "Remote GPU time", "From start to finish, including the download, so it overstates billed GPU time",
+        el("div", { class: "stats" }, stat("Hours", hours.toFixed(1)), stat("Estimated cost", costValue, "at your price per hour")),
         field("Your price per GPU hour", price))));
     if (report.negative_balances) {
       const negative = report.negative_balances;
-      parts.push(el("h2", { class: "section-title", text: "Negative balances" }), card(null,
-        negative.count ? `${negative.count} ${negative.count === 1 ? "user owes" : "users owe"} ${fmt(negative.owed_minutes)} minutes: a refunded purchase's minutes were already used` : "No user owes minutes",
-        table([{ label: "Email", render: (row) => row.email || row.user_id }, { label: "Minutes", num: true, render: (row) => fmt(row.minutes) }],
-          negative.users, { onRow: (row) => openUser(row.user_id), empty: "None" }),
-        report.voided_synced_at ? el("p", { class: "pw-hint", text: `Voided purchases last read from Google Play ${ago(report.voided_synced_at)}` }) : null));
+      parts.push(el("h2", { class: "section-title" }, "Negative balances", el("small", { text: "a refunded purchase's minutes were already used" })),
+        el("section", { class: "card" },
+          negative.count ? el("p", { class: "secondary pw-field", text: `${plural(negative.count, "user owes", "users owe")} ${fmt(negative.owed_minutes)} minutes` }) : null,
+          table([{ label: "Account", render: (row) => row.email || row.user_id }, { label: "Minutes", num: true, render: (row) => fmt(row.minutes) }],
+            negative.users, { onRow: (row) => openUser(row.user_id), empty: "No user owes minutes", emptyIcon: "users" }),
+          report.voided_synced_at ? el("p", { class: "pw-hint", text: `Voided purchases last read from Google Play ${ago(report.voided_synced_at)}` }) : null));
     }
-    fill(results, ...parts);
+    fill(results, parts);
   };
-  fill(main, 
+  fill(main,
     head("Billing", "Whether the price per minute covers the GPU time; all times UTC"),
-    el("div", { class: "btn-row pw-field" },
+    el("div", { class: "toolbar" },
       segmented([["day", "Per day"], ["month", "Per month"]], "day", (value) => { settings.per = value; load(); }),
       segmented([["7d", "7 days"], ["30d", "30 days"], ["90d", "90 days"], ["365d", "1 year"]], "30d", (value) => { settings.since = value; load(); })),
     results);
@@ -761,18 +890,19 @@ function billing() {
 // --- Limits ------------------------------------------------------------------------------------
 
 async function limitsView() {
-  fill(main, head("Limits", "Temporary controls; they never stop running or queued jobs"), loading());
+  const subtitle = "Temporary controls; they never stop running or queued jobs";
+  fill(main, head("Limits", subtitle), skeleton("dashboard"));
   let data;
   try {
-    data = await api("/api/limits");
+    [data] = await Promise.all([api("/api/limits"), loadStatus().catch(() => null)]);
   } catch (error) {
-    fill(main, head("Limits", null), errorBox(error));
+    fill(main, head("Limits", subtitle), errorBox(error));
     return;
   }
   const lasting = (expires) => (expires ? `for ${span(expires)} more` : "until removed");
   const paused = data.paused, links = data.links_off, perUser = data.per_user_limit;
-  const messageDialog = (action, title, defaultHint) => {
-    const message = input({ maxlength: "200", placeholder: defaultHint });
+  const messageDialog = (action, title, defaultText) => {
+    const message = input({ maxlength: "200", placeholder: defaultText });
     const duration = select(DURATIONS, "1h");
     const modal = openModal({ title });
     modal.body.append(field("What users are told", message, "Leave empty for the default message"), field("For", duration));
@@ -793,72 +923,84 @@ async function limitsView() {
         change("limits.per_user", { limit: Number.parseInt(limit.value, 10), for: duration.value || null }, { title: "Change the per-user limit" });
       } }));
   };
-  const button = (action, text, kind, onclick) => (canChange(action) ? el("button", { type: "button", class: `btn ${kind}`, text, onclick }) : null);
-  fill(main, 
-    head("Limits", canChange("limits.pause") ? "Temporary controls; they never stop running or queued jobs" : "Read-only here; change limits on the server: python scripts/admin.py limits"),
+  const action = (name, text, color, onclick) => (canChange(name) ? qbtn(text, color, onclick) : null);
+  const state = (on, offText, onText, detail) => el("div", {}, on ? badge(onText, "warn") : badge(offText, "good"),
+    detail ? el("p", { class: "secondary pw-hint", text: detail }) : null);
+  fill(main,
+    head("Limits", canChange("limits.pause") ? subtitle : "Read-only here; change limits on the server: python scripts/admin.py limits"),
     el("div", { class: "grid three" },
-      card("Submissions", null,
-        paused ? el("div", {}, badge("paused", "warn"), el("p", { class: "secondary", text: ` ${lasting(paused.expires_in)}: ${paused.message}` })) : badge("accepted", "good"),
-        el("div", { class: "btn-row pw-field" },
-          paused ? button("limits.resume", "Resume", "gold", () => change("limits.resume", {}, { title: "Accept new transcriptions" }))
-            : button("limits.pause", "Pause…", "danger", () => messageDialog("limits.pause", "Pause new transcriptions", "New transcriptions are paused; try again later")))),
-      card("Video links", "Uploads are accepted either way",
-        links ? el("div", {}, badge("off", "warn"), el("p", { class: "secondary", text: ` ${lasting(links.expires_in)}: ${links.message}` })) : badge("accepted", "good"),
-        el("div", { class: "btn-row pw-field" },
-          links ? button("limits.links_on", "Turn on", "gold", () => change("limits.links_on", {}, { title: "Accept video links" }))
-            : button("limits.links_off", "Turn off…", "danger", () => messageDialog("limits.links_off", "Turn video links off", "Video links are not accepted at the moment; upload the file instead")))),
-      card("Per-user limit", "Jobs in progress per signed-in user",
-        el("div", { class: "stat" }, el("div", { class: "value", text: fmt(perUser ? perUser.limit : data.configured_per_user_limit) }),
-          el("div", { class: "note", text: perUser ? `${lasting(perUser.expires_in)}; MAX_ACTIVE_JOBS_PER_USER is ${data.configured_per_user_limit}` : "MAX_ACTIVE_JOBS_PER_USER" })),
-        el("div", { class: "btn-row pw-field" },
-          button("limits.per_user", "Change…", "", perUserDialog),
-          perUser ? button("limits.per_user", "Back to the setting", "", () => change("limits.per_user", { limit: null }, { title: "Per-user limit back to the setting" })) : null))),
-    el("h2", { class: "section-title", text: "Video sites" }),
-    card(null, "A site that rate-limits the server is refused for a while, then read one link at a time",
-      table([
-        { label: "Site", key: "site" },
-        { label: "State", render: (row) => (row.refused ? badge("refused", "bad") : row.recovering ? badge("recovering", "warn") : badge("accepted", "good")) },
-        { label: "Until", render: (row) => (row.refused && row.refused.expires_in ? `${span(row.refused.expires_in)} more` : "–") },
-        { label: "Reason", render: (row) => (row.refused && row.refused.reason) || row.last_reason || "–" },
-        { label: "", render: (row) => button("limits.sites_reset", "Accept again…", "", () => change("limits.sites_reset", { site: row.site }, { title: `Accept ${row.site} again` })) },
-      ], data.video_sites, { empty: "No site has refused the server" })),
-    el("h2", { class: "section-title", text: "Blocked users" }),
-    card(null, null, table([
-      { label: "User", render: (row) => row.email || row.user_id },
+      iconCard("jobs", paused ? "red" : "green", "Submissions", "New transcriptions",
+        state(paused, "accepted", "paused", paused ? `${lasting(paused.expires_in)}: ${paused.message}` : null),
+        el("div", { class: "btn-row" },
+          paused ? action("limits.resume", "Resume", "c-green", () => change("limits.resume", {}, { title: "Accept new transcriptions" }))
+            : action("limits.pause", "Pause…", "c-red", () => messageDialog("limits.pause", "Pause new transcriptions", "New transcriptions are paused; try again later")))),
+      iconCard("video", links ? "red" : "green", "Video links", "Uploads are accepted either way",
+        state(links, "accepted", "off", links ? `${lasting(links.expires_in)}: ${links.message}` : null),
+        el("div", { class: "btn-row" },
+          links ? action("limits.links_on", "Turn on", "c-green", () => change("limits.links_on", {}, { title: "Accept video links" }))
+            : action("limits.links_off", "Turn off…", "c-red", () => messageDialog("limits.links_off", "Turn video links off", "Video links are not accepted at the moment; upload the file instead")))),
+      iconCard("users", perUser ? "gold" : "blue", "Per-user limit", "Jobs in progress per signed-in user",
+        el("div", { class: "chart-figure" }, fmt(perUser ? perUser.limit : data.configured_per_user_limit),
+          el("small", { text: perUser ? `${lasting(perUser.expires_in)} · setting is ${data.configured_per_user_limit}` : "MAX_ACTIVE_JOBS_PER_USER" })),
+        el("div", { class: "btn-row" },
+          action("limits.per_user", "Change…", "c-gold", perUserDialog),
+          perUser ? action("limits.per_user", "Back to the setting", "c-grey", () => change("limits.per_user", { limit: null }, { title: "Per-user limit back to the setting" })) : null))),
+    el("h2", { class: "section-title" }, "Video sites", el("small", { text: "a site that rate-limits the server is refused for a while" })),
+    el("section", { class: "card" }, table([
+      { label: "Site", key: "site" },
+      { label: "State", render: (row) => (row.refused ? badge("refused", "bad") : row.recovering ? badge("recovering", "warn") : badge("accepted", "good")) },
+      { label: "Until", render: (row) => (row.refused && row.refused.expires_in ? `${span(row.refused.expires_in)} more` : "–") },
+      { label: "Reason", render: (row) => (row.refused && row.refused.reason) || row.last_reason || "–" },
+      { label: "", render: (row) => action("limits.sites_reset", "Accept again…", "c-green", () => change("limits.sites_reset", { site: row.site }, { title: `Accept ${row.site} again` })) },
+    ], data.video_sites, { empty: "No site has refused the server", emptyIcon: "video" })),
+    el("h2", { class: "section-title" }, "Blocked users", el("small", { text: "they never see the reason" })),
+    el("section", { class: "card" }, table([
+      { label: "Account", render: (row) => row.email || row.user_id },
       { label: "For", render: (row) => lasting(row.expires_in) },
       { label: "Reason", render: (row) => row.reason || "–" },
-      { label: "", render: (row) => button("limits.unblock", "Unblock…", "", () => change("limits.unblock", { user: row.user_id }, { title: `Unblock ${row.email || row.user_id}` })) },
-    ], data.blocked, { empty: "No one is blocked" })));
+      { label: "", render: (row) => action("limits.unblock", "Unblock…", "c-green", () => change("limits.unblock", { user: row.user_id }, { title: `Unblock ${row.email || row.user_id}` })) },
+    ], data.blocked, { empty: "No one is blocked", emptyIcon: "shield" })));
 }
 
 // --- Audit -----------------------------------------------------------------------------------------
 
 async function auditView() {
-  fill(main, head("Audit log", "Every admin action, newest first"), loading());
+  const subtitle = "Every admin action, newest first; the billing backups include it";
+  fill(main, head("Audit log", subtitle), skeleton());
   let rows;
   try {
     rows = await api("/api/audit?limit=200");
   } catch (error) {
-    fill(main, head("Audit log", null), errorBox(error));
+    fill(main, head("Audit log", subtitle), errorBox(error));
     return;
   }
-  const filter = input({ placeholder: "filter by action or who" });
+  const filters = { kind: "", text: "" };
+  const kinds = {
+    changes: (row) => !row.action.startsWith("web."),
+    views: (row) => row.action === "web.user_view" || row.action === "web.user_search",
+    access: (row) => row.action === "web.lower" || row.action === "web.restore",
+  };
+  const text = searchBox({ placeholder: "filter by action or who" });
   const results = el("div");
   const show = () => {
-    const text = filter.value.trim().toLowerCase();
-    const shown = text ? rows.filter((row) => `${row.action} ${row.actor}`.toLowerCase().includes(text)) : rows;
-    fill(results, card(null, null, table([
+    const needle = filters.text.toLowerCase();
+    const shown = rows.filter((row) => (!filters.kind || kinds[filters.kind](row)) && (!needle || `${row.action} ${row.actor}`.toLowerCase().includes(needle)));
+    fill(results, el("section", { class: "card" }, table([
       { label: "When", render: (row) => when(row.at) },
       { label: "Who", render: (row) => el("span", { class: "mono", text: row.actor }) },
-      { label: "Action", render: (row) => badge(row.action, row.action.startsWith("web.") ? "info" : "busy") },
+      { label: "Action", render: (row) => badge(row.action, kinds.access(row) ? "bad" : kinds.views(row) ? "info" : "busy") },
       { label: "Target", render: (row) => (row.target ? el("span", { class: "mono", text: shortId(row.target) }) : "–") },
       { label: "Detail", render: (row) => row.detail || "–" },
       { label: "Reason", render: (row) => row.reason || "–" },
-    ], shown, { empty: "No admin actions match" })));
+    ], shown, { empty: "No admin actions match", emptyIcon: "audit" })));
   };
-  filter.addEventListener("input", show);
-  fill(main, head("Audit log", "Every admin action, newest first; the billing backups include it"),
-    el("div", { class: "filters" }, field("Filter", filter)), results);
+  text.box.addEventListener("input", () => { filters.text = text.box.value.trim(); show(); });
+  fill(main, head("Audit log", subtitle, refreshButton(() => auditView())),
+    el("div", { class: "toolbar" },
+      chips([["", "All", "c-grey"], ["changes", "Changes", "c-gold"], ["views", "Account views", "c-blue"], ["access", "Access", "c-red"]],
+        "", (value) => { filters.kind = value; show(); }),
+      el("div", {}, text.node)),
+    results);
   show();
 }
 
@@ -873,16 +1015,17 @@ const MODE_TEXT = {
 };
 
 function accessView() {
-  const now = el("div", { class: "stats" }, stat("Access now", me.effective), stat("ADMIN_WEB_MODE", me.configured));
+  const now = el("div", { class: "stats" }, stat("Access now", me.effective, null, "lit"), stat("ADMIN_WEB_MODE", me.configured),
+    stat("Changes allowed", me.actions.length ? String(me.actions.length) : "none"));
   if (!me.lower_to.length) {
-    fill(main, head("Access", "Lower this page's access"), now, el("div", { class: "alert info", text: "It cannot be lowered further." }));
+    fill(main, head("Access", "Lower this page's access"), now, alertBox("info", "It cannot be lowered further."));
     return;
   }
   const reason = input({ maxlength: "300", placeholder: "Required; no email addresses" });
   const choices = me.lower_to.map((mode) => el("label", {}, el("input", { type: "radio", name: "mode", value: mode }),
     el("span", {}, el("strong", { text: mode }), el("small", { text: MODE_TEXT[mode] }))));
   const message = el("div");
-  const next = el("button", { type: "button", class: "btn", text: "Continue" });
+  const next = el("button", { type: "button", class: "btn danger", text: "Continue" });
   next.addEventListener("click", async () => {
     const chosen = choices.map((label) => label.querySelector("input")).find((radio) => radio.checked);
     if (!chosen) { fill(message, errorBox(new Error("Choose the new access"))); return; }
@@ -893,11 +1036,12 @@ function accessView() {
       fill(message, errorBox(error));
     }
   });
-  fill(main, 
+  fill(main,
     head("Access", "Lower this page's access, for example when a signed-in device is lost"),
     now,
-    el("div", { class: "alert warn", text: "Lowering applies at once to every administrator. Nothing on this page raises it again: only the server's command line does (python scripts/admin.py web restore)." }),
-    card("Lower to", null, el("div", { class: "choice" }, choices), field("Reason", reason), message, el("div", { class: "btn-row" }, next)));
+    alertBox("warn", "Lowering applies at once to every administrator. Nothing on this page raises it again: only the server's command line does (python scripts/admin.py web restore)."),
+    el("section", { class: "card lit-card" }, cardHead("access", "red", "Lower to", "Choose the new access; you will type its name to confirm"),
+      el("div", { class: "choice" }, choices), field("Reason", reason), message, el("div", { class: "btn-row" }, next)));
 }
 
 function lowerConfirm(planned, reason) {
@@ -920,7 +1064,9 @@ function lowerConfirm(planned, reason) {
     }
   });
   modal.body.append(
-    facts([["From", planned.current], ["To", planned.mode], ["Applies to", planned.applies_to], ["Undo", planned.undo]]),
+    el("div", { class: "change-summary" },
+      el("div", { class: "delta" }, planned.current, el("span", { class: "arrow", text: "→" }), planned.mode),
+      facts([["Applies to", planned.applies_to], ["Undo", planned.undo]])),
     field(el("span", {}, "Type ", el("strong", { class: "mono", text: planned.type_to_confirm }), " to confirm, within two minutes"), typed),
     message);
   modal.foot.append(el("button", { type: "button", class: "btn", text: "Back out", onclick: modal.close }), apply);
@@ -943,10 +1089,13 @@ function open(view) {
   // Only the section's name: never an account or a job, which stay out of the history.
   history.replaceState(null, "", `#${view}`);
   clearInterval(refreshTimer);
-  if (view === "overview") {
-    // Only reads what is live now; nothing is kept between refreshes.
-    refreshTimer = setInterval(() => { if (document.visibilityState === "visible" && currentView === "overview" && !modalRoot.firstChild) overview(); }, REFRESH_SECONDS * 1000);
-  }
+  // Only reads what is live now; nothing is kept between refreshes.
+  refreshTimer = setInterval(() => {
+    if (document.visibilityState !== "visible" || modalRoot.firstChild) return;
+    if (currentView === "overview") overview();
+    else loadStatus().catch(() => {});
+  }, REFRESH_SECONDS * 1000);
+  window.scrollTo(0, 0);
   VIEWS[view]();
 }
 
@@ -959,7 +1108,7 @@ async function start() {
     me = await api("/api/me");
   } catch (error) {
     document.getElementById("who").textContent = "Not signed in";
-    fill(main, head("Server admin", null), errorBox(error));
+    fill(main, head("Server panel", null), errorBox(error));
     return;
   }
   document.getElementById("who").textContent = me.email;
@@ -971,11 +1120,17 @@ async function start() {
     nav.hidden = true;
     clearInterval(refreshTimer);
     fill(main, head("Disabled", "This page's access was lowered"),
-      (me.lowerings || []).map((row) => el("div", { class: "alert error", text: `Lowered to ${row.mode} by ${row.actor} at ${when(row.at)}: ${row.reason || "no reason"}` })),
-      card("Restore it on the server", null, el("pre", { class: "error-text", text: "python scripts/admin.py web restore --reason \"…\"" })));
+      (me.lowerings || []).map((row) => alertBox("error", `Lowered to ${row.mode} by ${row.actor} at ${when(row.at)}: ${row.reason || "no reason"}`)),
+      el("section", { class: "card lit-card" }, cardHead("access", "gold", "Restore it on the server", "Only the command line raises it again"),
+        el("pre", { class: "code", text: "python scripts/admin.py web restore --reason \"…\"" })));
     return;
   }
   nav.hidden = false;
+  try {
+    await loadStatus();
+  } catch {
+    // Each view reports its own errors.
+  }
   const asked = location.hash.slice(1);
   open(currentView && VIEWS[currentView] ? currentView : Object.hasOwn(VIEWS, asked) ? asked : "overview");
 }
