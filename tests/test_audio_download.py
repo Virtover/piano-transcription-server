@@ -3,6 +3,7 @@ import subprocess
 
 import pytest
 
+from app import media
 from app.transcription import audio
 
 
@@ -49,6 +50,8 @@ def test_download_is_converted_only_by_the_restricted_ffmpeg(processes, tmp_path
     assert "-x" not in yt_dlp and "--audio-format" not in yt_dlp
     assert ffmpeg[0] == "ffmpeg"
     assert option(ffmpeg, "-protocol_whitelist") == "file"
+    # Sites serve formats uploads may not have, such as MPEG-TS.
+    assert "-format_whitelist" not in ffmpeg
     # The finished download, never the partial file.
     assert option(ffmpeg, "-i") == str(tmp_path / "download.webm")
     assert downloaded.path == tmp_path / "audio.wav"
@@ -91,6 +94,7 @@ def test_upload_is_converted_up_to_the_paid_duration(processes, tmp_path, monkey
 
     # The API measured the length already; the worker only checks the format.
     assert probes == [False]
+    assert option(processes[0], "-format_whitelist") == option(media.UPLOAD_INPUT_OPTIONS, "-format_whitelist")
     assert option(processes[0], "-t") == f"{60 + audio.DURATION_TOLERANCE:.3f}"
     assert prepared.metadata["duration"] == 60
 

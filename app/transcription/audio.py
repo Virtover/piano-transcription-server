@@ -15,7 +15,7 @@ from app import video_sites
 from app.errors import SourceError, UserFacingError
 from app.transcription.cancellation import TranscriptionCancelled
 from app.transcription.device import cpu_thread_count
-from app.media import probe_audio
+from app.media import UPLOAD_INPUT_OPTIONS, probe_audio
 from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url
 from app.video_info import (  # noqa: F401  (format_upload_date is re-exported)
     VIDEO_INFO_FILE_NAME,
@@ -209,9 +209,12 @@ def convert_to_wav(
     output_dir: Path,
     cancellation_callback: CancellationCallback | None = None,
     max_seconds: float | None = None,
+    upload: bool = False,
 ) -> Path:
     """Convert to 44.1 kHz mono WAV, stopping DURATION_TOLERANCE past
-    max_seconds, the duration the job was charged for."""
+    max_seconds, the duration the job was charged for. An upload may only
+    be read by the demuxers of the formats uploads may have; a download
+    can be in any format a site serves."""
     wav_path = output_dir / "audio.wav"
 
     ffmpeg_threads = ffmpeg_thread_count()
@@ -220,8 +223,7 @@ def convert_to_wav(
         "-y",
         "-nostdin",
         # Uploaded files are untrusted: never let ffmpeg open URLs.
-        "-protocol_whitelist",
-        "file",
+        *(UPLOAD_INPUT_OPTIONS if upload else ["-protocol_whitelist", "file"]),
         "-i",
         str(input_path),
         "-vn",
@@ -260,6 +262,7 @@ def prepare_upload(
         output_dir,
         cancellation_callback,
         max_seconds,
+        upload=True,
     )
     # The upload is kept until the job ends, so a job moved between local
     # and remote can be converted again.

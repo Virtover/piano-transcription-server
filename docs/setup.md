@@ -96,9 +96,9 @@ Requests without the correct password get `401` with `{"detail": "Server passwor
 
 ## 👤 Running as a non-root user
 
-The API, workers, and cleanup service run as user ID `10001`, not root, so a bug in a video download tool or in ffmpeg cannot reach the rest of the container as root.
+The API, workers, and cleanup service run as user ID `10001`, not root, so a bug in a video download tool or in ffmpeg cannot reach the rest of the container as root. They also have no Linux capabilities and cannot gain privileges through a setuid program (`no-new-privileges`); the cleanup service's files are read-only except `/data`. Redis and PostgreSQL start as root only to switch to their own user, and cannot gain privileges after that. The workers, which download and decode untrusted media, cannot see the Cloudflare tunnel token: their copy of `secrets/` has `secrets/cloudflare` covered by an empty folder.
 
-Nothing needs to be done by hand. Docker creates a missing `billing-data` folder as root, and volumes from older versions belong to root, so before the other services start, the `prepare` service gives `/data` and `billing-data` to user `10001` and exits. It runs as root without a network and never touches the PostgreSQL cluster in `billing-data/postgres`. If a service still reports a directory it cannot write, run `docker compose run --rm prepare` and read its output.
+Nothing needs to be done by hand. Docker creates a missing `billing-data` folder as root, and volumes from older versions belong to root, so before the other services start, the `prepare` service gives `/data` and `billing-data` to user `10001` and exits. It runs as root without a network or secrets, keeps only root's powers to change owners and modes, and never touches the PostgreSQL cluster in `billing-data/postgres`. If a service still reports a directory it cannot write, run `docker compose run --rm prepare` and read its output.
 
 On Linux, the folders in `billing-data` keep the group of the user who ran `python scripts/server.py start` and are writable by it, so you can copy, move, or delete backups without `sudo`. The PostgreSQL cluster stays readable only by PostgreSQL.
 

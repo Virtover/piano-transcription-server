@@ -22,6 +22,18 @@ ALLOWED_FORMATS = {
     "webm",
 }
 
+# ffmpeg options for every command that reads an upload. Checking the format
+# name after probing is not enough: a concat file is opened, along with the
+# files it names, while it is probed. With the format whitelist only the
+# demuxers above ever read it; ffmpeg matches a name such as m4a against
+# the demuxer's list of names, mov,mp4,m4a,3gp,3g2,mj2.
+UPLOAD_INPUT_OPTIONS = [
+    "-protocol_whitelist",
+    "file",
+    "-format_whitelist",
+    ",".join(sorted(ALLOWED_FORMATS)),
+]
+
 
 # Decoding a file to measure it may take this long; longer files are rejected.
 MEASURE_TIMEOUT = 180
@@ -45,8 +57,7 @@ def probe_audio(path: Path, measure: bool = True, max_seconds: float | None = No
                 "ffprobe",
                 "-v",
                 "error",
-                "-protocol_whitelist",
-                "file",
+                *UPLOAD_INPUT_OPTIONS,
                 "-select_streams",
                 "a",
                 "-show_entries",
@@ -85,7 +96,7 @@ def probe_audio(path: Path, measure: bool = True, max_seconds: float | None = No
 
 def measure_audio(path: Path, max_seconds: float | None = None) -> float:
     """The length of the first audio stream, found by decoding all of it."""
-    command = ["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file", "-i", str(path)]
+    command = ["ffmpeg", "-nostdin", "-v", "error", *UPLOAD_INPUT_OPTIONS, "-i", str(path)]
     if max_seconds is not None:
         # Enough to see the file is too long, without decoding the rest.
         command += ["-t", f"{max_seconds + 1:.3f}"]

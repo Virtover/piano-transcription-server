@@ -16,6 +16,15 @@ x-logging: &logging
     max-size: 20m
     max-file: "5"
 
+# The services run as user ID 10001 and need no Linux capability. Without
+# any, and unable to gain privileges through a setuid program, a process
+# taken over through a media file or a video site (ffmpeg, yt-dlp, deno)
+# cannot become root in its container.
+x-unprivileged: &unprivileged
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+
 services:
 
   # Gives /data and billing-data to the services' non-root user, then exits.
@@ -35,6 +44,12 @@ services:
       - data:/data
       - ./billing-data:/billing
     command: ["python", "-m", "app.prepare"]
+    # Root only to change owners and modes: of root's powers it keeps those
+    # alone. FSETID keeps the setgid bit on folders of another group.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, FSETID]
+    security_opt:
+      - no-new-privileges:true
     restart: "no"
     logging: *logging
 
@@ -69,6 +84,7 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+    <<: *unprivileged
     restart: unless-stopped
     logging: *logging
 
@@ -91,6 +107,11 @@ services:
       - ./secrets/redis/app:/run/redis/password:ro
       - type: tmpfs
         target: /run/secrets/redis
+      # The tunnel token, with which anyone could receive the API's traffic,
+      # is hidden too: this service downloads and decodes untrusted media.
+      # scripts/server.py creates the folder, which must exist to be hidden.
+      - type: tmpfs
+        target: /run/secrets/cloudflare
     depends_on:
       prepare:
         condition: service_completed_successfully
@@ -99,6 +120,7 @@ services:
       postgres:
         condition: service_healthy
     gpus: all
+    <<: *unprivileged
     restart: unless-stopped
     logging: *logging
 
@@ -121,6 +143,9 @@ services:
       - ./secrets/redis/app:/run/redis/password:ro
       - type: tmpfs
         target: /run/secrets/redis
+      # The tunnel token is hidden too, as from the worker.
+      - type: tmpfs
+        target: /run/secrets/cloudflare
     depends_on:
       prepare:
         condition: service_completed_successfully
@@ -129,6 +154,7 @@ services:
       postgres:
         condition: service_healthy
     command: ["python", "-m", "app.worker.launcher", "remote"]
+    <<: *unprivileged
     restart: unless-stopped
     logging: *logging
 
@@ -150,6 +176,11 @@ services:
       redis:
         condition: service_healthy
     command: ["python", "-m", "app.worker.cleanup"]
+    <<: *unprivileged
+    # It writes only to /data.
+    read_only: true
+    tmpfs:
+      - /tmp
     restart: unless-stopped
     logging: *logging
 
@@ -194,8 +225,9 @@ services:
 
   # Optional HTTPS access through a Cloudflare Tunnel. Started only with
   # COMPOSE_PROFILES=cloudflare in .env. It connects out to Cloudflare and
-  # forwards to the API on this network, so no port is opened. Only it gets
-  # the token's folder. See docs/cloudflare-tunnel.md.
+  # forwards to the API on this network, so no port is opened. Besides it,
+  # only the API sees the token, for `python -m app.config check`; the
+  # workers' copy of secrets/ hides it. See docs/cloudflare-tunnel.md.
   cloudflared:
     image: cloudflare/cloudflared:2026.10.0
     profiles: [cloudflare]
@@ -211,6 +243,8 @@ services:
       - ./secrets/cloudflare:/run/secrets/cloudflare:ro
     depends_on:
       - api
+    # The image runs as a non-root user that needs no capability.
+    <<: *unprivileged
     restart: unless-stopped
     logging: *logging
 
@@ -237,6 +271,10 @@ services:
       - redis_data:/data
       - ./redis:/redis:ro
       - ./secrets/redis:/run/secrets/redis:ro
+    # Its entrypoint starts as root and switches to the redis user; nothing
+    # may gain privileges after that.
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     logging: *logging
 
@@ -259,6 +297,9 @@ services:
       # it does not move the data; see "Moving the billing database" in
       # docs/configuration.md.
       - ${POSTGRES_DATA_LOCATION:-./billing-data/postgres}:/var/lib/postgresql/data
+    # As for Redis: root only until it switches to the postgres user.
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     logging: *logging
 

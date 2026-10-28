@@ -269,7 +269,7 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `admin-web/postgres-read-only`, `admin-web/postgres-read-write` | The passwords of the [admin web page's](administration.md#-admin-web-page) PostgreSQL roles, one per mode. `scripts/server.py` creates it, and the API gives the role its rights. |
 | `error_report_token` | Optional. The token sent with every error report to `ERROR_REPORT_URL`. The website must have the same token. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
 
-The Cloudflare tunnel token is in a folder of its own, `secrets/cloudflare/tunnel_token`, because only the `cloudflared` service gets that folder. The Redis passwords are in `secrets/redis` for the same reason: only the `redis` service sees the folder. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
+The Cloudflare tunnel token is in a folder of its own, `secrets/cloudflare/tunnel_token`, so that it can be hidden: anyone with it can receive the API's traffic. Besides `cloudflared`, only the API sees it, for `check`; the workers, which process untrusted media, have the folder covered by an empty one. `scripts/server.py` creates the empty folder when it is missing, because Docker cannot cover a folder that does not exist. The Redis passwords are in `secrets/redis` for the same reason: only the `redis` service sees the folder. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
 
 Secrets are only read from these files: a variable with the same name in `.env` or the environment is ignored. Never commit the `secrets` folder.
 

@@ -121,7 +121,8 @@ async def maintenance_headers(request: Request, call_next):
     return response
 
 
-# Added last, so it runs first: without the password, nothing else is reached.
+# Runs before every route and the maintenance headers: without the password,
+# nothing else is reached. Only the security headers wrap it.
 @app.middleware("http")
 async def server_password(request: Request, call_next):
     if server_password_required(request.url.path) and not server_password_matches(request.headers):
@@ -131,6 +132,25 @@ async def server_password(request: Request, call_next):
             headers={"WWW-Authenticate": 'Basic realm="Piano Transcription Server", charset="UTF-8"'},
         )
     return await call_next(request)
+
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+# Added after the password check, so its refusals get the headers too.
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """No browser may guess a response's type or frame it. Answers under
+    /api hold a user's jobs, balance, and MIDI files, so no cache keeps them."""
+    response = await call_next(request)
+    response.headers.update(SECURITY_HEADERS)
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 @app.on_event("startup")

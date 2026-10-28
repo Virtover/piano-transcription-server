@@ -127,6 +127,44 @@ def test_prepare_runs_as_root_without_a_network_or_secrets():
     assert prepare["restart"] == "no"
 
 
+def test_no_service_can_gain_privileges():
+    for name, service in compose_services().items():
+        assert "no-new-privileges:true" in service["security_opt"], name
+
+
+@pytest.mark.parametrize("service", ["api", "worker", "remote-worker", "cleanup", "admin", "cloudflared"])
+def test_services_have_no_capabilities(service):
+    service = compose_services()[service]
+
+    assert service["cap_drop"] == ["ALL"]
+    assert "cap_add" not in service
+
+
+def test_prepare_keeps_only_the_capabilities_to_change_owners():
+    prepare = compose_services()["prepare"]
+
+    assert prepare["cap_drop"] == ["ALL"]
+    assert sorted(prepare["cap_add"]) == ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID"]
+
+
+@pytest.mark.parametrize("service", ["worker", "remote-worker"])
+def test_workers_cannot_read_the_tunnel_token(service):
+    # They download and decode untrusted media; with the token, anyone can
+    # run a connector of the tunnel and receive the API's traffic.
+    volumes = compose_services()[service]["volumes"]
+    folder = "/run/secrets/" + Path(config.TUNNEL_TOKEN_FILE).parent.as_posix()
+
+    assert "./secrets:/run/secrets:ro" in volumes
+    assert {"type": "tmpfs", "target": folder} in volumes
+
+
+def test_cleanup_cannot_write_outside_its_data():
+    cleanup = compose_services()["cleanup"]
+
+    assert cleanup["read_only"] is True
+    assert [volume for volume in cleanup["volumes"] if not volume.endswith(":ro")] == ["data:/data"]
+
+
 def test_every_service_rotates_its_logs():
     for name, service in compose_services().items():
         assert service["logging"]["driver"] == "json-file", name

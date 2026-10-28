@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app import config
+
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "server.py"
 spec = importlib.util.spec_from_file_location("server_script", SCRIPT)
 server = importlib.util.module_from_spec(spec)
@@ -397,7 +399,7 @@ def checkout(tmp_path):
 def test_new_installation_gets_env_and_password(checkout):
     created = server.prepare_files(checkout)
 
-    assert len(created) == 4
+    assert len(created) == 5
     assert (checkout / ".env").read_text(encoding="utf-8") == "MAX_ACTIVE_JOBS=50\n"
     passwords = [
         (checkout / "secrets" / name).read_text(encoding="utf-8")
@@ -410,6 +412,7 @@ def test_new_installation_gets_env_and_password(checkout):
         assert not any(password in message for message in created)
     assert created[2] == "created random Redis passwords in secrets/redis: operator, app, admin-read-only, admin-read-write"
     assert created[3] == "created random admin web page passwords in secrets/admin-web: postgres-read-only, postgres-read-write"
+    assert created[4] == "created the empty folder secrets/cloudflare, for a Cloudflare Tunnel's token"
 
 
 def test_an_update_gets_the_missing_redis_passwords(checkout):
@@ -423,9 +426,32 @@ def test_an_update_gets_the_missing_redis_passwords(checkout):
     assert server.prepare_files(checkout) == [
         "created random Redis passwords in secrets/redis: app, admin-read-only, admin-read-write",
         "created random admin web page passwords in secrets/admin-web: postgres-read-only, postgres-read-write",
+        "created the empty folder secrets/cloudflare, for a Cloudflare Tunnel's token",
     ]
     assert (checkout / "secrets" / "redis" / "operator").read_text(encoding="utf-8") == "kept"
     assert (checkout / "secrets" / "redis" / "app").is_file()
+
+
+def test_tunnel_token_folder_exists_for_the_workers_to_hide(checkout):
+    # The workers mount an empty folder over it, which fails where none is.
+    server.prepare_files(checkout)
+
+    assert (checkout / "secrets" / "cloudflare").is_dir()
+    assert list((checkout / "secrets" / "cloudflare").iterdir()) == []
+
+
+def test_tunnel_token_folder_is_the_configured_one():
+    assert server.TUNNEL_TOKEN_FOLDER == "secrets/" + Path(config.TUNNEL_TOKEN_FILE).parent.as_posix()
+
+
+def test_tunnel_token_is_kept(checkout):
+    (checkout / "secrets" / "cloudflare").mkdir(parents=True)
+    (checkout / "secrets" / "cloudflare" / "tunnel_token").write_text("chosen", encoding="utf-8")
+
+    created = server.prepare_files(checkout)
+
+    assert not any("cloudflare" in message for message in created)
+    assert (checkout / "secrets" / "cloudflare" / "tunnel_token").read_text(encoding="utf-8") == "chosen"
 
 
 def test_billing_data_is_created_by_the_user_not_by_docker(checkout):
@@ -467,6 +493,7 @@ def test_existing_files_are_never_changed(checkout):
     (checkout / "secrets" / "redis").mkdir(parents=True)
     (checkout / "secrets" / "postgres_password").write_text("chosen", encoding="utf-8")
     (checkout / "secrets" / "admin-web").mkdir()
+    (checkout / "secrets" / "cloudflare").mkdir()
     for name in server.REDIS_USERS:
         (checkout / "secrets" / "redis" / name).write_text("chosen", encoding="utf-8")
     for name in server.ADMIN_WEB_DATABASE_PASSWORDS:

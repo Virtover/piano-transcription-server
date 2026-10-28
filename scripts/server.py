@@ -65,6 +65,8 @@ LOCAL_BACKUP = re.compile(r"^billing-(\d+)\.(?:sqlite3|dump)$")
 REDIS_USERS = ["operator", "app", "admin-read-only", "admin-read-write"]
 # The admin web page's PostgreSQL roles; the API creates them from these.
 ADMIN_WEB_DATABASE_PASSWORDS = ["postgres-read-only", "postgres-read-write"]
+# The folder of app.config.TUNNEL_TOKEN_FILE, which the workers hide.
+TUNNEL_TOKEN_FOLDER = "secrets/cloudflare"
 # redis-cli in the redis container, signed in as operator. A container from
 # before Redis had users has no password file and needs none. The password
 # goes through the environment, not the command line.
@@ -115,7 +117,24 @@ def prepare_files(root: Path) -> list[str]:
     # Created here rather than by Docker, which would make it root's. The
     # prepare service gives it to the services and keeps its group.
     (root / "billing-data" / "backups").mkdir(parents=True, exist_ok=True)
+    # Even without a tunnel: the workers hide the token's folder under an
+    # empty one, which Docker can only mount where a folder exists.
+    if create_folders(root, root / TUNNEL_TOKEN_FOLDER):
+        created.append(f"created the empty folder {TUNNEL_TOKEN_FOLDER}, for a Cloudflare Tunnel's token")
     return created
+
+
+def create_folders(root: Path, folder: Path) -> bool:
+    """Create folder and its missing parents below root, readable by the
+    services. Returns whether folder was created."""
+    if folder.is_dir():
+        return False
+    for path in [*reversed(folder.parents), folder]:
+        if path.is_relative_to(root) and path != root and not path.exists():
+            path.mkdir()
+            # PostgreSQL, Redis, and the services read the secrets as other users.
+            path.chmod(0o755)
+    return True
 
 
 def create_password(root: Path, relative: str) -> bool:
@@ -135,11 +154,7 @@ def create_password(root: Path, relative: str) -> bool:
             raise RuntimeError(f"{password} is a folder, not a file: move it away and start again") from None
     if password.exists():
         return False
-    for folder in reversed(password.parents):
-        if folder.is_relative_to(root) and folder != root and not folder.exists():
-            folder.mkdir()
-            # PostgreSQL, Redis, and the services read the secrets as other users.
-            folder.chmod(0o755)
+    create_folders(root, password.parent)
     try:
         # Letters and digits only, so it needs no quoting anywhere.
         password.write_text(secrets.token_hex(24), encoding="utf-8")

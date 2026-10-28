@@ -136,8 +136,18 @@ def ffmpeg(*arguments):
     subprocess.run(["ffmpeg", "-v", "error", "-y", *arguments], check=True)
 
 
+def test_only_allowed_demuxers_read_an_upload(monkeypatch, tmp_path):
+    commands = fake_ffprobe(monkeypatch, probe_output("mp3"))
+
+    probe_audio(tmp_path / "file")
+
+    for command in commands:
+        assert command[command.index("-format_whitelist") + 1].split(",") == sorted(media.ALLOWED_FORMATS)
+        assert command.index("-format_whitelist") < command.index(str(tmp_path / "file"))
+
+
 @requires_ffmpeg
-@pytest.mark.parametrize("suffix", ["wav", "mp3", "flac", "ogg", "m4a"])
+@pytest.mark.parametrize("suffix", ["wav", "mp3", "flac", "ogg", "m4a", "aiff", "wma"])
 def test_real_audio_files(tmp_path, suffix):
     path = tmp_path / f"tone.{suffix}"
     ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=3", str(path))
@@ -175,6 +185,20 @@ def test_real_playlist_cannot_reach_other_files(tmp_path):
 
     with pytest.raises(UnsupportedMedia):
         probe_audio(playlist)
+
+
+@requires_ffmpeg
+def test_real_concat_file_is_not_parsed(tmp_path):
+    # A concat file is recognised whatever its name, and while it is probed
+    # it opens the files it names next to it, such as another upload. It must
+    # be refused before that: as unreadable, not as an unsupported format,
+    # which ffprobe could only report after reading it.
+    ffmpeg("-f", "lavfi", "-i", "sine=duration=2", str(tmp_path / "audio.wav"))
+    upload = tmp_path / "upload.input"
+    upload.write_text("ffconcat version 1.0\nfile audio.wav\n")
+
+    with pytest.raises(UnsupportedMedia, match="not a readable"):
+        probe_audio(upload)
 
 
 @requires_ffmpeg

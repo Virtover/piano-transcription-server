@@ -36,7 +36,7 @@ docker compose run --rm api python -m app.config requirements
    unset token
    ```
 
-   The token is in a folder of its own because only `cloudflared` gets it. On Linux, `cloudflared` runs as user ID `65532`, so the file must be readable by it: files created this way are, unless your `umask` is strict.
+   The token is in a folder of its own so the workers, which process untrusted media, cannot see it. On Linux, `cloudflared` runs as user ID `65532`, so the file must be readable by it: files created this way are, unless your `umask` is strict.
 3. **Turn it on in `.env`:**
 
    ```env
