@@ -195,7 +195,7 @@ def main(arguments: list[str]) -> int:
     commands.add_parser("cancel", help="remove the notice")
     args = parser.parse_args(arguments)
 
-    redis = Redis.from_url(settings.service.redis_url, decode_responses=True)
+    redis = Redis.from_url(settings.service.redis_url, decode_responses=True, **settings.service.redis_options())
     if args.command == "schedule":
         try:
             delay = duration_seconds(args.delay, "delay", allow_zero=True)

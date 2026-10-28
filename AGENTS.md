@@ -31,6 +31,7 @@ python scripts/admin.py status                                  # live picture; 
 | `app/billing.py` | Billing database (PostgreSQL; SQLite only for legacy installs), also job diagnostics |
 | `app/backups.py` | `python -m app.backups`: billing backups, which are kept, and the encrypted off-site copies |
 | `app/error_report.py` | Optional error reports of the API and workers to `ERROR_REPORT_URL`, with secrets redacted |
+| `redis/` | The Redis users and their rules (`users.acl`), and the script that gives them to Redis at start |
 | `runpod/handler.py` | The RunPod Serverless handler, built with `Dockerfile.runpod` |
 | `app/admin/`, `app/controls.py`, `scripts/admin.py` | `python -m app.admin`: status, jobs, users, the billing report, and temporary limits the API reads from Redis; the host script runs it in the API container |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
@@ -56,6 +57,7 @@ For guided setup, use the skills in `.claude/skills/`: `setup-runpod` for outsou
 - `Set-Content -NoNewline <file> <value>` swaps its arguments in Windows PowerShell 5.1 and creates a file named after the secret. Always use `Set-Content -Path <file> -Value <value> -NoNewline`.
 - Only `secrets/` is git-ignored for secrets: check `git status` for stray files after writing one.
 - The services run as user ID 10001. The `prepare` Compose service (`app/prepare.py`) gives them `/data` and `billing-data` before every start; it must never touch the PostgreSQL cluster.
-- Starting without `secrets/postgres_password` makes Docker create an empty folder in its place. `scripts/server.py start` replaces it with a generated password.
+- Starting without `secrets/postgres_password` or a file in `secrets/redis` makes Docker create an empty folder in its place. `scripts/server.py start` and `restart` replace it with a generated password.
+- Redis refuses clients without a password. Every service signs in as `app` with `REDIS_PASSWORD_FILE`; only the `redis` service sees all of `secrets/redis`, which an empty mount hides from services that mount `secrets/`. A new Redis client must pass `**settings.service.redis_options()`; Dramatiq gets a client, because it ignores a password beside a URL. fakeredis does not enforce Redis's user rules.
 - The RunPod image installs PyTorch for a fixed CUDA version, `RUNPOD_CUDA_VERSION` in `app/requirements.py`; a test keeps `Dockerfile.runpod` in sync with it. pip's default PyTorch targets a newer CUDA and fails on hosts whose driver does not support it.
 - Every image build is about 8 GB. When Docker Desktop's disk fills up, builds fail with `error reading from server: EOF` and Docker stops starting. See "Freeing disk space" in `docs/setup.md`.

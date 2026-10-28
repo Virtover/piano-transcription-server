@@ -542,10 +542,55 @@ def check_error_report(config, http=requests) -> Result:
     return Result("Error reports", "ok", f"{url} accepted a test report")
 
 
+# --- Redis users ------------------------------------------------------------
+
+REDIS_USERS_HINT = "Start the stack with python scripts/server.py start, which creates secrets/redis; see redis/users.acl."
+
+
+def check_redis(config, connect: Callable | None = None) -> Result:
+    """Redis refuses a client without a password, and the services' user
+    cannot read its configuration. The probe only reads, so it is harmless
+    even if the user's rules were wrong."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    from redis import Redis
+    from redis.exceptions import AuthenticationError, NoPermissionError, RedisError, ResponseError
+
+    connect = connect or Redis.from_url
+    service = config.service
+    if not service.redis_password_file:
+        return Result("Redis users", "warn", "REDIS_PASSWORD_FILE is not set: Redis is used without a password",
+                      REDIS_USERS_HINT)
+    parts = urlsplit(service.redis_url)
+    anonymous = urlunsplit(parts._replace(netloc=parts.hostname + (f":{parts.port}" if parts.port else "")))
+    try:
+        connect(anonymous, socket_timeout=REQUEST_TIMEOUT).ping()
+        return Result("Redis users", "fail", "Redis accepts clients without a password", REDIS_USERS_HINT)
+    except (AuthenticationError, ResponseError) as error:
+        if "NOAUTH" not in str(error) and not isinstance(error, AuthenticationError):
+            return Result("Redis users", "fail", f"unexpected answer without a password: {type(error).__name__}")
+    except RedisError as error:
+        return Result("Redis users", "fail", f"cannot reach Redis: {type(error).__name__}")
+    try:
+        client = connect(service.redis_url, socket_timeout=REQUEST_TIMEOUT, **service.redis_options())
+        client.ping()
+    except RuntimeError as error:
+        return Result("Redis users", "fail", str(error), REDIS_USERS_HINT)
+    except RedisError as error:
+        return Result("Redis users", "fail", f"the services cannot sign in: {type(error).__name__}", REDIS_USERS_HINT)
+    try:
+        client.config_get("maxmemory")
+        return Result("Redis users", "fail", "the services' user may change Redis's configuration",
+                      "Recreate Redis so it reads redis/users.acl: docker compose up -d --force-recreate redis")
+    except NoPermissionError:
+        pass
+    return Result("Redis users", "ok", "refused without a password; the services' user cannot change the configuration")
+
+
 # --- Running ----------------------------------------------------------------
 
 def run_checks(config) -> list[Result]:
-    results = []
+    results = [check_redis(config)]
     if config.outsource.provider == "runpod":
         results.append(check_storage(config))
         results.extend(check_runpod(config))

@@ -211,7 +211,8 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 
 | Variable | Default | Compose value | Description |
 | --- | --- | --- | --- |
-| `REDIS_URL` | `redis://localhost:6379/0` | `redis://redis:6379/0` | Redis connection URL. |
+| `REDIS_URL` | `redis://localhost:6379/0` | `redis://app@redis:6379/0` | Redis connection URL, with the Redis user the services sign in as. |
+| `REDIS_PASSWORD_FILE` | empty | `/run/redis/password` | The file with that user's password, from `secrets/redis/app`. Empty for a Redis without users, such as one for local development. See [Redis users](architecture.md#-redis-users). |
 | `DATA_DIR` | `/data` | `/data` | Shared directory for job files. |
 | `BILLING_DATABASE_URL` | `postgresql://billing@postgres:5432/billing` | same | Production PostgreSQL URL for balances, purchases, and reservations. Keep passwords in `secrets/billing_database_url` (or use Compose's PostgreSQL password file). |
 | `BILLING_DATABASE_PATH` | `/billing/billing.sqlite3` | tests/tools | Explicit SQLite path retained for legacy tests and the one-time migration source. |
@@ -250,9 +251,10 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `offsite_backup_secret_key` | Optional. Secret access key for the off-site backup bucket. |
 | `server_password` | Optional. When present, every request except `/health` and `/ready` needs this password, as the `X-Server-Password` header or HTTP Basic auth with any user name. At least 12 characters; the API refuses to start otherwise. See [Password protection](setup.md#-password-protection). |
 | `postgres_password` | PostgreSQL password used by the API and workers. Mount it as `secrets/postgres_password`; never put it in `.env`. |
+| `redis/operator`, `redis/app` | Redis passwords, one per [Redis user](architecture.md#-redis-users). `scripts/server.py` creates them; each service gets only its own. |
 | `error_report_token` | Optional. The token sent with every error report to `ERROR_REPORT_URL`. The website must have the same token. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
 
-The Cloudflare tunnel token is in a folder of its own, `secrets/cloudflare/tunnel_token`, because only the `cloudflared` service gets that folder. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
+The Cloudflare tunnel token is in a folder of its own, `secrets/cloudflare/tunnel_token`, because only the `cloudflared` service gets that folder. The Redis passwords are in `secrets/redis` for the same reason: only the `redis` service sees the folder. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
 
 Secrets are only read from these files: a variable with the same name in `.env` or the environment is ignored. Never commit the `secrets` folder.
 

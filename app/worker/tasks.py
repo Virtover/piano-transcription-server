@@ -45,8 +45,9 @@ if os.environ.get(error_report.SERVICE_ENVIRONMENT):
     error_report.install(os.environ[error_report.SERVICE_ENVIRONMENT])
 
 
+# A client rather than a URL: Dramatiq ignores a password given beside one.
 broker = RedisBroker(
-    url=settings.service.redis_url,
+    client=Redis.from_url(settings.service.redis_url, **settings.service.redis_options()),
 )
 
 dramatiq.set_broker(broker)
@@ -55,6 +56,7 @@ dramatiq.set_broker(broker)
 redis = Redis.from_url(
     settings.service.redis_url,
     decode_responses=True,
+    **settings.service.redis_options(),
 )
 billing = Billing()
 

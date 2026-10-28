@@ -1,0 +1,3 @@
+# Read by Linux containers: a Windows checkout must not add carriage returns.
+*.sh text eol=lf
+redis/* text eol=lf

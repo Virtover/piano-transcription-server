@@ -387,7 +387,9 @@ def test_google_play_without_access_to_voided_purchases_fails(settings, error, s
 def test_disabled_services_are_skipped(default_settings):
     results = online_check.run_checks(default_settings)
 
-    assert [result.status for result in results] == ["skip", "skip", "skip", "skip", "skip"]
+    # Outside Compose, Redis has no users; that is worth a warning, not a skip.
+    assert [(result.name, result.status) for result in results][0] == ("Redis users", "warn")
+    assert [result.status for result in results[1:]] == ["skip", "skip", "skip", "skip", "skip"]
 
 
 def test_format_puts_hints_under_their_result():

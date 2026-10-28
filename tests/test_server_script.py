@@ -393,12 +393,31 @@ def checkout(tmp_path):
 def test_new_installation_gets_env_and_password(checkout):
     created = server.prepare_files(checkout)
 
-    assert len(created) == 2
+    assert len(created) == 3
     assert (checkout / ".env").read_text(encoding="utf-8") == "MAX_ACTIVE_JOBS=50\n"
-    password = (checkout / "secrets" / "postgres_password").read_text(encoding="utf-8")
-    assert len(password) == 48 and password.isalnum()
-    # Nothing prints the password.
-    assert not any(password in message for message in created)
+    passwords = [
+        (checkout / "secrets" / name).read_text(encoding="utf-8")
+        for name in ("postgres_password", "redis/operator", "redis/app")
+    ]
+    assert len(set(passwords)) == 3
+    for password in passwords:
+        assert len(password) == 48 and password.isalnum()
+        # Nothing prints a password.
+        assert not any(password in message for message in created)
+    assert created[2] == "created random Redis passwords in secrets/redis: operator, app"
+
+
+def test_an_update_gets_the_missing_redis_passwords(checkout):
+    (checkout / ".env").write_text("MAX_ACTIVE_JOBS=5\n", encoding="utf-8")
+    (checkout / "secrets" / "redis").mkdir(parents=True)
+    (checkout / "secrets" / "postgres_password").write_text("chosen", encoding="utf-8")
+    (checkout / "secrets" / "redis" / "operator").write_text("kept", encoding="utf-8")
+    # Docker made a folder where the missing file is mounted.
+    (checkout / "secrets" / "redis" / "app").mkdir()
+
+    assert server.prepare_files(checkout) == ["created random Redis passwords in secrets/redis: app"]
+    assert (checkout / "secrets" / "redis" / "operator").read_text(encoding="utf-8") == "kept"
+    assert (checkout / "secrets" / "redis" / "app").is_file()
 
 
 def test_billing_data_is_created_by_the_user_not_by_docker(checkout):
@@ -437,8 +456,10 @@ def test_without_legacy_gpu_the_env_file_decides():
 
 def test_existing_files_are_never_changed(checkout):
     (checkout / ".env").write_text("MAX_ACTIVE_JOBS=5\n", encoding="utf-8")
-    (checkout / "secrets").mkdir()
+    (checkout / "secrets" / "redis").mkdir(parents=True)
     (checkout / "secrets" / "postgres_password").write_text("chosen", encoding="utf-8")
+    for name in server.REDIS_USERS:
+        (checkout / "secrets" / "redis" / name).write_text("chosen", encoding="utf-8")
 
     assert server.prepare_files(checkout) == []
     assert (checkout / ".env").read_text(encoding="utf-8") == "MAX_ACTIVE_JOBS=5\n"
@@ -463,7 +484,44 @@ def test_password_is_readable_by_the_containers_whatever_the_umask(checkout):
         os.umask(previous)
 
     assert (checkout / "secrets").stat().st_mode & 0o777 == 0o755
+    assert (checkout / "secrets" / "redis").stat().st_mode & 0o777 == 0o755
     assert (checkout / "secrets" / "postgres_password").stat().st_mode & 0o777 == 0o644
+    assert (checkout / "secrets" / "redis" / "app").stat().st_mode & 0o777 == 0o644
+
+
+def test_restart_creates_missing_files_before_announcing(monkeypatch):
+    def fails():
+        raise RuntimeError("secrets/redis/app is a folder, not a file")
+
+    clock = FakeClock()
+    stack = FakeStack(clock)
+    monkeypatch.setattr(stack, "prepare_files", fails)
+
+    assert server.main(["restart", "5m"], stack, clock) == 1
+    assert stack.calls == [] and stack.up_call is None
+
+
+def test_redis_cli_signs_in_as_operator_without_showing_the_password():
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="OK\n", stderr="")
+
+    assert server.Stack([], run=fake_run).redis("config", "set", "appendonly", "yes") == "OK"
+    [command] = calls
+    assert command[:6] == ["docker", "compose", "exec", "-T", "redis", "sh"]
+    assert command[6:8] == ["-c", server.REDIS_CLI]
+    assert command[8:] == ["redis-cli", "config", "set", "appendonly", "yes"]
+    assert "REDISCLI_AUTH" in server.REDIS_CLI and "--pass" not in server.REDIS_CLI
+
+
+@pytest.mark.parametrize("answer", ["NOPERM User app has no permissions", "AUTH failed: WRONGPASS invalid", "ERR unknown command"])
+def test_a_refused_redis_command_is_an_error(answer):
+    stack = server.Stack([], run=lambda command, **kwargs: SimpleNamespace(returncode=0, stdout=answer, stderr=""))
+
+    with pytest.raises(RuntimeError, match="Redis refused"):
+        stack.redis("config", "set", "appendonly", "yes")
 
 
 def test_root_owned_folder_explains_the_fix(checkout, monkeypatch):

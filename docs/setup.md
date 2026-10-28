@@ -32,7 +32,7 @@ python scripts/server.py start
 docker compose run --rm api python -m app.config check
 ```
 
-On a new installation, `start` creates `.env` from `.env.example` and a random PostgreSQL password in `secrets/postgres_password`, which it never prints. It does not change either file once it exists. It then builds the images and waits until the API is ready. For an older NVIDIA GPU, such as a GTX 1050 Ti or another GTX 10 series card, add `--legacy-gpu`, or set `WORKER_GPU_BUILD=legacy` in `.env`; see [`WORKER_GPU_BUILD`](configuration.md). After changing `.env`, run `docker compose up -d` to apply it.
+On a new installation, `start` creates `.env` from `.env.example`, a random PostgreSQL password in `secrets/postgres_password`, and random [Redis passwords](architecture.md#-redis-users) in `secrets/redis`; it never prints a password. It does not change these files once they exist, and `start` and `restart` create one that an update adds. It then builds the images and waits until the API is ready. For an older NVIDIA GPU, such as a GTX 1050 Ti or another GTX 10 series card, add `--legacy-gpu`, or set `WORKER_GPU_BUILD=legacy` in `.env`; see [`WORKER_GPU_BUILD`](configuration.md). After changing `.env`, run `docker compose up -d` to apply it.
 
 The `check` command validates `.env` and the secrets and prints the resolved configuration with secrets masked. With `--online`, it also tests the configured services with the real credentials; see [Checking the configuration](configuration.md#-checking-the-configuration). Container paths and service addresses are set in `docker-compose.yml`, so `.env` only holds your choices. See [Configuration](configuration.md).
 

@@ -45,6 +45,7 @@ router = APIRouter(
 redis = Redis.from_url(
     settings.service.redis_url,
     decode_responses=True,
+    **settings.service.redis_options(),
 )
 billing = Billing()
 transcription_submissions_enabled = False

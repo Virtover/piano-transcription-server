@@ -22,7 +22,7 @@ from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/billing", tags=["billing"])
-redis = Redis.from_url(settings.service.redis_url, decode_responses=True)
+redis = Redis.from_url(settings.service.redis_url, decode_responses=True, **settings.service.redis_options())
 billing = Billing()
 # Each video check runs yt-dlp for up to a minute. This bounds the CPU and the
 # requests this server's IP sends to video sites, whoever calls.

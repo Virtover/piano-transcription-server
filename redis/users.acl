@@ -1,0 +1,14 @@
+# Who may do what in Redis. redis/start.sh replaces each #{name} with the
+# SHA-256 hash of the password in secrets/redis/<name>, drops these comments,
+# and starts Redis with the result. See "Redis users" in docs/architecture.md.
+
+# Connecting without a user and password is refused.
+user default off resetpass resetkeys resetchannels -@all
+
+# scripts/server.py, through redis-cli inside the redis container only.
+user operator on #{operator} ~* &* +@all
+
+# The API, the workers, and cleanup: every key, and every command except
+# those that empty Redis, read or change its configuration or users, write
+# its files, load code, or copy it elsewhere. Dramatiq needs KEYS.
+user app on #{app} ~* &* +@all -flushall -flushdb -swapdb -config -acl -debug -shutdown -module -function -script|flush -save -bgsave -bgrewriteaof -replicaof -slaveof -sync -psync -failover -migrate -restore -monitor -cluster

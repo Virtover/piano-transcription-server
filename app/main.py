@@ -162,7 +162,7 @@ def health():
 @app.get("/ready")
 def readiness():
     try:
-        Redis.from_url(settings.service.redis_url).ping()
+        Redis.from_url(settings.service.redis_url, **settings.service.redis_options()).ping()
     except Exception as error:
         raise HTTPException(status_code=503, detail="Redis is unavailable") from error
     try:

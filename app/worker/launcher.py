@@ -87,7 +87,7 @@ def remote_plan() -> WorkerPlan:
     from app.outsource import capacity
     from app.outsource.provider import get_provider
 
-    redis = Redis.from_url(settings.service.redis_url, decode_responses=True)
+    redis = Redis.from_url(settings.service.redis_url, decode_responses=True, **settings.service.redis_options())
     if settings.outsource.max_concurrency is None:
         capacity.refresh_max_workers(redis, get_provider())
     threads = capacity.remote_worker_threads(redis)

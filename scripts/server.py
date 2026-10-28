@@ -9,8 +9,10 @@
     python scripts/server.py restore [latest|NAME|N]     # billing database from a backup; --from local, --fallback
 
 Runs on the host with only the Python standard library. On a new
-installation, start creates .env from .env.example and a random PostgreSQL
-password in secrets/postgres_password, which is never printed. Clients see the
+installation, start creates .env from .env.example, a random PostgreSQL
+password in secrets/postgres_password, and random Redis passwords in
+secrets/redis; passwords are never printed. start, restart, and restore also
+create a missing one, for example after an update. Clients see the
 notice in GET /api/server-info, in job status, and in the X-Server-Maintenance
 headers. For a restart, the new images are built while the countdown runs and
 the current version keeps serving; if the build fails, the restart is
@@ -59,6 +61,18 @@ BILLING_SERVICES = ["api", "worker", "remote-worker", "cleanup"]
 FETCHED = re.compile(r"saved and checked: (/billing/\S+)")
 # app.backups.BACKUP_FILE_PATTERN: the automatic backups in billing-data/backups.
 LOCAL_BACKUP = re.compile(r"^billing-(\d+)\.(?:sqlite3|dump)$")
+# The Redis users with a password in secrets/redis; see redis/users.acl.
+REDIS_USERS = ["operator", "app"]
+# redis-cli in the redis container, signed in as operator. A container from
+# before Redis had users has no password file and needs none. The password
+# goes through the environment, not the command line.
+REDIS_CLI = (
+    'if [ -f /run/secrets/redis/operator ]; then '
+    'export REDISCLI_AUTH="$(cat /run/secrets/redis/operator)"; set -- --user operator "$@"; fi; '
+    'exec redis-cli "$@"'
+)
+# redis-cli exits with 0 when Redis refuses a command; its answer says so.
+REDIS_REFUSALS = ("NOAUTH", "WRONGPASS", "NOPERM", "AUTH failed", "ERR ")
 PG_RESTORE = ["pg_restore", "-U", "billing", "-d", "billing", "--clean", "--if-exists", "--no-owner",
               "--single-transaction", "--exit-on-error"]
 
@@ -88,37 +102,48 @@ def prepare_files(root: Path) -> list[str]:
     if not env.exists():
         shutil.copyfile(root / ".env.example", env)
         created.append("created .env from .env.example; change what you need, then restart")
-    folder = root / "secrets"
-    password = folder / "postgres_password"
-    # Docker creates a missing bind-mounted file as an empty folder, owned by
-    # root on Linux.
-    root_owned = "it was probably created by Docker as root. Run: sudo rm -r secrets/postgres_password " \
-                 "&& sudo chown \"$(id -u):$(id -g)\" secrets, then start again"
-    if password.is_dir():
-        try:
-            password.rmdir()
-        except PermissionError:
-            raise RuntimeError(f"secrets/postgres_password is a folder, not a file: {root_owned}") from None
-        except OSError:
-            raise RuntimeError(f"{password} is a folder, not a file: move it away and start again") from None
-    if not password.exists():
-        if not folder.exists():
-            folder.mkdir()
-            # PostgreSQL and the services read the secrets as other users.
-            folder.chmod(0o755)
-        try:
-            # Letters and digits only, so it needs no quoting anywhere.
-            password.write_text(secrets.token_hex(24), encoding="utf-8")
-        except PermissionError:
-            raise RuntimeError(f"cannot write secrets/postgres_password: {root_owned}") from None
-        # Readable whatever the umask: PostgreSQL and the services run as
-        # other users and read it through a bind mount.
-        password.chmod(0o644)
+    if create_password(root, "secrets/postgres_password"):
         created.append("created a random PostgreSQL password in secrets/postgres_password")
+    new_users = [name for name in REDIS_USERS if create_password(root, f"secrets/redis/{name}")]
+    if new_users:
+        created.append(f"created random Redis passwords in secrets/redis: {', '.join(new_users)}")
     # Created here rather than by Docker, which would make it root's. The
     # prepare service gives it to the services and keeps its group.
     (root / "billing-data" / "backups").mkdir(parents=True, exist_ok=True)
     return created
+
+
+def create_password(root: Path, relative: str) -> bool:
+    """Create a random password file at root/relative unless it exists.
+    Returns whether it was created; it is never printed."""
+    password = root / relative
+    # Docker creates a missing bind-mounted file as an empty folder, owned by
+    # root on Linux.
+    root_owned = f"it was probably created by Docker as root. Run: sudo rm -r {relative} " \
+                 "&& sudo chown -R \"$(id -u):$(id -g)\" secrets, then start again"
+    if password.is_dir():
+        try:
+            password.rmdir()
+        except PermissionError:
+            raise RuntimeError(f"{relative} is a folder, not a file: {root_owned}") from None
+        except OSError:
+            raise RuntimeError(f"{password} is a folder, not a file: move it away and start again") from None
+    if password.exists():
+        return False
+    for folder in reversed(password.parents):
+        if folder.is_relative_to(root) and folder != root and not folder.exists():
+            folder.mkdir()
+            # PostgreSQL, Redis, and the services read the secrets as other users.
+            folder.chmod(0o755)
+    try:
+        # Letters and digits only, so it needs no quoting anywhere.
+        password.write_text(secrets.token_hex(24), encoding="utf-8")
+    except PermissionError:
+        raise RuntimeError(f"cannot write {relative}: {root_owned}") from None
+    # Readable whatever the umask: PostgreSQL, Redis, and the services run as
+    # other users and read it through a bind mount.
+    password.chmod(0o644)
+    return True
 
 
 def share_billing_data(environment) -> None:
@@ -168,11 +193,14 @@ class Stack:
         return result.returncode == 0
 
     def redis(self, *arguments: str) -> str:
-        result = self._run(self.compose() + ["exec", "-T", "redis", "redis-cli", *arguments],
+        result = self._run(self.compose() + ["exec", "-T", "redis", "sh", "-c", REDIS_CLI, "redis-cli", *arguments],
                            capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout).strip() or "the redis service is not running")
-        return result.stdout.strip()
+        answer = result.stdout.strip()
+        if answer.startswith(REDIS_REFUSALS):
+            raise RuntimeError(f"Redis refused: {answer.splitlines()[0]}")
+        return answer
 
     def start_build(self):
         return self._popen(self.compose() + ["build"])
@@ -342,7 +370,22 @@ def countdown(stack: Stack, clock: Clock, action: str, args, build_images: bool)
     return None
 
 
+def prepare(stack: Stack) -> bool:
+    """Create missing files, such as a password added by an update, before
+    anything is announced or started. False, having said why, if one cannot
+    be created."""
+    try:
+        for message in stack.prepare_files():
+            say(message)
+    except (OSError, RuntimeError) as error:
+        say(str(error))
+        return False
+    return True
+
+
 def restart(args, stack: Stack, clock: Clock) -> int:
+    if not prepare(stack):
+        return 1
     if args.command:
         say("custom --command: nothing is built before the countdown ends")
     code = countdown(stack, clock, "restart", args, build_images=not (args.command or args.no_build))
@@ -385,11 +428,7 @@ def stop(args, stack: Stack, clock: Clock) -> int:
 
 
 def start(args, stack: Stack, clock: Clock) -> int:
-    try:
-        for message in stack.prepare_files():
-            say(message)
-    except (OSError, RuntimeError) as error:
-        say(str(error))
+    if not prepare(stack):
         return 1
     say("starting")
     # Built every time, so a start after an update never runs old code; an

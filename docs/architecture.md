@@ -68,13 +68,15 @@ Billing backups are thinned out by the API after each backup, and optionally cop
 * **Logs** are kept to about 100 MB per container, so a failing service cannot fill the disk with them.
 * **Completed results.** MIDI is written to a same-directory temporary file, synced, atomically renamed into place, and checked before Redis records `completed`. At startup, completed jobs are checked again; a missing, invalid, or out-of-data-directory result is changed to `failed` and its unfinished billing reservation is released.
 * **`/ready`** answers `503` while Redis or the billing database cannot be reached. `/health` only says that the API process answers.
-* **Security.** PostgreSQL is not published as a host port and its password is mounted as a Docker secret. Off-site backup endpoints must use HTTPS. Direct API HTTP is suitable only on a trusted local network; use the Cloudflare Tunnel or another TLS reverse proxy for public access.
+* **Security.** PostgreSQL is not published as a host port and its password is mounted as a Docker secret. Redis is not published either, and refuses clients without a password; see [Redis users](#-redis-users). Off-site backup endpoints must use HTTPS. Direct API HTTP is suitable only on a trusted local network; use the Cloudflare Tunnel or another TLS reverse proxy for public access.
 
 Redis started with the append-only file on, over a volume that has only a snapshot, starts empty. `scripts/server.py` turns it on in the running Redis before it restarts or stops anything, so updating with it keeps queued jobs. When updating from an older version with `docker compose` directly, run this first:
 
 ```shell
 docker compose exec redis redis-cli config set appendonly yes
 ```
+
+That works on a Redis from before [Redis users](#-redis-users). On one with users, `redis-cli` signs in as `operator`; `scripts/server.py` does that for you.
 
 None of this protects against losing the disk or the machine. For that, turn on [off-site copies](configuration.md#off-site-copies) of the billing backups. Off-site copy failures and backups that stop advancing are logged as operational errors; the backup state is also visible in the administration status. They do not make `/health` fail, and `/ready` remains focused on Redis and billing database reachability.
 
@@ -106,6 +108,20 @@ python scripts/server.py cancel                      # also stops a waiting scri
 **Shutdown** (`stop`) announces, refuses late jobs, and drains the same way, without building. Then it stops every service with `docker compose --profile "*" stop`, so services from any profile stop too. With `--down`, the containers are removed as well; volumes and the billing data are kept either way. `--back-in` tells clients when the server is expected back. Queued jobs stay in Redis and run after `python scripts/server.py start`. The notice stays in Redis while the server is off, and the API removes it when it starts.
 
 Ctrl+C during a countdown cancels it and removes the notice. The script runs `python -m app.maintenance` in the `api` container, so the stack must be running, with a version that includes it.
+
+### 🔐 Redis users
+
+Redis holds every job, the queues, and the [limits](administration.md#-limits), so anything that can send it commands can change them. It is not published as a host port, and it refuses a client without a user and password. The users and what each may do are in `redis/users.acl`:
+
+| User | Who | May |
+| --- | --- | --- |
+| `default` | anyone without a password | nothing |
+| `app` | the API, the workers, and cleanup | every key and every command they use; not those that empty Redis, read or change its configuration or users, write its files, load code, or copy the data elsewhere |
+| `operator` | `scripts/server.py`, through `redis-cli` inside the `redis` container | everything, for example turning on the append-only file |
+
+Each user's password is a file in `secrets/redis`, which `scripts/server.py start` and `restart` create when it is missing. At every start, `redis/start.sh` gives Redis the users with the SHA-256 hash of each password, so no password is in a file Redis reads, a command line, or `docker inspect`. Only the `redis` service sees the whole folder. The others get their own password at `/run/redis/password` (`REDIS_PASSWORD_FILE`), and those that mount `secrets/` have `secrets/redis` covered by an empty folder, so a worker that processes a malicious file cannot read the `operator` password.
+
+`check --online` confirms that Redis refuses a client without a password and that the `app` user cannot read Redis's configuration. To change a password, replace its file and recreate Redis and the services: `docker compose up -d --force-recreate`.
 
 ### 🩺 Job diagnostics
 

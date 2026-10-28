@@ -48,7 +48,7 @@ from app.transcription.cancellation import TranscriptionCancelled
 
 
 logger = logging.getLogger(__name__)
-redis = Redis.from_url(settings.service.redis_url, decode_responses=True)
+redis = Redis.from_url(settings.service.redis_url, decode_responses=True, **settings.service.redis_options())
 
 CancellationCallback = Callable[[], bool]
 

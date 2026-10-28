@@ -169,7 +169,25 @@ class ServiceSettings(BaseSettings):
     model_config = _group_config()
 
     redis_url: str = "redis://localhost:6379/0"
+    # The password of the Redis user named in redis_url, as a file; empty
+    # for a Redis without users, such as one for local development.
+    redis_password_file: str = ""
     data_dir: str = "/data"
+
+    def redis_options(self) -> dict[str, str]:
+        """Keyword arguments that sign in to Redis, for Redis.from_url: the
+        password from redis_password_file. It stays out of the URL, which
+        libraries may show in errors."""
+        if not self.redis_password_file:
+            return {}
+        try:
+            password = Path(self.redis_password_file).read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise RuntimeError(
+                f"Cannot read the Redis password file {self.redis_password_file} ({type(error).__name__}); "
+                "python scripts/server.py start creates it"
+            ) from None
+        return {"password": password}
 
 
 class LimitsSettings(BaseSettings):
@@ -606,6 +624,12 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
     """Cross-setting checks for a process role: api, worker, remote, cleanup, or all."""
     config = config or settings
     problems = []
+    redis_password = config.service.redis_password_file
+    if redis_password and (not Path(redis_password).is_file() or Path(redis_password).stat().st_size == 0):
+        problems.append(
+            f"The Redis password file {redis_password} is missing or empty; python scripts/server.py start "
+            "creates the files in secrets/redis"
+        )
     password = config.secrets.server_password
     if role in ("api", "all") and password is not None:
         # Nothing slows down guessing, so the length is the only protection.

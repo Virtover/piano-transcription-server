@@ -1,7 +1,9 @@
 # Container wiring (fixed paths and service addresses) is set here.
 # Operator choices (limits, worker tuning, billing) go in .env.
 x-wiring: &wiring
-  REDIS_URL: redis://redis:6379/0
+  # Each service signs in to Redis as the user `app`; see redis/users.acl.
+  REDIS_URL: redis://app@redis:6379/0
+  REDIS_PASSWORD_FILE: /run/redis/password
   DATA_DIR: /data
   BILLING_DATABASE_URL: postgresql://billing@postgres:5432/billing
   BILLING_BACKUP_DIR: /billing/backups
@@ -55,6 +57,11 @@ services:
       # billing through PostgreSQL alone.
       - ./billing-data:/billing
       - ./secrets:/run/secrets:ro
+      # Only this service's Redis password. The other Redis users' passwords,
+      # also in secrets/redis, are hidden under an empty folder.
+      - ./secrets/redis/app:/run/redis/password:ro
+      - type: tmpfs
+        target: /run/secrets/redis
     depends_on:
       prepare:
         condition: service_completed_successfully
@@ -79,6 +86,11 @@ services:
     volumes:
       - data:/data
       - ./secrets:/run/secrets:ro
+      # Only this service's Redis password. The other Redis users' passwords,
+      # also in secrets/redis, are hidden under an empty folder.
+      - ./secrets/redis/app:/run/redis/password:ro
+      - type: tmpfs
+        target: /run/secrets/redis
     depends_on:
       prepare:
         condition: service_completed_successfully
@@ -104,6 +116,11 @@ services:
     volumes:
       - data:/data
       - ./secrets:/run/secrets:ro
+      # Only this service's Redis password. The other Redis users' passwords,
+      # also in secrets/redis, are hidden under an empty folder.
+      - ./secrets/redis/app:/run/redis/password:ro
+      - type: tmpfs
+        target: /run/secrets/redis
     depends_on:
       prepare:
         condition: service_completed_successfully
@@ -125,6 +142,8 @@ services:
     environment: *wiring
     volumes:
       - data:/data
+      # Its Redis password, and no other secret.
+      - ./secrets/redis/app:/run/redis/password:ro
     depends_on:
       prepare:
         condition: service_completed_successfully
@@ -161,16 +180,24 @@ services:
   # snapshots alone could lose an hour. scripts/server.py turns it on in a
   # running Redis before restarting, because starting with it on over a
   # snapshot-only volume starts empty. See docs/architecture.md.
+  #
+  # Every client signs in as a user with its own password, from
+  # secrets/redis; connecting without one is refused. redis/start.sh gives
+  # Redis the users in redis/users.acl before starting it. Only this service
+  # sees all the passwords. See "Redis users" in docs/architecture.md.
   redis:
     image: redis:7-alpine
+    entrypoint: ["/bin/sh", "/redis/start.sh"]
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis/operator)\" redis-cli --user operator ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
     volumes:
       - redis_data:/data
+      - ./redis:/redis:ro
+      - ./secrets/redis:/run/secrets/redis:ro
     restart: unless-stopped
     logging: *logging
 
