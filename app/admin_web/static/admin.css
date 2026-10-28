@@ -70,14 +70,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .adm-brand small { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.14em; color: var(--accent-gold); }
 
 .adm-nav { flex: 1; overflow-y: auto; padding: 16px 14px; display: flex; flex-direction: column; gap: 4px; }
-.adm-nav button {
+.adm-nav button, .adm-nav a {
   display: flex; align-items: center; gap: 12px; width: 100%;
   padding: 10px 14px; border: 1px solid transparent; border-radius: 8px; background: none;
   color: var(--text-secondary); font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.03em;
-  text-align: left; cursor: pointer; transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+  text-align: left; text-decoration: none; cursor: pointer; transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
 }
 .adm-nav svg { width: 16px; height: 16px; flex-shrink: 0; }
-.adm-nav button:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.03); }
+.adm-nav button:hover, .adm-nav a:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.03); }
 .adm-nav button[aria-current="page"] { color: var(--accent-gold); background: rgba(255, 204, 0, 0.08); border-color: rgba(255, 204, 0, 0.3); }
 .adm-nav .count {
   margin-left: auto; font-size: 0.68rem; background: var(--surface-2); color: var(--text-secondary);
@@ -104,7 +104,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .adm-foot-btn.danger { color: var(--danger); border-color: rgba(248, 113, 113, 0.3); }
 .adm-foot-btn.danger:hover { background: rgba(248, 113, 113, 0.08); }
 
-.adm-main { padding: 32px 36px 48px; min-width: 0; width: 100%; max-width: 1320px; }
+.adm-main { padding: 32px 36px 48px; min-width: 0; width: 100%; }
 .adm-head {
   display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap;
   background: linear-gradient(135deg, rgba(var(--lamp), 0.08), transparent 45%), var(--card-bg);
@@ -145,7 +145,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .stat.lit { border-color: rgba(var(--lamp), 0.35); background: linear-gradient(180deg, rgba(var(--lamp), 0.08), var(--card-bg) 70%); }
 .stat.alarm { border-color: rgba(248, 113, 113, 0.45); background: linear-gradient(180deg, rgba(248, 113, 113, 0.07), var(--card-bg) 70%); }
 
-.ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 16px; }
+/* Six section cards: always full rows, 3 x 2, then 2 x 3, then one column. */
+.ov-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 1100px) { .ov-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .ov-grid { grid-template-columns: minmax(0, 1fr); } }
 .ov-card {
   background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 22px;
   text-align: left; color: inherit; cursor: pointer; display: flex; flex-direction: column; align-items: flex-start;
@@ -387,7 +390,7 @@ pre.code { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mo
   .adm { grid-template-columns: minmax(0, 1fr); }
   .adm-side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border-color); }
   .adm-nav { flex-direction: row; flex-wrap: wrap; padding: 10px; }
-  .adm-nav button { width: auto; }
+  .adm-nav button, .adm-nav a { width: auto; }
   .adm-nav .sep { display: none; }
   .adm-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
   .adm-foot .adm-role { gap: 8px; }
