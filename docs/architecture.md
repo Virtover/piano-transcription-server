@@ -119,6 +119,7 @@ Redis holds every job, the queues, and the [limits](administration.md#-limits), 
 | `app` | the API, the workers, and cleanup | every key and every command they use; not those that empty Redis, read or change its configuration or users, write its files, load code, or copy the data elsewhere |
 | `operator` | `scripts/server.py`, through `redis-cli` inside the `redis` container | everything, for example turning on the append-only file |
 | `admin-read-only` | the [admin web page](administration.md#-admin-web-page) in read-only mode | read commands only, on the keys the page shows; no key can be written |
+| `admin-read-write` | the admin web page in read-write mode | writes only jobs, limits, video sites' state, and its own confirmations; reads the rest the page shows; no scripts or dangerous commands |
 
 Each user's password is a file in `secrets/redis`, which `scripts/server.py start` and `restart` create when it is missing. At every start, `redis/start.sh` gives Redis the users with the SHA-256 hash of each password, so no password is in a file Redis reads, a command line, or `docker inspect`. Only the `redis` service sees the whole folder. The others get their own password at `/run/redis/password` (`REDIS_PASSWORD_FILE`), and those that mount `secrets/` have `secrets/redis` covered by an empty folder, so a worker that processes a malicious file cannot read the `operator` password.
 

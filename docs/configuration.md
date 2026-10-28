@@ -190,7 +190,7 @@ Optional. A page for the [admin commands](administration.md#-admin-web-page), on
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `ADMIN_WEB_MODE` | `disabled` | `disabled`, or `read-only`. Read when the service starts. The page can lower it for everyone; only `python scripts/admin.py web restore` raises it again. Also add `admin` to `COMPOSE_PROFILES`, which starts the service. |
+| `ADMIN_WEB_MODE` | `disabled` | `disabled`, `read-only`, or `read-write`. Read when the service starts. The page can lower it for everyone; only `python scripts/admin.py web restore` raises it again. Also add `admin` to `COMPOSE_PROFILES`, which starts the service. |
 | `ADMIN_WEB_HOSTNAME` | unset | The page's hostname, such as `admin.example.com`, on the same tunnel as the API but never the API's own. |
 | `ADMIN_WEB_EMAILS` | `[]` | JSON list of the addresses that may use the page, for example `["you@example.com"]`. The page refuses every other address, whatever Access allows. |
 | `CLOUDFLARE_ACCESS_TEAM_DOMAIN` | unset | Your Cloudflare Access team domain, such as `example.cloudflareaccess.com`. The page reads the keys that sign Access's tokens from it. |
@@ -265,8 +265,8 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `offsite_backup_secret_key` | Optional. Secret access key for the off-site backup bucket. |
 | `server_password` | Optional. When present, every request except `/health` and `/ready` needs this password, as the `X-Server-Password` header or HTTP Basic auth with any user name. At least 12 characters; the API refuses to start otherwise. See [Password protection](setup.md#-password-protection). |
 | `postgres_password` | PostgreSQL password used by the API and workers. Mount it as `secrets/postgres_password`; never put it in `.env`. |
-| `redis/operator`, `redis/app`, `redis/admin-read-only` | Redis passwords, one per [Redis user](architecture.md#-redis-users). `scripts/server.py` creates them; each service gets only its own. |
-| `admin-web/postgres-read-only` | The password of the [admin web page's](administration.md#-admin-web-page) PostgreSQL role. `scripts/server.py` creates it, and the API gives the role its rights. |
+| `redis/operator`, `redis/app`, `redis/admin-read-only`, `redis/admin-read-write` | Redis passwords, one per [Redis user](architecture.md#-redis-users). `scripts/server.py` creates them; each service gets only its own. |
+| `admin-web/postgres-read-only`, `admin-web/postgres-read-write` | The passwords of the [admin web page's](administration.md#-admin-web-page) PostgreSQL roles, one per mode. `scripts/server.py` creates it, and the API gives the role its rights. |
 | `error_report_token` | Optional. The token sent with every error report to `ERROR_REPORT_URL`. The website must have the same token. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
 
 The Cloudflare tunnel token is in a folder of its own, `secrets/cloudflare/tunnel_token`, because only the `cloudflared` service gets that folder. The Redis passwords are in `secrets/redis` for the same reason: only the `redis` service sees the folder. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).

@@ -16,4 +16,9 @@ user operator on #{operator} ~* &* +@all
 # write any key. Transactions are how redis-py reads a value with its expiry.
 user admin-read-only on #{admin-read-only} resetchannels ~transcription:* ~jobs:* ~workers:* ~controls:* ~video_sites:* ~maintenance:* ~outsource:* ~dramatiq:* -@all +@read -@dangerous +ping +multi +exec +discard +client|setinfo
 
+# The admin web page in read-write mode: it may write only jobs (to cancel
+# them), limits, video sites' state, and its own confirmations and rate
+# limits, and only read the rest it shows. No dangerous command, no scripts.
+user admin-read-write on #{admin-read-write} resetchannels %RW~transcription:* %RW~controls:* %RW~video_sites:* %RW~admin_web:* %R~jobs:* %R~workers:* %R~maintenance:* %R~outsource:* %R~dramatiq:* -@all +@read +@write +@transaction -@dangerous +ping +client|setinfo
+
 user app on #{app} ~* &* +@all -flushall -flushdb -swapdb -config -acl -debug -shutdown -module -function -script|flush -save -bgsave -bgrewriteaof -replicaof -slaveof -sync -psync -failover -migrate -restore -monitor -cluster

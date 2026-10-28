@@ -452,7 +452,9 @@ def test_lowering_is_never_one_keystroke_away():
     script = (STATIC / "admin.js").read_text(encoding="utf-8")
 
     assert '"Enter"' in script and "preventDefault" in script
-    assert "autofocus" not in script and ".focus(" not in script
+    # Only a dialog's Close button ever gets focus by itself.
+    assert "autofocus" not in script
+    assert re.findall(r"(\w+)\.focus\(", script) == ["close"]
     assert "checked: true" not in script
     assert "<form" not in (STATIC / "index.html").read_text(encoding="utf-8")
 
@@ -475,11 +477,12 @@ def test_incomplete_settings_do_not_start(default_settings, caplog):
 def test_credentials_that_may_write_are_refused(api_context):
     # fakeredis and SQLite accept everything, as a wrongly set up Redis or
     # PostgreSQL would.
-    problems = least_privilege_problems()
+    problems = least_privilege_problems("read-only")
 
-    assert len(problems) == 2
-    assert "Redis user may write" in problems[0] and "database role may change tables" in problems[1]
-    assert not tasks.redis.exists("admin_web:probe")
+    assert len(problems) == 4
+    assert all("admin-read-only" in problem for problem in problems)
+    assert len(least_privilege_problems("read-write")) == 3
+    assert not tasks.redis.exists("controls:admin_web_probe")
 
 
 # --- Restoring from the command line ---------------------------------------------
@@ -539,7 +542,6 @@ def test_complete_settings_pass(default_settings):
         (lambda s: setattr(s.admin_web, "access_aud", None), "CLOUDFLARE_ACCESS_AUD is required"),
         (lambda s: setattr(s.admin_web, "access_team_domain", "example.com"), "your team domain"),
         (lambda s: setattr(s.admin_web, "hostname", "piano.example.com"), "must differ from CLOUDFLARE_TUNNEL_HOSTNAME"),
-        (lambda s: setattr(s.admin_web, "mode", "read-write"), "not available yet"),
         (lambda s: setattr(s.tunnel, "compose_profiles", "cloudflare"), "needs admin in COMPOSE_PROFILES"),
         (lambda s: setattr(s.tunnel, "compose_profiles", "admin"), "needs the Cloudflare Tunnel"),
         (lambda s: setattr(s.billing, "database_url", ""), "needs the PostgreSQL billing database"),
@@ -579,7 +581,7 @@ def test_the_service_in_compose_has_only_what_its_mode_needs():
 def test_the_roles_match_the_modes_compose_names():
     from app.billing import ADMIN_WEB_ROLES
 
-    assert ADMIN_WEB_ROLES == {"read-only": "admin-read-only"}
+    assert ADMIN_WEB_ROLES == {"read-only": "admin-read-only", "read-write": "admin-read-write"}
 
 
 def test_the_redis_user_of_read_only_cannot_write():
@@ -656,3 +658,203 @@ def test_online_check_fails_when_the_service_answers_without_a_token(default_set
     results = online(default_settings, answer(302, {"location": f"https://{TEAM}/"}), internal=answer(200))
 
     assert results[2].status == "fail"
+
+
+# --- Read-write mode -------------------------------------------------------------
+
+@pytest.fixture
+def writable(page):
+    _, settings, billing = page
+    settings.admin_web.mode = "read-write"
+    two = access.AccessVerifier(TEAM, AUD, ["chris@example.com", "sam@example.com"], http=Keys())
+    client = TestClient(server.create_app(settings, two, clock=time.time), base_url=ORIGIN, raise_server_exceptions=False)
+    return client, settings, billing
+
+
+def act(client, action, args=None, reason="checked", headers=None):
+    return client.post("/api/actions/plan", headers=headers or changing(), json={"action": action, "args": args or {}, "reason": reason})
+
+
+def apply(client, planned, headers=None):
+    return client.post("/api/actions/apply", headers=headers or changing(), json={"token": planned["token"]})
+
+
+def test_read_only_has_no_actions(page):
+    client, _, _ = page
+
+    assert client.get("/api/me", headers=signed_in()).json()["actions"] == []
+    assert act(client, "user.credit", {"user": "user", "minutes": 5}).status_code in (404, 405)
+
+
+def test_read_write_lists_its_actions_and_nothing_irreversible(writable):
+    client, _, _ = writable
+
+    actions = client.get("/api/me", headers=signed_in()).json()["actions"]
+
+    assert "user.credit" in actions and "job.cancel" in actions and "limits.pause" in actions
+    assert not any("delete" in action or "requeue" in action for action in actions)
+
+
+def test_a_change_is_planned_then_applied_once(writable):
+    client, _, billing = writable
+
+    planned = act(client, "user.credit", {"user": "user@example.com", "minutes": 20}, "refund for a failed job").json()
+    assert planned["plan"]["balance_after"] == 50 and planned["reason"] == "refund for a failed job"
+    assert billing.get_balance("user") == 30
+
+    response = apply(client, planned)
+    assert response.status_code == 200 and response.json()["result"]["balance_after"] == 50
+    assert billing.get_balance("user") == 50
+    row = audit_rows(billing)[-1]
+    assert (row["actor"], row["action"], row["reason"]) == ("web:chris@example.com", "user.credit", "refund for a failed job")
+
+    # The same confirmation never works twice.
+    assert apply(client, planned).status_code == 409
+    assert billing.get_balance("user") == 50
+
+
+def test_the_browser_cannot_change_what_was_confirmed(writable):
+    client, _, billing = writable
+    planned = act(client, "user.credit", {"user": "user", "minutes": 5}).json()
+
+    response = client.post("/api/actions/apply", headers=changing(), json={
+        "token": planned["token"], "action": "user.credit", "args": {"user": "user", "minutes": 500},
+    })
+
+    assert response.status_code == 200
+    assert billing.get_balance("user") == 35
+
+
+def test_a_confirmation_belongs_to_one_administrator(writable):
+    client, _, billing = writable
+    planned = act(client, "user.credit", {"user": "user", "minutes": 5}).json()
+
+    response = apply(client, planned, headers={access.HEADER: token(email="sam@example.com"), "origin": ORIGIN})
+
+    assert response.status_code == 403
+    assert billing.get_balance("user") == 30
+
+
+def test_a_change_meanwhile_needs_a_new_review(writable):
+    client, _, billing = writable
+    planned = act(client, "user.credit", {"user": "user", "minutes": 5}).json()
+    billing.adjust_minutes("user", 1, "elsewhere")
+
+    response = apply(client, planned)
+
+    assert response.status_code == 409 and "review it again" in response.json()["detail"]
+    assert billing.get_balance("user") == 31
+
+
+def test_a_confirmation_expires(writable):
+    client, _, billing = writable
+    planned = act(client, "user.credit", {"user": "user", "minutes": 5}).json()
+    tasks.redis.delete(*tasks.redis.keys(server.CONFIRM_PREFIX + "*"))
+
+    assert apply(client, planned).status_code == 409
+    assert billing.get_balance("user") == 30
+
+
+def test_the_token_is_not_stored_as_it_is(writable):
+    client, _, _ = writable
+    planned = act(client, "user.credit", {"user": "user", "minutes": 5}).json()
+
+    [key] = tasks.redis.keys(server.CONFIRM_PREFIX + "*")
+    assert planned["token"] not in key
+    assert 0 < tasks.redis.ttl(key) <= server.TOKEN_SECONDS
+
+
+@pytest.mark.parametrize(
+    "action, args, reason, problem",
+    [
+        ("user.credit", {"user": "user", "minutes": 601}, "big", "at most 600 minutes"),
+        ("user.credit", {"user": "user", "minutes": "5"}, "text", "whole number"),
+        ("user.credit", {"user": "user", "minutes": 5}, "", "Give a --reason"),
+        ("user.credit", {"user": "user", "minutes": 5}, "asked by sam@example.org", "email addresses"),
+        ("job.cancel", {"job": "abcd"}, "stuck", "at least 8 characters"),
+        ("limits.block", {"user": "user"}, None, "Give a --reason"),
+        ("limits.pause", {"for": "soon"}, None, "for must use a format"),
+        ("limits.per_user", {"limit": 0}, None, "1 or more"),
+        ("user.delete", {"user": "user"}, "request", "cannot"),
+        ("job.requeue", {"job": "abcd1234"}, "retry", "cannot"),
+    ],
+)
+def test_invalid_changes_are_refused_before_anything_happens(writable, action, args, reason, problem):
+    client, _, billing = writable
+
+    response = act(client, action, args, reason)
+
+    assert response.status_code == 400 and problem in response.json()["detail"], response.json()
+    assert tasks.redis.keys(server.CONFIRM_PREFIX + "*") == []
+    assert billing.get_balance("user") == 30
+
+
+def test_changes_come_only_from_the_page(writable):
+    client, _, _ = writable
+
+    assert act(client, "limits.pause", headers=signed_in()).status_code == 403
+    assert act(client, "limits.pause", headers=signed_in(origin="https://evil.example.com")).status_code == 403
+    outsider = {access.HEADER: token(email="someone@example.com"), "origin": ORIGIN}
+    assert act(client, "limits.pause", headers=outsider).status_code == 403
+
+
+def test_changes_are_rate_limited(writable, monkeypatch):
+    _, settings, billing = writable
+    monkeypatch.setattr(server, "CHANGES_PER_HOUR", 2)
+    client = TestClient(server.create_app(settings, verifier(), clock=time.time), base_url=ORIGIN, raise_server_exceptions=False)
+
+    for _ in range(2):
+        assert apply(client, act(client, "user.credit", {"user": "user", "minutes": 1}).json()).status_code == 200
+    response = apply(client, act(client, "user.credit", {"user": "user", "minutes": 1}).json())
+
+    assert response.status_code == 429
+    assert billing.get_balance("user") == 32
+
+
+def test_limits_from_the_page_apply_to_users(writable, api_context):
+    client, _, _ = writable
+    api = api_context[0]
+
+    apply(client, act(client, "limits.pause", {"message": "Back at six", "for": "1h"}).json())
+    response = api.post("/api/transcriptions", headers={"Authorization": "Bearer user"}, json={"source_url": "https://example.com/video"})
+    assert response.status_code == 503 and response.json()["detail"] == "Back at six"
+
+    apply(client, act(client, "limits.resume").json())
+    assert controls.paused(tasks.redis) is None
+
+
+def test_cancelling_from_the_page_charges_like_the_user(writable, api_context):
+    client, _, billing = writable
+    api = api_context[0]
+    job_id = api.post("/api/transcriptions", headers={"Authorization": "Bearer user"}, json={"source_url": "https://example.com/video"}).json()["job_id"]
+    tasks.redis.hset(tasks.job_key(job_id), mapping={"status": "processing", "progress": "0.5"})
+
+    planned = act(client, "job.cancel", {"job": job_id}, "stuck").json()
+    assert planned["serious"] is True and planned["plan"]["charge"] == 1
+    apply(client, planned)
+
+    assert tasks.redis.hget(tasks.job_key(job_id), "status") == "cancelled"
+    assert billing.get_balance("user") == 29
+
+
+def test_a_lowered_page_makes_no_more_changes(writable):
+    client, _, billing = writable
+    planned = act(client, "user.credit", {"user": "user", "minutes": 5}).json()
+
+    lowered = client.post("/api/access/plan", headers=changing(), json={"mode": "read-only", "reason": "travelling"}).json()
+    assert lower(client, lowered, reason="travelling").json()["actions"] == []
+
+    assert apply(client, planned).status_code == 403
+    assert act(client, "user.credit", {"user": "user", "minutes": 5}).status_code == 403
+    assert billing.get_balance("user") == 30
+
+
+def test_lowering_needs_the_new_access_name_typed_exactly(writable):
+    client, _, billing = writable
+    planned = client.post("/api/access/plan", headers=changing(), json={"mode": "read-only", "reason": "travelling"}).json()
+    assert planned["type_to_confirm"] == "read-only"
+
+    for typed in ("", "readonly", "Read-only", "disabled", "read-write", "yes"):
+        assert lower(client, planned, confirm=typed, reason="travelling").status_code == 400, typed
+    assert billing.admin_web_caps() == []
+    assert lower(client, planned, confirm="read-only", reason="travelling").status_code == 200

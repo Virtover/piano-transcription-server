@@ -131,17 +131,24 @@ The [admin web page](#-admin-web-page) logs as `web:<email>`: `web.user_view` wh
 
 ## 🌐 Admin web page
 
-Optional: a page that shows what `status`, `jobs`, `user`, `billing`, `limits`, and `audit` show, for checking on the server from anywhere. It runs in a service of its own, `admin`, reached through the [Cloudflare Tunnel](cloudflare-tunnel.md) on a hostname of its own, behind Cloudflare Access. It changes nothing on the server, so jobs, accounts, and limits are still changed with `python scripts/admin.py`.
+Optional: a page that shows what `status`, `jobs`, `user`, `billing`, `limits`, and `audit` show, for running the server from anywhere: an overview that refreshes itself, jobs with their full errors, accounts, charts of minutes and jobs per day or month, limits, and the audit log. It runs in a service of its own, `admin`, reached through the [Cloudflare Tunnel](cloudflare-tunnel.md) on a hostname of its own, behind Cloudflare Access.
+
+The charts are drawn from what the server already keeps (balance changes, and job records for `BILLING_JOB_DIAGNOSTICS_RETENTION`) and from what is live now; the page collects and stores nothing of its own for them.
 
 `ADMIN_WEB_MODE` sets what it may do, when the service starts:
 
 * **`disabled`** (the default): the service does not start.
 * **`read-only`**: the page shows everything above. It adds only two kinds of entries to the audit log: who opened which account, and who lowered the page's access.
+* **`read-write`**: the page can also cancel a job, with or without a refund; add or take away minutes, at most 600 at once; pause and resume submissions; turn video links off and on; accept a video site again; block and unblock a user; and change the per-user limit. Each change goes through the same functions as the command line, so it is checked, charged, and written to the audit log the same way. Queueing a job again and deleting an account stay on the command line: the first downloads from a video site and writes job files, which the page's service may not, and the second cannot be undone.
+
+### Making a change from the page
+
+Every change takes two steps. First you give a reason (required to cancel, change a balance, or block) and the page shows what will happen, from the server: for example the balance before and after. Then you confirm within two minutes. The server keeps what you reviewed under a one-time confirmation, so the browser cannot change it; the change is made once, by the same administrator, and only if nothing changed meanwhile; otherwise you review it again. Each administrator can make at most 30 changes an hour from the page; more is done on the command line.
 
 ### How it is protected
 
 * **Two locks.** Cloudflare Access signs you in before a request reaches the server. The page then checks the token Access adds to every request: Cloudflare's signature, your team, the Access application, its lifetime, and that the address is in `ADMIN_WEB_EMAILS`. Either lock alone keeps strangers out, so a mistake in Access does not open the page, and a program on the server's internal network cannot pretend to be Cloudflare.
-* **Its own credentials.** The service signs in to Redis and PostgreSQL as `admin-read-only`. Redis lets that user read only the keys the page shows. PostgreSQL lets that role read every table except purchase tokens, and add rows only to the audit log and to the page's own lowerings. Before it serves anything, the service tries a change in each and stops if one is accepted. It gets no other secret, cannot write files, and publishes no port.
+* **Its own credentials, one pair per mode.** The service signs in to Redis and PostgreSQL as `admin-<mode>`, and gets only that mode's passwords. `admin-read-only` may read only the keys the page shows, and every table except purchase tokens, and add rows only to the audit log and to the page's own lowerings. `admin-read-write` may also write jobs, limits, and video sites' state in Redis, and change balances and reservations and record jobs in PostgreSQL; it can still not delete anything, create accounts, touch purchases, or write the queues. Before it serves anything, the service tries changes its mode must be refused, including read-write's changes in read-only mode, and stops if one is accepted. It gets no other secret, cannot write files, and publishes no port.
 * **In the browser.** The page loads nothing from elsewhere, cannot be shown inside another site, is never cached, and shows text from users only as text. It accepts a change only as JSON from its own address.
 * **Opening an account** is written to the audit log first; if that fails, nothing is shown.
 
@@ -176,7 +183,7 @@ docker compose run --rm api python -m app.config requirements
 
 ### Lowering its access from the page
 
-The page can lower its own access, for every administrator at once: from `read-only` to `disabled`. Use it when a device that is signed in is lost, or to close the page while you are away. It is under **Access** at the bottom of the page, and asks twice: it shows what will happen, then you type the mode, such as `disabled`, and press the button. A reason is required.
+The page can lower its own access, for every administrator at once: from `read-write` to `read-only` or `disabled`, or from `read-only` to `disabled`. Use it when a device that is signed in is lost, or to close the page while you are away. It is under **Access**, and asks twice: it shows what will happen, then you type the new access name exactly, such as `read-only`, and press the button. A reason is required. A lowered page stops making changes at once, also ones already reviewed.
 
 Nothing on the page raises the access again. A disabled page shows only who disabled it, when, and how to restore it. Raise it on the server:
 

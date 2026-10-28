@@ -1,17 +1,25 @@
 """The admin web page: the same data functions as `python -m app.admin`,
 behind Cloudflare Access, for the administrators in ADMIN_WEB_EMAILS.
 
-Its mode is fixed when it starts (ADMIN_WEB_MODE). It only reads, except for
-two kinds of rows its database role may add: audit entries, including one
-for each account viewed, and lowerings of its own access (app.admin.web).
-Lowering asks twice: the page first shows what will happen and gets a
-signed token that lasts two minutes, then the administrator types the mode.
-Nothing here raises the access again; only `web restore` on the command line
-does. While the page is disabled, it shows nothing but how to restore it.
+Its mode is fixed when it starts (ADMIN_WEB_MODE). In read-only mode it
+only reads, except for two kinds of rows its database role may add: audit
+entries, including one for each account viewed, and lowerings of its own
+access (app.admin.web). In read-write mode it may also make the changes in
+app.admin_web.actions.
+
+Every change asks twice. The page first gets the plan, which changes nothing,
+and a token that lasts two minutes; the server keeps the action, its
+arguments, and the reason under it, so the browser cannot alter them. The
+change is applied only with that token, once, by the same administrator, and
+only if the plan is still the same. Lowering the access also needs the new
+mode typed. Nothing here raises the access again; only `web restore` on the
+command line does. While the page is disabled, it shows nothing but how to
+restore it.
 """
 
 import hashlib
 import hmac
+import json
 import logging
 import secrets
 import time
@@ -29,6 +37,7 @@ from app.admin.common import AdminError, check_reason, parse_duration
 from app.admin.common import audit as log_action
 from app.admin_web import SERVICE_HOST
 from app.admin_web.access import HEADER, AccessVerifier, Denied
+from app.admin_web.actions import ACTIONS, CREDIT_LIMIT
 from app.config import settings
 from app.worker import tasks
 
@@ -39,9 +48,14 @@ FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/admin.js": ("admin.js", "text/javascript; charset=utf-8"),
     "/admin.css": ("admin.css", "text/css; charset=utf-8"),
+    "/logo.png": ("logo.png", "image/png"),
 }
 TOKEN_SECONDS = 120
 MAX_LIMIT = 200
+# Changes one administrator may make through the page in an hour.
+CHANGES_PER_HOUR = 30
+CONFIRM_PREFIX = "admin_web:confirm:"
+RATE_PREFIX = "admin_web:rate:"
 # Everything the page loads is its own; nothing may frame it, and nothing it
 # shows may be cached or sent elsewhere.
 SECURITY_HEADERS = {
@@ -69,6 +83,24 @@ class LowerConfirmation(LowerRequest):
     token: str
     expires: int
     confirm: str
+
+
+class ActionRequest(BaseModel):
+    action: str
+    args: dict = {}
+    reason: str | None = None
+
+
+class ActionConfirmation(BaseModel):
+    token: str
+
+
+def digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def plan_digest(plan: dict) -> str:
+    return digest(json.dumps(plan, sort_keys=True, default=str))
 
 
 def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.time) -> FastAPI:
@@ -150,10 +182,20 @@ def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.t
 
     # --- Reading ---------------------------------------------------------------
 
+    def summary(email: str) -> dict:
+        state = current()
+        writable = started_mode == "read-write" and state["effective"] == "read-write"
+        return {
+            "email": email,
+            **state,
+            "lower_to": web.lower_modes(state["effective"]),
+            "actions": sorted(ACTIONS) if writable else [],
+            "credit_limit": CREDIT_LIMIT,
+        }
+
     @app.get("/api/me")
     def me(email: str = Depends(administrator)):
-        state = current()
-        return {"email": email, **state, "lower_to": web.lower_modes(state["effective"])}
+        return summary(email)
 
     @app.get("/api/status")
     def get_status(email: str = Depends(readable)):
@@ -235,7 +277,55 @@ def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.t
         if body.confirm.strip() != body.mode:
             raise AdminError(f"Type {body.mode} to confirm")
         web.lower(body.mode, current_mode, f"web:{email}", reason)
-        state = current()
-        return {"email": email, **state, "lower_to": web.lower_modes(state["effective"])}
+        return summary(email)
+
+    # --- Changes, in read-write mode only ------------------------------------------
+
+    if started_mode != "read-write":
+        return app
+
+    def writable(email: str = Depends(administrator)) -> str:
+        if current()["effective"] != "read-write":
+            raise HTTPException(403, "The page's access was lowered; it can no longer make changes")
+        return email
+
+    def count_change(email: str) -> None:
+        key = f"{RATE_PREFIX}{digest(email)[:16]}:{int(clock() // 3600)}"
+        with tasks.redis.pipeline() as pipe:
+            pipe.incr(key)
+            pipe.expire(key, 3600)
+            count, _ = pipe.execute()
+        if count > CHANGES_PER_HOUR:
+            raise HTTPException(429, f"At most {CHANGES_PER_HOUR} changes an hour from the page; use the command line")
+
+    @app.post("/api/actions/plan", dependencies=[Depends(same_origin)])
+    def plan_action(body: ActionRequest, email: str = Depends(writable)):
+        action = ACTIONS.get(body.action)
+        if action is None:
+            raise AdminError(f"The page cannot {body.action!r}")
+        args = action.clean(body.args)
+        reason = check_reason(body.reason, required=action.reason_required)
+        plan = action.plan(args)
+        token = secrets.token_urlsafe(24)
+        stored = {"email": email, "action": body.action, "args": args, "reason": reason, "plan": plan_digest(plan)}
+        tasks.redis.set(CONFIRM_PREFIX + digest(token), json.dumps(stored), ex=TOKEN_SECONDS)
+        return {"action": body.action, "title": action.title, "serious": action.serious, "plan": plan,
+                "reason": reason, "token": token, "expires_in": TOKEN_SECONDS}
+
+    @app.post("/api/actions/apply", dependencies=[Depends(same_origin)])
+    def apply_action(body: ActionConfirmation, email: str = Depends(writable)):
+        # Taken out as it is read, so a confirmation works once.
+        stored = tasks.redis.getdel(CONFIRM_PREFIX + digest(body.token))
+        if stored is None:
+            raise HTTPException(409, "The confirmation has expired or was already used; start again")
+        stored = json.loads(stored)
+        if not hmac.compare_digest(stored["email"], email):
+            raise HTTPException(403, "This confirmation belongs to another administrator")
+        action = ACTIONS[stored["action"]]
+        if plan_digest(action.plan(stored["args"])) != stored["plan"]:
+            raise HTTPException(409, "Something changed since you reviewed it; review it again")
+        count_change(email)
+        result = action.apply(stored["args"], f"web:{email}", stored["reason"])
+        return {"action": stored["action"], "title": action.title, "result": result}
 
     return app

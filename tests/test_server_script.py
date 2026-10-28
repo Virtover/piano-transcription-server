@@ -397,15 +397,15 @@ def test_new_installation_gets_env_and_password(checkout):
     assert (checkout / ".env").read_text(encoding="utf-8") == "MAX_ACTIVE_JOBS=50\n"
     passwords = [
         (checkout / "secrets" / name).read_text(encoding="utf-8")
-        for name in ("postgres_password", "redis/operator", "redis/app", "redis/admin-read-only", "admin-web/postgres-read-only")
+        for name in ("postgres_password", "redis/operator", "redis/app", "redis/admin-read-only", "redis/admin-read-write", "admin-web/postgres-read-only", "admin-web/postgres-read-write")
     ]
-    assert len(set(passwords)) == 5
+    assert len(set(passwords)) == 7
     for password in passwords:
         assert len(password) == 48 and password.isalnum()
         # Nothing prints a password.
         assert not any(password in message for message in created)
-    assert created[2] == "created random Redis passwords in secrets/redis: operator, app, admin-read-only"
-    assert created[3] == "created random admin web page passwords in secrets/admin-web: postgres-read-only"
+    assert created[2] == "created random Redis passwords in secrets/redis: operator, app, admin-read-only, admin-read-write"
+    assert created[3] == "created random admin web page passwords in secrets/admin-web: postgres-read-only, postgres-read-write"
 
 
 def test_an_update_gets_the_missing_redis_passwords(checkout):
@@ -417,8 +417,8 @@ def test_an_update_gets_the_missing_redis_passwords(checkout):
     (checkout / "secrets" / "redis" / "app").mkdir()
 
     assert server.prepare_files(checkout) == [
-        "created random Redis passwords in secrets/redis: app, admin-read-only",
-        "created random admin web page passwords in secrets/admin-web: postgres-read-only",
+        "created random Redis passwords in secrets/redis: app, admin-read-only, admin-read-write",
+        "created random admin web page passwords in secrets/admin-web: postgres-read-only, postgres-read-write",
     ]
     assert (checkout / "secrets" / "redis" / "operator").read_text(encoding="utf-8") == "kept"
     assert (checkout / "secrets" / "redis" / "app").is_file()

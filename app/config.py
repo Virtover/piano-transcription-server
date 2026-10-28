@@ -744,8 +744,6 @@ def admin_web_problems(config: "Settings", check_profile: bool = True) -> list[s
             return [f"COMPOSE_PROFILES lists {ADMIN_WEB_PROFILE}, but ADMIN_WEB_MODE=disabled; remove it from COMPOSE_PROFILES"]
         return []
     problems = []
-    if admin.mode == "read-write":
-        problems.append("ADMIN_WEB_MODE=read-write is not available yet; use read-only")
     required = {
         "ADMIN_WEB_HOSTNAME": admin.hostname,
         "ADMIN_WEB_EMAILS": admin.emails,

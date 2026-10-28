@@ -4,26 +4,61 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Server admin</title>
+  <meta name="robots" content="noindex">
+  <title>Server admin · Piano Weave</title>
+  <link rel="icon" type="image/png" href="/logo.png">
   <link rel="stylesheet" href="/admin.css">
   <script src="/admin.js" defer></script>
 </head>
 <body>
-  <header>
-    <h1>Server admin</h1>
-    <p id="who" class="muted">Loading…</p>
-  </header>
-  <nav id="nav" aria-label="Sections" hidden>
-    <button type="button" data-view="status">Status</button>
-    <button type="button" data-view="jobs">Jobs</button>
-    <button type="button" data-view="users">Users</button>
-    <button type="button" data-view="billing">Billing</button>
-    <button type="button" data-view="limits">Limits</button>
-    <button type="button" data-view="audit">Audit</button>
-  </nav>
-  <main id="main" aria-live="polite"></main>
-  <footer>
-    <button type="button" id="access-link" class="link" hidden>Access: <span id="mode"></span></button>
-  </footer>
+  <div class="adm">
+    <aside class="adm-side">
+      <div class="adm-brand">
+        <img src="/logo.png" alt="">
+        <div>
+          <strong>Server admin</strong>
+          <small>PIANO WEAVE</small>
+        </div>
+      </div>
+      <nav class="adm-nav" id="nav" aria-label="Sections" hidden>
+        <button type="button" data-view="overview">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          Overview
+        </button>
+        <button type="button" data-view="jobs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          Jobs
+        </button>
+        <button type="button" data-view="users">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0"/><path d="M16 4a4 4 0 0 1 0 8M22 21a7 7 0 0 0-4-6.3"/></svg>
+          Users
+        </button>
+        <button type="button" data-view="billing">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
+          Billing
+        </button>
+        <button type="button" data-view="limits">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>
+          Limits
+        </button>
+        <button type="button" data-view="audit">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>
+          Audit log
+        </button>
+        <div class="sep"></div>
+        <button type="button" data-view="access">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          Access
+        </button>
+      </nav>
+      <div class="adm-foot">
+        <div class="adm-role"><span>ACCESS</span><span class="tag" id="mode">…</span></div>
+        <div class="adm-user"><span id="who">Signing in…</span></div>
+      </div>
+    </aside>
+    <main class="adm-main" id="main" aria-live="polite"></main>
+  </div>
+  <div id="modal-root"></div>
+  <div class="toast-wrap" id="toasts" aria-live="polite"></div>
 </body>
 </html>

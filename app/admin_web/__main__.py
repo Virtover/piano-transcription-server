@@ -2,9 +2,11 @@
 
 With ADMIN_WEB_MODE=disabled it exits at once. Otherwise it serves only when
 the settings are complete and its own credentials are what its mode allows:
-before serving, it tries a change in Redis and in the billing database that
-its users must be refused, and it stops if either is accepted. It never
-creates or changes the billing database's tables.
+before serving, it tries changes in Redis and in the billing database that
+its mode's users must be refused, and it stops if any is accepted. In
+read-only mode that includes changes read-write may make, so read-write
+credentials cannot serve a read-only page. It never creates or changes the
+billing database's tables.
 """
 
 import logging
@@ -17,32 +19,47 @@ from app.worker import tasks
 
 logger = logging.getLogger("app.admin_web")
 
-# A key no admin user may write, and a change no admin role may make. The
-# change matches no row, so it changes nothing even where it is allowed.
-REDIS_PROBE_KEY = "admin_web:probe"
-DATABASE_PROBE = "UPDATE billing_state SET value = value WHERE false"
+# For each mode, keys its Redis user must not write and changes its database
+# role must not make. A key expires at once and a change matches no row, so
+# each is harmless even where it is allowed.
+REDIS_PROBES = {
+    "read-only": ["workers:admin_web_probe", "controls:admin_web_probe"],
+    "read-write": ["workers:admin_web_probe"],
+}
+DATABASE_PROBES = {
+    "read-only": [
+        "UPDATE billing_state SET value = value WHERE false",
+        "UPDATE users SET minutes = minutes WHERE false",
+    ],
+    "read-write": [
+        "UPDATE billing_state SET value = value WHERE false",
+        "DELETE FROM users WHERE false",
+    ],
+}
 
 
-def least_privilege_problems(redis=None, billing=None) -> list[str]:
-    """What the service's credentials may do but must not."""
+def least_privilege_problems(mode: str, redis=None, billing=None) -> list[str]:
+    """What the service's credentials may do but must not in mode."""
     from redis.exceptions import NoPermissionError
 
     redis = redis or tasks.redis
     billing = billing or tasks.billing
     problems = []
-    try:
-        # Expires at once, so it is harmless if it is accepted.
-        redis.set(REDIS_PROBE_KEY, "1", px=1)
-        problems.append("its Redis user may write; REDIS_URL must name the user admin-<mode>, see redis/users.acl")
-    except NoPermissionError:
-        pass
-    with closing(billing._connect()) as connection:
+    for key in REDIS_PROBES[mode]:
         try:
-            connection.execute(DATABASE_PROBE)
-            problems.append("its database role may change tables; BILLING_DATABASE_URL must name the role admin-<mode>")
-        except Exception as error:
-            if "permission denied" not in str(error).lower():
-                raise
+            redis.set(key, "1", px=1)
+            problems.append(f"its Redis user may write {key}; REDIS_URL must name the user admin-{mode}, see redis/users.acl")
+        except NoPermissionError:
+            pass
+    for statement in DATABASE_PROBES[mode]:
+        # A refused statement ends its transaction, so each gets its own.
+        with closing(billing._connect()) as connection:
+            try:
+                connection.execute(statement)
+                problems.append(f"its database role may run {statement!r}; BILLING_DATABASE_URL must name the role admin-{mode}")
+            except Exception as error:
+                if "permission denied" not in str(error).lower():
+                    raise
     return problems
 
 
@@ -59,7 +76,7 @@ def main() -> int:
         return 1
     # The admin roles may not create tables; the API keeps the schema.
     tasks.billing = Billing(create_schema=False)
-    problems = least_privilege_problems()
+    problems = least_privilege_problems(settings.admin_web.mode)
     if problems:
         for problem in problems:
             logger.error("refusing to start: %s", problem)

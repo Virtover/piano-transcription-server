@@ -62,9 +62,9 @@ FETCHED = re.compile(r"saved and checked: (/billing/\S+)")
 # app.backups.BACKUP_FILE_PATTERN: the automatic backups in billing-data/backups.
 LOCAL_BACKUP = re.compile(r"^billing-(\d+)\.(?:sqlite3|dump)$")
 # The Redis users with a password in secrets/redis; see redis/users.acl.
-REDIS_USERS = ["operator", "app", "admin-read-only"]
+REDIS_USERS = ["operator", "app", "admin-read-only", "admin-read-write"]
 # The admin web page's PostgreSQL roles; the API creates them from these.
-ADMIN_WEB_DATABASE_PASSWORDS = ["postgres-read-only"]
+ADMIN_WEB_DATABASE_PASSWORDS = ["postgres-read-only", "postgres-read-write"]
 # redis-cli in the redis container, signed in as operator. A container from
 # before Redis had users has no password file and needs none. The password
 # goes through the environment, not the command line.

@@ -809,10 +809,25 @@ def deleted_user_target(user_id: str) -> str:
 
 # The admin web page's PostgreSQL role for each mode, and its password file
 # in the secrets folder, which scripts/server.py creates. See app/admin_web.
-ADMIN_WEB_ROLES = {"read-only": "admin-read-only"}
+ADMIN_WEB_ROLES = {"read-only": "admin-read-only", "read-write": "admin-read-write"}
 ADMIN_WEB_SECRETS = "admin-web"
-# What the page may write: the audit log and lowerings of its own access.
-ADMIN_WEB_INSERTS = ("admin_actions", "admin_web_caps")
+# What each mode's role may write, beyond reading. Read-only adds only audit
+# entries and lowerings of its own access. Read-write may also cancel jobs and
+# change balances by hand: never delete anything, create users, or touch
+# purchases, which stay with the API and the command line.
+ADMIN_WEB_WRITES = {
+    "read-only": {"admin_actions": "INSERT", "admin_web_caps": "INSERT"},
+    "read-write": {
+        "admin_actions": "INSERT",
+        "admin_web_caps": "INSERT",
+        "users": "UPDATE (minutes)",
+        "minute_ledger": "INSERT",
+        "transcription_reservations": "UPDATE (status, charged_minutes)",
+        "job_diagnostics": "INSERT, UPDATE",
+    },
+}
+# Tables whose rows take their ID from a sequence.
+SEQUENCES = {"admin_actions", "admin_web_caps", "minute_ledger"}
 # Purchase tokens are never shown, so the page cannot read them.
 PURCHASE_COLUMNS_SHOWN = ("product_id", "user_id", "minutes", "order_id", "voided_at")
 
@@ -824,9 +839,9 @@ def admin_web_password_file(mode: str) -> Path:
 def _sync_admin_web_roles(connection) -> None:
     """Create or update the admin web page's roles whose password file
     exists, with exactly their privileges: read every table except purchase
-    tokens, and add rows to the audit log and admin_web_caps. Nothing else,
-    so the database refuses any other change whatever the page's code does.
-    Runs with the schema, as the owner."""
+    tokens, and write only what ADMIN_WEB_WRITES lists for their mode.
+    Nothing else, so the database refuses any other change whatever the
+    page's code does. Runs with the schema, as the owner."""
     from psycopg import sql
 
     tables = [row["tablename"] for row in connection.execute(
@@ -855,11 +870,13 @@ def _sync_admin_web_roles(connection) -> None:
                 connection.execute(sql.SQL("GRANT SELECT ({}) ON purchases TO {}").format(columns, name))
             else:
                 connection.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(sql.Identifier(table), name))
-        for table in ADMIN_WEB_INSERTS:
-            connection.execute(sql.SQL("GRANT INSERT ON {} TO {}").format(sql.Identifier(table), name))
-            connection.execute(
-                sql.SQL("GRANT USAGE ON SEQUENCE {} TO {}").format(sql.Identifier(f"{table}_id_seq"), name)
-            )
+        for table, privileges in ADMIN_WEB_WRITES[mode].items():
+            # Fixed strings from ADMIN_WEB_WRITES, never input.
+            connection.execute(sql.SQL("GRANT " + privileges + " ON {} TO {}").format(sql.Identifier(table), name))
+            if table in SEQUENCES:
+                connection.execute(
+                    sql.SQL("GRANT USAGE ON SEQUENCE {} TO {}").format(sql.Identifier(f"{table}_id_seq"), name)
+                )
 
 
 def _log_admin_action(
