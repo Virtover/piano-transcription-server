@@ -10,6 +10,7 @@ The basic stack runs with Docker alone. The other parts are optional and each ne
 | Google sign-in | Accounts; required for billing | [Google sign-in](google-sign-in.md) | about 30 min |
 | Google Play billing | Paid minutes, free minutes | [Google Play billing](google-play-billing.md) | about 1 hour, plus up to a day for Google permissions |
 | RunPod outsourcing | Extra GPUs when this machine is busy | [Outsourcing to RunPod](runpod.md) | about 1 hour |
+| Error reports | Server errors sent to a website that collects them | [Error reports](configuration.md#error-reports) | 5 min, with a website that accepts them |
 
 > [!NOTE]
 > Where commands differ by system, the docs show a **Windows (PowerShell)** block and a **macOS and Linux** block (bash or zsh): run the one for yours. All other commands run the same in any terminal. On macOS and Linux, type `python3` where the docs say `python` if `python` is not found.

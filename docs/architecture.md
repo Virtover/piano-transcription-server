@@ -78,6 +78,8 @@ docker compose exec redis redis-cli config set appendonly yes
 
 None of this protects against losing the disk or the machine. For that, turn on [off-site copies](configuration.md#off-site-copies) of the billing backups. Off-site copy failures and backups that stop advancing are logged as operational errors; the backup state is also visible in the administration status. They do not make `/health` fail, and `/ready` remains focused on Redis and billing database reachability.
 
+With `ERROR_REPORT_URL` set, the API and the workers also send every error they log, and every job that fails without a known cause, to a website, with secrets and signed links removed. See [Error reports](configuration.md#error-reports).
+
 ### 🔁 Planned restarts and shutdowns
 
 Restart or stop the stack with `scripts/server.py` on the host instead of running `docker compose` directly. It announces the restart or shutdown to clients first, and needs only Python 3 and the docker CLI:
@@ -118,7 +120,7 @@ Records older than `BILLING_JOB_DIAGNOSTICS_RETENTION` (default `30d`) are delet
 To look at recent failures, use `python -m app.admin jobs --failed` and `jobs show <job>`; see [Administration](administration.md#-jobs). A backup copy can also be queried directly:
 
 ```sql
-SELECT job_id, datetime(created_at, 'unixepoch'), backend, outsourced, error
+SELECT job_id, to_timestamp(created_at), backend, outsourced, error
 FROM job_diagnostics WHERE status = 'failed' ORDER BY created_at DESC LIMIT 20;
 ```
 

@@ -28,8 +28,9 @@ docker compose exec api python -m app.admin status              # live picture; 
 | `app/worker/tasks.py` | Job lifecycle, billing settlement, local and remote actors |
 | `app/outsource/` | Routing between local and RunPod, storage, the RunPod client |
 | `app/transcription/` | Audio, batching, and the model |
-| `app/billing.py` | SQLite billing database, also job diagnostics |
+| `app/billing.py` | Billing database (PostgreSQL; SQLite only for legacy installs), also job diagnostics |
 | `app/backups.py` | `python -m app.backups`: billing backups, which are kept, and the encrypted off-site copies |
+| `app/error_report.py` | Optional error reports of the API and workers to `ERROR_REPORT_URL`, with secrets redacted |
 | `runpod/handler.py` | The RunPod Serverless handler, built with `Dockerfile.runpod` |
 | `app/admin/`, `app/controls.py` | `python -m app.admin`: status, jobs, users, the billing report, and temporary limits the API reads from Redis |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
