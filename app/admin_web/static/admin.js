@@ -1108,7 +1108,7 @@ async function start() {
     me = await api("/api/me");
   } catch (error) {
     document.getElementById("who").textContent = "Not signed in";
-    fill(main, head("Server panel", null), errorBox(error));
+    fill(main, head("Server Panel", null), errorBox(error));
     return;
   }
   document.getElementById("who").textContent = me.email;
