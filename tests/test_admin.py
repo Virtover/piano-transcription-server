@@ -895,9 +895,9 @@ def test_changes_say_how_to_undo_them(billed, capsys, monkeypatch):
     monkeypatch.setenv(common.COMMAND_VARIABLE, "python scripts/admin.py")
 
     _, output = admin(capsys, "limits", "pause", "--for", "1h")
-    assert "Undo: python scripts/admin.py limits resume" in output
+    assert "To undo this, run: python scripts/admin.py limits resume" in output
     _, output = admin(capsys, "user", "user", "credit", "5", "--reason", "goodwill", "--yes")
-    assert "Undo: python scripts/admin.py user user credit -5 --reason '<why>'" in output
+    assert "To undo this, run: python scripts/admin.py user user credit -5 --reason '<why>'" in output
 
 
 def test_the_actor_defaults_to_who_runs_the_wrapper(billed, capsys, monkeypatch):

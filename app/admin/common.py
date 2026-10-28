@@ -183,7 +183,7 @@ def finish(args, result: dict, text: str, undo: list[str] | None = None) -> None
         return
     print(text)
     if undo:
-        print(f"Undo: {command_prefix()} {shlex.join(undo)}")
+        print(f"To undo this, run: {command_prefix()} {shlex.join(undo)}")
 
 
 def billing_enabled() -> bool:
