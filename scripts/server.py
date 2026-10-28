@@ -62,7 +62,9 @@ FETCHED = re.compile(r"saved and checked: (/billing/\S+)")
 # app.backups.BACKUP_FILE_PATTERN: the automatic backups in billing-data/backups.
 LOCAL_BACKUP = re.compile(r"^billing-(\d+)\.(?:sqlite3|dump)$")
 # The Redis users with a password in secrets/redis; see redis/users.acl.
-REDIS_USERS = ["operator", "app"]
+REDIS_USERS = ["operator", "app", "admin-read-only"]
+# The admin web page's PostgreSQL roles; the API creates them from these.
+ADMIN_WEB_DATABASE_PASSWORDS = ["postgres-read-only"]
 # redis-cli in the redis container, signed in as operator. A container from
 # before Redis had users has no password file and needs none. The password
 # goes through the environment, not the command line.
@@ -107,6 +109,9 @@ def prepare_files(root: Path) -> list[str]:
     new_users = [name for name in REDIS_USERS if create_password(root, f"secrets/redis/{name}")]
     if new_users:
         created.append(f"created random Redis passwords in secrets/redis: {', '.join(new_users)}")
+    new_roles = [name for name in ADMIN_WEB_DATABASE_PASSWORDS if create_password(root, f"secrets/admin-web/{name}")]
+    if new_roles:
+        created.append(f"created random admin web page passwords in secrets/admin-web: {', '.join(new_roles)}")
     # Created here rather than by Docker, which would make it root's. The
     # prepare service gives it to the services and keeps its group.
     (root / "billing-data" / "backups").mkdir(parents=True, exist_ok=True)

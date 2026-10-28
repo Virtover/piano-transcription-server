@@ -127,6 +127,68 @@ python scripts/admin.py audit
 
 Lists the latest admin actions (`--limit`, default 30) with their time, who acted (`--by`), the action, its target (a job or user ID), details, and the reason. The log is the `admin_actions` table of the billing database, so the billing backups include it.
 
+The [admin web page](#-admin-web-page) logs as `web:<email>`: `web.user_view` when an account is opened, `web.user_search` when accounts are searched (without the search text), and `web.lower` when its access is lowered. `web.restore` is logged when the command line raises it again.
+
+## 🌐 Admin web page
+
+Optional: a page that shows what `status`, `jobs`, `user`, `billing`, `limits`, and `audit` show, for checking on the server from anywhere. It runs in a service of its own, `admin`, reached through the [Cloudflare Tunnel](cloudflare-tunnel.md) on a hostname of its own, behind Cloudflare Access. It changes nothing on the server, so jobs, accounts, and limits are still changed with `python scripts/admin.py`.
+
+`ADMIN_WEB_MODE` sets what it may do, when the service starts:
+
+* **`disabled`** (the default): the service does not start.
+* **`read-only`**: the page shows everything above. It adds only two kinds of entries to the audit log: who opened which account, and who lowered the page's access.
+
+### How it is protected
+
+* **Two locks.** Cloudflare Access signs you in before a request reaches the server. The page then checks the token Access adds to every request: Cloudflare's signature, your team, the Access application, its lifetime, and that the address is in `ADMIN_WEB_EMAILS`. Either lock alone keeps strangers out, so a mistake in Access does not open the page, and a program on the server's internal network cannot pretend to be Cloudflare.
+* **Its own credentials.** The service signs in to Redis and PostgreSQL as `admin-read-only`. Redis lets that user read only the keys the page shows. PostgreSQL lets that role read every table except purchase tokens, and add rows only to the audit log and to the page's own lowerings. Before it serves anything, the service tries a change in each and stops if one is accepted. It gets no other secret, cannot write files, and publishes no port.
+* **In the browser.** The page loads nothing from elsewhere, cannot be shown inside another site, is never cached, and shows text from users only as text. It accepts a change only as JSON from its own address.
+* **Opening an account** is written to the audit log first; if that fails, nothing is shown.
+
+### Setting it up
+
+What Cloudflare must provide, with values from your configuration:
+
+```shell
+docker compose run --rm api python -m app.config requirements
+```
+
+1. **In Cloudflare**, as `requirements` lists under **Admin web page**: a second public hostname on the tunnel, such as `admin.example.com`, sent to `http://admin:8100`, and an Access application that protects it, allowing only your addresses, with a second factor. Look up where each is set in Cloudflare's current documentation.
+2. **In `.env`**, with the application's AUD tag and your team domain from Cloudflare:
+
+   ```env
+   COMPOSE_PROFILES=cloudflare,admin
+   ADMIN_WEB_MODE=read-only
+   ADMIN_WEB_HOSTNAME=admin.example.com
+   ADMIN_WEB_EMAILS=["you@example.com"]
+   CLOUDFLARE_ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com
+   CLOUDFLARE_ACCESS_AUD=<the application's AUD tag>
+   ```
+
+3. **Start it and verify.** `start` and `restart` create the page's passwords in `secrets/redis` and `secrets/admin-web`:
+
+   ```shell
+   python scripts/server.py restart 5m
+   docker compose run --rm api python -m app.config check --online
+   ```
+
+   `check --online` confirms that the hostname asks for the Access sign-in instead of showing the page, that your team's keys can be read, and that the service refuses a request without Access's token.
+
+### Lowering its access from the page
+
+The page can lower its own access, for every administrator at once: from `read-only` to `disabled`. Use it when a device that is signed in is lost, or to close the page while you are away. It is under **Access** at the bottom of the page, and asks twice: it shows what will happen, then you type the mode, such as `disabled`, and press the button. A reason is required.
+
+Nothing on the page raises the access again. A disabled page shows only who disabled it, when, and how to restore it. Raise it on the server:
+
+```shell
+python scripts/admin.py web
+python scripts/admin.py web restore --reason "found the phone"
+```
+
+`web` shows the mode in effect and every lowering; `restore` asks first and removes them, and the page has its configured access again from its next request. `status` shows the page's mode too.
+
+To turn the page off at once on the server, stop the service with `docker compose stop admin`; set `ADMIN_WEB_MODE=disabled` and remove `admin` from `COMPOSE_PROFILES` to keep it off.
+
 ## 🧩 Using the commands from code
 
 Each command is a data function in `app/admin/` that returns plain data, with the command line printing it. Another tool, such as an admin web page, calls the same functions, so it behaves exactly like the commands, including the audit log:

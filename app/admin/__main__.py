@@ -22,7 +22,7 @@ import sys
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from app.admin import audit, jobs, limits, report, status, users
+from app.admin import audit, jobs, limits, report, status, users, web
 from app.admin.common import AdminError, default_actor
 
 # Errors that mean a service is not reachable, not a fault of the command.
@@ -132,6 +132,12 @@ def parser() -> argparse.ArgumentParser:
     command = commands.add_parser("audit", parents=[reads], help="recent admin actions")
     command.add_argument("--limit", type=int, default=30, help="most actions to list (default: 30)")
     command.set_defaults(run=audit.run)
+
+    web_commands = commands.add_parser("web", parents=[reads], help="the admin web page's access; raise it again")
+    web_commands.set_defaults(run=web.run_show)
+    web_actions = web_commands.add_subparsers(dest="action")
+    command = web_actions.add_parser("restore", parents=[changes, asks], help="remove the lowerings made from the page")
+    command.set_defaults(run=web.run_restore)
     return root
 
 

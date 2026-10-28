@@ -587,10 +587,60 @@ def check_redis(config, connect: Callable | None = None) -> Result:
     return Result("Redis users", "ok", "refused without a password; the services' user cannot change the configuration")
 
 
+# --- Admin web page ---------------------------------------------------------
+
+def check_admin_web(config, http=requests) -> list[Result]:
+    """Strangers cannot reach the page: its hostname answers with Cloudflare
+    Access's sign-in, the team's signing keys can be read, and the service
+    itself refuses a request without Access's token."""
+    from app.admin_web import PORT, SERVICE_HOST
+    from app.admin_web.access import keys_url
+
+    admin = config.admin_web
+    results = []
+    try:
+        response = http.get(f"https://{admin.hostname}/api/me", timeout=REQUEST_TIMEOUT, allow_redirects=False)
+        location = response.headers.get("location", "")
+        if response.status_code == 200:
+            results.append(Result("Admin web page", "fail", f"https://{admin.hostname} answers without a sign-in",
+                                  "Put Cloudflare Access in front of the hostname; see: python -m app.config requirements"))
+        elif response.status_code in (301, 302, 303, 307) and ".cloudflareaccess.com" in location:
+            results.append(Result("Admin web page", "ok", f"https://{admin.hostname} asks for the Cloudflare Access sign-in"))
+        elif response.status_code in (401, 403):
+            results.append(Result("Admin web page", "warn", f"https://{admin.hostname} refuses without a sign-in (HTTP {response.status_code})",
+                                  "Expected the Cloudflare Access sign-in; check that Access protects every path."))
+        else:
+            results.append(Result("Admin web page", "fail", f"https://{admin.hostname}: HTTP {response.status_code}",
+                                  "Send the hostname to http://admin:8100 on the tunnel, behind Cloudflare Access."))
+    except requests.RequestException as error:
+        results.append(Result("Admin web page", "fail", f"https://{admin.hostname} cannot be reached: {type(error).__name__}"))
+    try:
+        response = http.get(keys_url(admin.access_team_domain), timeout=REQUEST_TIMEOUT, allow_redirects=False)
+        response.raise_for_status()
+        if not response.json().get("public_certs"):
+            raise ValueError("no keys")
+        results.append(Result("Access keys", "ok", f"{admin.access_team_domain} publishes its signing keys"))
+    except (requests.RequestException, ValueError) as error:
+        results.append(Result("Access keys", "fail", f"cannot read the keys of {admin.access_team_domain}: {type(error).__name__}",
+                              "Check CLOUDFLARE_ACCESS_TEAM_DOMAIN."))
+    try:
+        response = http.get(f"http://{SERVICE_HOST}:{PORT}/api/me", timeout=REQUEST_TIMEOUT, allow_redirects=False)
+        if response.status_code == 403:
+            results.append(Result("Admin service", "ok", "refuses a request without Cloudflare Access's token"))
+        else:
+            results.append(Result("Admin service", "fail", f"answered HTTP {response.status_code} without a token"))
+    except requests.RequestException as error:
+        results.append(Result("Admin service", "fail", f"not reachable: {type(error).__name__}",
+                              "Is it running? docker compose logs admin"))
+    return results
+
+
 # --- Running ----------------------------------------------------------------
 
 def run_checks(config) -> list[Result]:
     results = [check_redis(config)]
+    if config.admin_web.enabled:
+        results.extend(check_admin_web(config))
     if config.outsource.provider == "runpod":
         results.append(check_storage(config))
         results.extend(check_runpod(config))

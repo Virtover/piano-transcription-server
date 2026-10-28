@@ -153,6 +153,45 @@ services:
     restart: unless-stopped
     logging: *logging
 
+  # Optional admin web page; see docs/administration.md. Started only with
+  # admin in COMPOSE_PROFILES, and it exits at once with ADMIN_WEB_MODE=disabled.
+  # cloudflared sends it its own hostname, behind Cloudflare Access; no port
+  # is published. It signs in to Redis and PostgreSQL as admin-<mode>, with
+  # only what that mode needs, gets no other secret, and cannot write files.
+  admin:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    profiles: [admin]
+    env_file:
+      - .env
+    environment:
+      <<: *wiring
+      REDIS_URL: redis://admin-${ADMIN_WEB_MODE:-disabled}@redis:6379/0
+      BILLING_DATABASE_URL: postgresql://admin-${ADMIN_WEB_MODE:-disabled}@postgres:5432/billing
+    volumes:
+      - data:/data:ro
+      - ./billing-data/backups:/billing/backups:ro
+      - ./secrets/redis/admin-${ADMIN_WEB_MODE:-disabled}:/run/redis/password:ro
+      - ./secrets/admin-web/postgres-${ADMIN_WEB_MODE:-disabled}:/run/secrets/postgres_password:ro
+    command: ["python", "-m", "app.admin_web"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      # The API creates the tables and the admin roles.
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+    logging: *logging
+
   # Optional HTTPS access through a Cloudflare Tunnel. Started only with
   # COMPOSE_PROFILES=cloudflare in .env. It connects out to Cloudflare and
   # forwards to the API on this network, so no port is opened. Only it gets

@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from app import backups, controls, job_limits, maintenance, video_sites
+from app.admin import web
 from app.admin.common import ago, size, span
 from app.config import settings
 from app.outsource import routing
@@ -106,6 +107,7 @@ def collect() -> dict:
             "per_user_limit": int(per_user.value) if per_user else None,
             "blocked_users": len(controls.blocked_users(redis)),
         },
+        "admin_web": web.state(),
     }
 
 
@@ -189,6 +191,9 @@ def render(state: dict) -> str:
     if controls_state["blocked_users"]:
         active.append(f"{controls_state['blocked_users']} blocked users")
     lines.append("Controls      " + (", ".join(active) + " (see: limits)" if active else "none"))
+    web = state["admin_web"]
+    lowered = f", lowered from {web['configured']} (see: web)" if web["effective"] != web["configured"] else ""
+    lines.append(f"Admin web     {web['effective']}{lowered}")
     return "\n".join(lines)
 
 

@@ -59,7 +59,7 @@ def cancelled_cost(full_cost: int, progress: float) -> int:
 
 
 class Billing:
-    def __init__(self, database_path: str | None = None):
+    def __init__(self, database_path: str | None = None, create_schema: bool = True):
         # The database is created on first use, not here: modules create a
         # Billing when imported, also in services and tests without access
         # to the billing directory.
@@ -69,7 +69,9 @@ class Billing:
             if settings.secrets.billing_database_url else settings.billing.database_url
         )
         self._postgres = bool(self.database_url and not database_path)
-        self._ready = False
+        # The admin web page's roles may not create or change tables; the
+        # API keeps the schema.
+        self._ready = not create_schema
         self._ready_lock = threading.Lock()
 
     def _create_schema(self) -> None:
@@ -113,6 +115,10 @@ class Billing:
                         id BIGSERIAL PRIMARY KEY, at BIGINT NOT NULL, actor TEXT NOT NULL,
                         action TEXT NOT NULL, target TEXT, detail TEXT, reason TEXT
                     );
+                    CREATE TABLE IF NOT EXISTS admin_web_caps (
+                        id BIGSERIAL PRIMARY KEY, at BIGINT NOT NULL, actor TEXT NOT NULL,
+                        mode TEXT NOT NULL CHECK (mode IN ('read-only', 'disabled')), reason TEXT
+                    );
                     CREATE INDEX IF NOT EXISTS minute_ledger_user_index ON minute_ledger (user_id);
                     CREATE INDEX IF NOT EXISTS minute_ledger_at_index ON minute_ledger (at);
                     CREATE INDEX IF NOT EXISTS job_diagnostics_user_index ON job_diagnostics (user_id);
@@ -129,6 +135,7 @@ class Billing:
                         applied_at=int(time.time()),
                     ),
                 )
+                _sync_admin_web_roles(connection)
             return
         Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
         with closing(self._open()) as connection, connection:
@@ -194,6 +201,13 @@ class Billing:
                     action TEXT NOT NULL,
                     target TEXT,
                     detail TEXT,
+                    reason TEXT
+                );
+                CREATE TABLE IF NOT EXISTS admin_web_caps (
+                    id INTEGER PRIMARY KEY,
+                    at INTEGER NOT NULL,
+                    actor TEXT NOT NULL,
+                    mode TEXT NOT NULL CHECK (mode IN ('read-only', 'disabled')),
                     reason TEXT
                 );
                 CREATE INDEX IF NOT EXISTS minute_ledger_user_index ON minute_ledger (user_id);
@@ -574,6 +588,31 @@ class Billing:
         with self._connect() as connection:
             _log_admin_action(connection, actor, action, target, detail, reason)
 
+    def admin_web_caps(self) -> list[dict]:
+        """Lowerings of the admin web page's access, oldest first; see
+        app.admin.web."""
+        return [dict(row) for row in self.read("SELECT * FROM admin_web_caps ORDER BY id")]
+
+    def lower_admin_web(self, mode: str, actor: str, reason: str) -> None:
+        """Lower the admin web page's access to mode, with its audit entry
+        in the same transaction. The page's roles may add these rows, never
+        change or delete them."""
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO admin_web_caps (at, actor, mode, reason) VALUES (?, ?, ?, ?)",
+                (int(time.time()), actor, mode, reason),
+            )
+            _log_admin_action(connection, actor, "web.lower", None, mode, reason)
+
+    def restore_admin_web(self, actor: str, reason: str) -> int:
+        """Remove every lowering, from the command line only. Returns how
+        many there were."""
+        with self._connect() as connection:
+            self._begin_write(connection)
+            removed = connection.execute("DELETE FROM admin_web_caps").rowcount
+            _log_admin_action(connection, actor, "web.restore", None, f"{removed} lowering(s) removed", reason)
+            return removed
+
     def read(self, query: str, parameters: tuple = ()) -> list[sqlite3.Row]:
         """Rows of a query, for the admin commands' reports. It runs in a
         read-only transaction, so the database refuses any change."""
@@ -766,6 +805,61 @@ def period_seconds() -> int:
 def deleted_user_target(user_id: str) -> str:
     """How the audit log names a deleted user: by a hash, like deleted_users."""
     return "deleted:" + _user_hash(user_id)[:16]
+
+
+# The admin web page's PostgreSQL role for each mode, and its password file
+# in the secrets folder, which scripts/server.py creates. See app/admin_web.
+ADMIN_WEB_ROLES = {"read-only": "admin-read-only"}
+ADMIN_WEB_SECRETS = "admin-web"
+# What the page may write: the audit log and lowerings of its own access.
+ADMIN_WEB_INSERTS = ("admin_actions", "admin_web_caps")
+# Purchase tokens are never shown, so the page cannot read them.
+PURCHASE_COLUMNS_SHOWN = ("product_id", "user_id", "minutes", "order_id", "voided_at")
+
+
+def admin_web_password_file(mode: str) -> Path:
+    return Path(settings.secrets_dir) / ADMIN_WEB_SECRETS / f"postgres-{mode}"
+
+
+def _sync_admin_web_roles(connection) -> None:
+    """Create or update the admin web page's roles whose password file
+    exists, with exactly their privileges: read every table except purchase
+    tokens, and add rows to the audit log and admin_web_caps. Nothing else,
+    so the database refuses any other change whatever the page's code does.
+    Runs with the schema, as the owner."""
+    from psycopg import sql
+
+    tables = [row["tablename"] for row in connection.execute(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+    ).fetchall()]
+    for mode, role in ADMIN_WEB_ROLES.items():
+        password_file = admin_web_password_file(mode)
+        password = password_file.read_text(encoding="utf-8").strip() if password_file.is_file() else ""
+        if not password:
+            continue
+        name = sql.Identifier(role)
+        if connection.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone() is None:
+            connection.execute(sql.SQL("CREATE ROLE {}").format(name))
+        connection.execute(
+            sql.SQL(
+                "ALTER ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT "
+                "CONNECTION LIMIT 20 PASSWORD {}"
+            ).format(name, sql.Literal(password))
+        )
+        # Column privileges go with the table's, so this starts from nothing.
+        connection.execute(sql.SQL("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {}").format(name))
+        connection.execute(sql.SQL("REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM {}").format(name))
+        for table in tables:
+            if table == "purchases":
+                columns = sql.SQL(", ").join(sql.Identifier(column) for column in PURCHASE_COLUMNS_SHOWN)
+                connection.execute(sql.SQL("GRANT SELECT ({}) ON purchases TO {}").format(columns, name))
+            else:
+                connection.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(sql.Identifier(table), name))
+        for table in ADMIN_WEB_INSERTS:
+            connection.execute(sql.SQL("GRANT INSERT ON {} TO {}").format(sql.Identifier(table), name))
+            connection.execute(
+                sql.SQL("GRANT USAGE ON SEQUENCE {} TO {}").format(sql.Identifier(f"{table}_id_seq"), name)
+            )
 
 
 def _log_admin_action(

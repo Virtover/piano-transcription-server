@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Server admin</title>
+  <link rel="stylesheet" href="/admin.css">
+  <script src="/admin.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Server admin</h1>
+    <p id="who" class="muted">Loading…</p>
+  </header>
+  <nav id="nav" aria-label="Sections" hidden>
+    <button type="button" data-view="status">Status</button>
+    <button type="button" data-view="jobs">Jobs</button>
+    <button type="button" data-view="users">Users</button>
+    <button type="button" data-view="billing">Billing</button>
+    <button type="button" data-view="limits">Limits</button>
+    <button type="button" data-view="audit">Audit</button>
+  </nav>
+  <main id="main" aria-live="polite"></main>
+  <footer>
+    <button type="button" id="access-link" class="link" hidden>Access: <span id="mode"></span></button>
+  </footer>
+</body>
+</html>

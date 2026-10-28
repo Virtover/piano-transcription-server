@@ -60,6 +60,8 @@ docker compose run --rm api python -m app.config requirements
 
 `python scripts/server.py restart` and `stop` include the tunnel. While the server is stopped, Cloudflare answers the address with an error page.
 
+The optional [admin web page](administration.md#-admin-web-page) uses the same tunnel, with a second hostname behind Cloudflare Access. Never give the API's hostname a sign-in: the app could not pass it.
+
 ## 📦 Upload size
 
 Cloudflare limits the size of a request body, and the limit depends on the plan. An upload above it is refused by Cloudflare and never reaches the server, so the app can only show a generic error. Set `MAX_UPLOAD_SIZE_MB` to at most your plan's limit: apps read it from `GET /api/server-info` and refuse larger files themselves. Links to videos are not affected.

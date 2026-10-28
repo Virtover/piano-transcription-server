@@ -385,6 +385,76 @@ def tunnel_sections(config) -> list[Section]:
     ]
 
 
+def admin_web_sections(config) -> list[Section]:
+    from app.admin_web import PORT, SERVICE_HOST
+
+    admin = config.admin_web
+    enabled = admin.enabled
+    note = (
+        f"enabled (ADMIN_WEB_MODE={admin.mode})"
+        if enabled
+        else "not enabled; set ADMIN_WEB_MODE=read-only and add admin to COMPOSE_PROFILES for a page behind Cloudflare Access"
+    )
+    hostname = _or_placeholder(admin.hostname, "ADMIN_WEB_HOSTNAME")
+    emails = ", ".join(admin.emails) or "<set ADMIN_WEB_EMAILS>"
+    return [
+        Section(
+            "Admin web page",
+            "Cloudflare",
+            enabled,
+            note,
+            [
+                Requirement(
+                    "Public hostname",
+                    f"{hostname} on the same tunnel, sent to the service http://{SERVICE_HOST}:{PORT}",
+                    "The admin service publishes no port; cloudflared reaches it by its service name. It must be a "
+                    "hostname of its own: the API's hostname has no sign-in, and the app could not pass one.",
+                    True,
+                ),
+                Requirement(
+                    "Sign-in in front of it",
+                    f"Cloudflare Access protecting every path of {hostname}",
+                    "Strangers must not reach the page at all. The page also checks Cloudflare's signature on every "
+                    "request, so it stays closed if this is ever missing, but that is the second lock, not the first.",
+                    True,
+                ),
+                Requirement(
+                    "Who may sign in",
+                    f"only {emails}",
+                    "The page refuses every other address too; a broader rule only lets others reach that refusal.",
+                ),
+                Requirement(
+                    "Second factor",
+                    "sign-in with a second factor, for example through an identity provider that requires one",
+                    "The page shows every account and job. A stolen password alone must not be enough.",
+                ),
+                Requirement(
+                    "Session length",
+                    "sessions of at most 24 hours",
+                    "A lost or shared device keeps access only as long as its session.",
+                ),
+                Requirement(
+                    "Application tag",
+                    "the Access application's AUD tag in CLOUDFLARE_ACCESS_AUD",
+                    "The page accepts only tokens Cloudflare signed for this application, not for another one of yours.",
+                    True,
+                ),
+                Requirement(
+                    "Team domain",
+                    f"{_or_placeholder(admin.access_team_domain, 'CLOUDFLARE_ACCESS_TEAM_DOMAIN')}, the team's own domain",
+                    "The page reads the keys that sign the tokens from it.",
+                    True,
+                ),
+                Requirement(
+                    "The Cloudflare account",
+                    "a second factor on the Cloudflare account itself",
+                    "Whoever controls the account can change who Access lets in.",
+                ),
+            ],
+        )
+    ]
+
+
 def _days(seconds: float) -> str:
     return f"{seconds / (24 * 60 * 60):g} days"
 
@@ -453,7 +523,10 @@ def offsite_sections(config) -> list[Section]:
 
 
 def build_requirements(config) -> list[Section]:
-    return outsourcing_sections(config) + google_sections(config) + tunnel_sections(config) + offsite_sections(config)
+    return (
+        outsourcing_sections(config) + google_sections(config) + tunnel_sections(config)
+        + admin_web_sections(config) + offsite_sections(config)
+    )
 
 
 def format_requirements(sections: list[Section]) -> list[str]:

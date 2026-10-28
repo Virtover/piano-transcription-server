@@ -11,7 +11,7 @@ umask 077
 
 # Redis's user files have no comments.
 tr -d '\r' < "$template" | grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' > "$acl"
-for name in $(grep -o '#{[a-z_]*}' "$acl" | tr -d '#{}' | sort -u); do
+for name in $(grep -o '#{[a-z_-]*}' "$acl" | tr -d '#{}' | sort -u); do
   file="/run/secrets/redis/$name"
   if [ ! -f "$file" ] || [ ! -s "$file" ]; then
     echo "redis: secrets/redis/$name is missing or empty; python scripts/server.py start creates it" >&2

@@ -40,6 +40,9 @@ MIN_SERVER_PASSWORD_LENGTH = 12
 COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD"}
 # The Compose profile that starts the cloudflared service.
 TUNNEL_PROFILE = "cloudflare"
+# The admin web page: its Compose profile, and its modes from least to most access.
+ADMIN_WEB_PROFILE = "admin"
+ADMIN_WEB_MODES = ("disabled", "read-only", "read-write")
 # In a folder of its own, mounted into cloudflared alone. Docker creates a
 # missing mount source as a directory; an empty folder is harmless, a
 # directory where the token file should be is not.
@@ -397,6 +400,45 @@ class TunnelSettings(BaseSettings):
         return bool(profiles & {TUNNEL_PROFILE, "*"})
 
 
+class AdminWebSettings(BaseSettings):
+    """The optional admin web page: the admin service in docker-compose.yml,
+    reached through the Cloudflare Tunnel on its own hostname, behind
+    Cloudflare Access. See docs/administration.md."""
+
+    model_config = _group_config("ADMIN_WEB_")
+
+    # disabled, read-only, or read-write. Read once when the service starts;
+    # the page can only lower it, and only the command line raises it again.
+    mode: Literal[ADMIN_WEB_MODES] = "disabled"
+    # The page's own hostname, such as admin.example.com.
+    hostname: str | None = None
+    # Who may use it: the email addresses Cloudflare Access signs in.
+    emails: list[str] = Field(default_factory=list)
+    # The Cloudflare Access team domain, such as example.cloudflareaccess.com,
+    # and the Access application's AUD tag: whose signed tokens to accept.
+    access_team_domain: str | None = Field(default=None, validation_alias="CLOUDFLARE_ACCESS_TEAM_DOMAIN")
+    access_aud: str | None = Field(default=None, validation_alias="CLOUDFLARE_ACCESS_AUD")
+
+    @field_validator("hostname", "access_team_domain")
+    @classmethod
+    def _bare_hostname(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().lower().rstrip(".")
+        if not HOSTNAME_PATTERN.match(value):
+            raise ValueError("must be a hostname such as admin.example.com, without https:// or a path")
+        return value
+
+    @field_validator("emails")
+    @classmethod
+    def _lowercase(cls, value: list[str]) -> list[str]:
+        return [email.strip().lower() for email in value if email.strip()]
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode != "disabled"
+
+
 class ErrorReportSettings(BaseSettings):
     """Optional: errors of the API and the workers are sent to a website,
     such as the Piano Weave website's Error Monitor (app/error_report.py)."""
@@ -441,6 +483,7 @@ GROUPS: dict[str, type[BaseSettings]] = {
     "runpod": RunPodSettings,
     "offsite": OffsiteSettings,
     "tunnel": TunnelSettings,
+    "admin_web": AdminWebSettings,
     "error_report": ErrorReportSettings,
     "secrets": SecretSettings,
 }
@@ -459,6 +502,7 @@ class Settings:
     runpod: RunPodSettings
     offsite: OffsiteSettings
     tunnel: TunnelSettings
+    admin_web: AdminWebSettings
     error_report: ErrorReportSettings
     secrets: SecretSettings
     secrets_dir: str = SECRETS_DIR
@@ -677,6 +721,8 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
         problems.append(
             f"ERROR_REPORT_URL needs the secret file {config.secrets_dir}/error_report_token"
         )
+    if role in ("admin", "all"):
+        problems.extend(admin_web_problems(config, check_profile=role == "all"))
     if role == "all" and config.tunnel.enabled:
         # Only cloudflared reads the token, so only `check` looks for it.
         token = Path(config.secrets_dir) / TUNNEL_TOKEN_FILE
@@ -685,6 +731,41 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
                 f"COMPOSE_PROFILES={TUNNEL_PROFILE} needs the tunnel token in the secret file "
                 f"{config.secrets_dir}/{TUNNEL_TOKEN_FILE}"
             )
+    return problems
+
+
+def admin_web_problems(config: "Settings", check_profile: bool = True) -> list[str]:
+    """What stops the admin web page from running safely. Anything missing
+    keeps it from starting; it never runs half protected."""
+    admin = config.admin_web
+    profiles = {profile.strip() for profile in config.tunnel.compose_profiles.split(",")}
+    if not admin.enabled:
+        if check_profile and ADMIN_WEB_PROFILE in profiles:
+            return [f"COMPOSE_PROFILES lists {ADMIN_WEB_PROFILE}, but ADMIN_WEB_MODE=disabled; remove it from COMPOSE_PROFILES"]
+        return []
+    problems = []
+    if admin.mode == "read-write":
+        problems.append("ADMIN_WEB_MODE=read-write is not available yet; use read-only")
+    required = {
+        "ADMIN_WEB_HOSTNAME": admin.hostname,
+        "ADMIN_WEB_EMAILS": admin.emails,
+        "CLOUDFLARE_ACCESS_TEAM_DOMAIN": admin.access_team_domain,
+        "CLOUDFLARE_ACCESS_AUD": admin.access_aud,
+    }
+    for name, value in required.items():
+        if not value:
+            problems.append(f"{name} is required when ADMIN_WEB_MODE={admin.mode}")
+    if admin.hostname and admin.hostname == config.tunnel.hostname:
+        problems.append("ADMIN_WEB_HOSTNAME must differ from CLOUDFLARE_TUNNEL_HOSTNAME, the API's hostname")
+    if admin.access_team_domain and not admin.access_team_domain.endswith(".cloudflareaccess.com"):
+        problems.append("CLOUDFLARE_ACCESS_TEAM_DOMAIN must be your team domain, such as example.cloudflareaccess.com")
+    if not config.billing.database_url:
+        problems.append("The admin web page needs the PostgreSQL billing database (BILLING_DATABASE_URL)")
+    if check_profile:
+        if ADMIN_WEB_PROFILE not in profiles and "*" not in profiles:
+            problems.append(f"ADMIN_WEB_MODE={admin.mode} needs {ADMIN_WEB_PROFILE} in COMPOSE_PROFILES, which starts the service")
+        if not config.tunnel.enabled:
+            problems.append(f"ADMIN_WEB_MODE={admin.mode} needs the Cloudflare Tunnel (COMPOSE_PROFILES=cloudflare,admin)")
     return problems
 
 
@@ -748,7 +829,8 @@ def unwritable_directories(config: "Settings | None" = None, role: str = "all") 
     """Problems with directories the role writes to. The services run as a
     non-root user; volumes created by older versions belong to root."""
     config = config or settings
-    directories = [config.service.data_dir]
+    # The admin web page only reads, and gets the data folder read-only.
+    directories = [] if role == "admin" else [config.service.data_dir]
     if role in ("api", "worker", "remote", "all"):
         directories.append(str(Path(config.billing.database_path).parent))
     if role in ("api", "all"):

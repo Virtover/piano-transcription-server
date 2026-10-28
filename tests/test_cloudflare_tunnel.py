@@ -280,4 +280,8 @@ def test_readiness_address_matches_the_online_check():
 def test_other_services_never_get_the_profile():
     services = compose()["services"]
 
-    assert [name for name, service in services.items() if service.get("profiles")] == ["cloudflared"]
+    # Only cloudflared has the tunnel's profile; the admin page has its own.
+    assert {name: service["profiles"] for name, service in services.items() if service.get("profiles")} == {
+        "cloudflared": ["cloudflare"],
+        "admin": ["admin"],
+    }

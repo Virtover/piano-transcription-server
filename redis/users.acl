@@ -11,4 +11,9 @@ user operator on #{operator} ~* &* +@all
 # The API, the workers, and cleanup: every key, and every command except
 # those that empty Redis, read or change its configuration or users, write
 # its files, load code, or copy it elsewhere. Dramatiq needs KEYS.
+# The admin web page in read-only mode: read commands only, on the keys it
+# shows (jobs, queues, workers, limits, video sites, maintenance). It cannot
+# write any key. Transactions are how redis-py reads a value with its expiry.
+user admin-read-only on #{admin-read-only} resetchannels ~transcription:* ~jobs:* ~workers:* ~controls:* ~video_sites:* ~maintenance:* ~outsource:* ~dramatiq:* -@all +@read -@dangerous +ping +multi +exec +discard +client|setinfo
+
 user app on #{app} ~* &* +@all -flushall -flushdb -swapdb -config -acl -debug -shutdown -module -function -script|flush -save -bgsave -bgrewriteaof -replicaof -slaveof -sync -psync -failover -migrate -restore -monitor -cluster
