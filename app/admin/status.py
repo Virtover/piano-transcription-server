@@ -5,7 +5,7 @@ import shutil
 import time
 from pathlib import Path
 
-from app import backups, controls, job_limits, maintenance, video_sites
+from app import backups, controls, job_limits, leader, maintenance, video_sites
 from app.admin import web
 from app.admin.common import ago, size, span
 from app.config import settings
@@ -95,6 +95,7 @@ def collect() -> dict:
         "places": {"used": places, "limit": settings.limits.max_active_jobs},
         "backends": {"local": redis.scard(routing.ACTIVE_KEYS["local"]), "remote": remote["in_use"]},
         "local_worker": worker,
+        "api_leader": leader.current_leader(redis),
         "remote": remote,
         "queues": queues,
         "disk": disk,
@@ -129,6 +130,13 @@ def render(state: dict) -> str:
             f"Local worker  {worker['capacity']} jobs at once, average job "
             f"{span(average) if average else 'unknown yet'}, heartbeat {ago(worker['updated_at'])}"
         )
+
+    api_leader = state["api_leader"]
+    lines.append(
+        f"API leader    {api_leader}: runs backups and the abandoned job watcher"
+        if api_leader
+        else "API leader    none: no API is running, or it lost Redis"
+    )
 
     remote = state["remote"]
     if remote["enabled"]:

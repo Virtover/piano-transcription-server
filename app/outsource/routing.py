@@ -181,7 +181,3 @@ def prune_active(redis: Redis, job_key) -> int:
         if redis.hget(job_key(job_id), "status") != "processing":
             removed += redis.srem(REMOTE_RUNNING_KEY, job_id)
     return removed
-
-
-def clear_active(redis: Redis) -> None:
-    redis.delete(*ACTIVE_KEYS.values(), REMOTE_RUNNING_KEY)

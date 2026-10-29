@@ -45,6 +45,12 @@ Job files are stored under `/data/jobs/<job_id>/`. Queued and processing jobs do
 
 A worker holds a lease on the job it runs: a Redis key it renews every 15 seconds and that expires after 60. A processing job whose lease has expired lost its worker, for example to a crash. The API checks every 30 seconds and at startup: such a job is marked failed, its billing reservation is released, and its partial files are removed. A job whose worker is still running keeps running, so restarting only the API interrupts nothing. On API startup, queued jobs are sent to their queue again and keep their reservation, so a restart does not lose them. A message for a queued job left over from before the restart is harmless, because only one delivery can claim a job.
 
+### Several API replicas
+
+The API can run as several replicas that share Redis and PostgreSQL. One of them, the leader, runs the periodic tasks: billing backups and their health checks, the abandoned job check, and the voided-purchase sync. The lead is a Redis key that the leader renews every 10 seconds and that expires after 30. A replica that stops cleanly hands the lead over at once; one that crashes loses it when the key expires, and another replica takes over. `python scripts/admin.py status` shows which replica leads, by host name.
+
+The startup recovery above runs only in a replica that takes a lead no one held, which means no other API is running: the server started or restarted. A replica that joins running ones recovers nothing, because their jobs are not interrupted. Recovery corrects the routing counts without clearing them, so jobs another replica is starting meanwhile keep their place. With one API, as in the Compose setup, that API always leads and behaves as before.
+
 Completed, failed, and cancelled jobs receive a Redis TTL of `RESULT_RETENTION` (default `1h`): until then their status and MIDI file can be retrieved. Every `CLEANUP_INTERVAL`, the cleanup service removes job directories whose Redis keys no longer exist, so a file can stay on disk, though no longer downloadable, for up to that long after its job expires.
 
 Deleting an account removes the user's Redis jobs and job directories immediately. A worker still processing one of those jobs sees it as cancelled at its next progress check and stops.

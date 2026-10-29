@@ -30,17 +30,27 @@ from app.worker.tasks import (
 from app import backups
 from app.backups import run_backup
 from app.billing import Billing
+from app.leader import Leadership
 
 
 logger = logging.getLogger(__name__)
+# Set at startup. With several API replicas, only the leader runs the
+# periodic tasks below; the others wait to take over.
+leadership: Leadership | None = None
+
+
+def wait_for_lead(leader: Leadership | None) -> None:
+    if leader is not None:
+        leader.wait()
 
 
 def run_billing_backup() -> None:
     run_backup(Billing())
 
 
-def backup_billing_database() -> None:
+def backup_billing_database(leader: Leadership | None = None) -> None:
     while True:
+        wait_for_lead(leader)
         try:
             run_billing_backup()
         except Exception:
@@ -48,13 +58,14 @@ def backup_billing_database() -> None:
         time.sleep(settings.billing.backup_interval)
 
 
-def monitor_backup_health() -> None:
+def monitor_backup_health(leader: Leadership | None = None) -> None:
     """Warn when configured off-site backups fail or stop advancing."""
     if not settings.offsite.enabled:
         return
     interval = settings.billing.backup_interval
     while True:
         time.sleep(interval)
+        wait_for_lead(leader)
         try:
             state = backups.offsite_status(Billing())
             now = int(time.time())
@@ -68,11 +79,12 @@ def monitor_backup_health() -> None:
             logger.exception("Could not monitor off-site backup health")
 
 
-def watch_abandoned_jobs() -> None:
+def watch_abandoned_jobs(leader: Leadership | None = None) -> None:
     """Fail and refund processing jobs whose worker stopped, for example
     after a crash, while the API keeps running."""
     while True:
         time.sleep(ABANDONED_JOB_CHECK_INTERVAL)
+        wait_for_lead(leader)
         try:
             fail_abandoned_jobs()
         except Exception:
@@ -84,12 +96,13 @@ def watch_abandoned_jobs() -> None:
 VOIDED_PURCHASES_RETRY = 60.0
 
 
-def sync_voided_purchases() -> None:
+def sync_voided_purchases(leader: Leadership | None = None) -> None:
     """Take back refunded minutes, at startup and then periodically. Without
     a network, as at startup before the host's is up, it tries again soon."""
     billing = Billing()
     retry = VOIDED_PURCHASES_RETRY
     while True:
+        wait_for_lead(leader)
         delay = settings.google_play.voided_purchases_interval
         try:
             google_play.sync_voided_purchases(billing)
@@ -181,15 +194,31 @@ def sync_billing_catalog() -> None:
     error_report.install("api")
     # The restart or shutdown a past notice announced has happened.
     maintenance.clear_past(transcription_routes.redis)
-    recover_active_jobs("Transcription interrupted because the server restarted")
-    reconcile_billing()
+    global leadership
+    leadership = Leadership(transcription_routes.redis)
+    # Taking a lead no one held means no other API replica is running: the
+    # server started or restarted. Joining running replicas recovers nothing,
+    # because their jobs are not interrupted; the leader's abandoned job
+    # watcher still fails those whose worker stopped.
+    if leadership.renew():
+        recover_active_jobs("Transcription interrupted because the server restarted")
+        reconcile_billing()
+    else:
+        logger.info("Another API replica runs the periodic tasks; this one takes over if it stops")
+    leadership.start()
     sync_products()
     enable_transcription_submissions()
-    threading.Thread(target=backup_billing_database, daemon=True).start()
-    threading.Thread(target=monitor_backup_health, daemon=True).start()
-    threading.Thread(target=watch_abandoned_jobs, daemon=True).start()
+    threading.Thread(target=backup_billing_database, args=(leadership,), daemon=True).start()
+    threading.Thread(target=monitor_backup_health, args=(leadership,), daemon=True).start()
+    threading.Thread(target=watch_abandoned_jobs, args=(leadership,), daemon=True).start()
     if voided_purchases_enabled():
-        threading.Thread(target=sync_voided_purchases, daemon=True).start()
+        threading.Thread(target=sync_voided_purchases, args=(leadership,), daemon=True).start()
+
+
+@app.on_event("shutdown")
+def hand_over_lead() -> None:
+    if leadership is not None:
+        leadership.stop()
 
 
 @app.get("/health")

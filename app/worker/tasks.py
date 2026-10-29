@@ -367,8 +367,9 @@ def recover_active_jobs(reason: str) -> None:
             running.append((job_id, job))
         elif job.get("status") == "completed":
             check_completed_result(job_id, job)
-    # Rebuild the routing counts from the jobs that are still queued or running.
-    routing.clear_active(redis)
+    # Correct the routing counts from the jobs that are still queued or
+    # running. Pruning instead of clearing keeps IDs a replica added meanwhile.
+    routing.prune_active(redis, job_key)
     for job_id, job in running:
         routing.mark_active(redis, job_backend(job), job_id)
     for job_id, job in queued:
