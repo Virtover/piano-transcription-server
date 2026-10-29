@@ -16,6 +16,19 @@ def is_configured() -> bool:
     return bool(settings.google_play.package_name and google_play_service_account_json())
 
 
+def is_network_error(error: Exception) -> bool:
+    """Whether Google could not be reached at all, as when this host's
+    network is down or not yet up, rather than Google refusing a request."""
+    if isinstance(error, OSError):
+        return True
+    try:
+        import httplib2
+        from google.auth.exceptions import TransportError
+    except ImportError:
+        return False
+    return isinstance(error, (httplib2.HttpLib2Error, TransportError))
+
+
 def android_publisher(config=None):
     """An Android Publisher API client using the service-account secret."""
     from google.oauth2 import service_account

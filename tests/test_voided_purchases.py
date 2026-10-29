@@ -234,3 +234,53 @@ def test_sync_runs_only_with_configured_google_play(billed, monkeypatch):
     monkeypatch.setattr(google_play, "is_configured", lambda: True)
     settings.billing.provider = "none"
     assert not main.voided_purchases_enabled()
+
+
+class StopLoop(Exception):
+    pass
+
+
+def run_sync_loop(monkeypatch, outcomes, interval=3600.0):
+    """Runs main.sync_voided_purchases until outcomes run out; returns its waits."""
+    waits = []
+    outcomes = list(outcomes)
+
+    def sync(billing):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+
+    def sleep(seconds):
+        waits.append(seconds)
+        if not outcomes:
+            raise StopLoop
+
+    monkeypatch.setattr(main, "Billing", lambda: None)
+    monkeypatch.setattr(main.google_play, "sync_voided_purchases", sync)
+    monkeypatch.setattr(main.time, "sleep", sleep)
+    monkeypatch.setattr(main.settings.google_play, "voided_purchases_interval", interval)
+    with pytest.raises(StopLoop):
+        main.sync_voided_purchases()
+    return waits
+
+
+def test_voided_sync_retries_soon_without_a_network(monkeypatch):
+    unreachable = OSError(101, "Network is unreachable")
+    waits = run_sync_loop(monkeypatch, [unreachable, unreachable, None, unreachable])
+    assert waits == [60.0, 120.0, 3600.0, 60.0]
+
+
+def test_voided_sync_network_retry_never_exceeds_the_interval(monkeypatch):
+    waits = run_sync_loop(monkeypatch, [OSError("down")] * 4, interval=200.0)
+    assert waits == [60.0, 120.0, 200.0, 200.0]
+
+
+def test_voided_sync_waits_the_interval_after_other_errors(monkeypatch):
+    waits = run_sync_loop(monkeypatch, [ValueError("refused"), None])
+    assert waits == [3600.0, 3600.0]
+
+
+def test_network_errors_are_told_apart():
+    assert google_play.is_network_error(OSError(101, "Network is unreachable"))
+    assert google_play.is_network_error(TimeoutError())
+    assert not google_play.is_network_error(ValueError())

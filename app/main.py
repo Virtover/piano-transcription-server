@@ -79,15 +79,33 @@ def watch_abandoned_jobs() -> None:
             logger.exception("Could not check for abandoned jobs")
 
 
+# The first wait after Google could not be reached; it doubles up to the
+# usual interval.
+VOIDED_PURCHASES_RETRY = 60.0
+
+
 def sync_voided_purchases() -> None:
-    """Take back refunded minutes, at startup and then periodically."""
+    """Take back refunded minutes, at startup and then periodically. Without
+    a network, as at startup before the host's is up, it tries again soon."""
     billing = Billing()
+    retry = VOIDED_PURCHASES_RETRY
     while True:
+        delay = settings.google_play.voided_purchases_interval
         try:
             google_play.sync_voided_purchases(billing)
-        except Exception:
-            logger.exception("Could not read voided Google Play purchases")
-        time.sleep(settings.google_play.voided_purchases_interval)
+            retry = VOIDED_PURCHASES_RETRY
+        except Exception as error:
+            if google_play.is_network_error(error):
+                delay = min(retry, delay)
+                retry *= 2
+                logger.warning(
+                    "Could not reach Google Play to read voided purchases (%s); trying again in %.0f seconds",
+                    error,
+                    delay,
+                )
+            else:
+                logger.exception("Could not read voided Google Play purchases")
+        time.sleep(delay)
 
 
 def voided_purchases_enabled() -> bool:
