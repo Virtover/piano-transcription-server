@@ -86,6 +86,8 @@ curl -X POST http://localhost:8000/api/billing/google-play/verify \
 
 The server verifies the purchase with Google Play, credits the configured minutes once per purchase token, and consumes the purchase. Repeating the same token returns `credited_minutes: 0`.
 
+A purchase another server already consumed is refused with `409 Purchase was already used`, without crediting anything. That happens when a test server and the live one serve the same app: the server the purchase reached first credits it, and only that one.
+
 ## ↩️ Refunds and chargebacks
 
 When a purchase is refunded, charged back, or cancelled, Google Play reports it as voided. The API reads voided purchases when it starts and then every `GOOGLE_PLAY_VOIDED_PURCHASES_INTERVAL` (default `1h`), and takes each one's minutes back once.
