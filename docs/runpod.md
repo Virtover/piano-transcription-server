@@ -49,16 +49,16 @@ Save the three secrets as files in `secrets`:
 **Windows (PowerShell)**
 
 ```powershell
-Set-Content -Path secrets\outsource_storage_access_key -Value '<access key ID>' -NoNewline
-Set-Content -Path secrets\outsource_storage_secret_key -Value '<secret access key>' -NoNewline
+Set-Content -Path secrets\storage_access_key -Value '<access key ID>' -NoNewline
+Set-Content -Path secrets\storage_secret_key -Value '<secret access key>' -NoNewline
 Set-Content -Path secrets\runpod_api_key -Value '<RunPod API key>' -NoNewline
 ```
 
 **macOS and Linux**
 
 ```bash
-printf '%s' '<access key ID>' > secrets/outsource_storage_access_key
-printf '%s' '<secret access key>' > secrets/outsource_storage_secret_key
+printf '%s' '<access key ID>' > secrets/storage_access_key
+printf '%s' '<secret access key>' > secrets/storage_secret_key
 printf '%s' '<RunPod API key>' > secrets/runpod_api_key
 ```
 
@@ -79,24 +79,29 @@ printf '%s' '<RunPod read-only API key>' > secrets/runpod_read_api_key
 > [!WARNING]
 > In PowerShell, always name the parameters as above. The short form `Set-Content -NoNewline <file> <value>` swaps them in Windows PowerShell 5.1 and creates a file **named after your secret** in the current folder. If that happens, delete the file; if it was ever committed, replace the key.
 
-Add to `.env`:
+Add to `.env` the bucket, in its own [object storage](configuration.md#object-storage) settings, which `JOB_STORAGE=s3` also uses:
+
+```env
+STORAGE_ENDPOINT=<the bucket's S3 endpoint URL>
+STORAGE_BUCKET=<bucket>
+STORAGE_REGION=auto
+```
+
+and outsourcing:
 
 ```env
 OUTSOURCE_PROVIDER=runpod
 RUNPOD_ENDPOINT_ID=<endpoint ID>
-OUTSOURCE_STORAGE_ENDPOINT=<the bucket's S3 endpoint URL>
-OUTSOURCE_STORAGE_BUCKET=<bucket>
-OUTSOURCE_STORAGE_REGION=auto
 OUTSOURCE_MAX_CONCURRENCY=4
 ```
 
 | Setting | Meaning |
 | --- | --- |
-| `OUTSOURCE_STORAGE_ENDPOINT` | The storage's S3 endpoint URL. The GPU endpoint needs the same value as an environment variable, because the handler downloads only from this host. |
+| `STORAGE_ENDPOINT` | The storage's S3 endpoint URL. The GPU endpoint needs the same value as an environment variable, because the handler downloads only from this host. An endpoint created before this name existed has `OUTSOURCE_STORAGE_ENDPOINT` instead, which keeps working. |
 | `OUTSOURCE_LOCAL_FIRST_MAX_WAIT` | Default `30s`. In `local_first` mode, send a job to RunPod when its estimated local wait is longer than this. Remote-first modes do not use a local wait threshold. `OUTSOURCE_MAX_WAIT` remains accepted as a deprecated alias. |
 | `OUTSOURCE_MAX_CONCURRENCY` | At most this many jobs on RunPod at once, which caps the cost. `auto` follows the endpoint's maximum workers; it needs the optional read key, and allows 4 jobs without it. |
 
-All settings are in [Configuration](configuration.md#outsourcing).
+All settings are in [Configuration](configuration.md#outsourcing), and the storage settings in [Object storage](configuration.md#object-storage).
 
 ## 📦 Building the image
 
@@ -119,7 +124,7 @@ Run `check --online` first: it identifies most configuration problems directly, 
 | --- | --- | --- |
 | Jobs with `"backend": "remote"` stay queued | `remote-worker` is not running, or still idles from before `OUTSOURCE_PROVIDER` was set | Run `docker compose up -d`, then check `docker compose logs remote-worker`. |
 | Remote jobs fail and run locally instead | A remote failure with `OUTSOURCE_FALLBACK_LOCAL=true` | `docker compose logs remote-worker` shows the RunPod error. |
-| A remote job fails with an error about the audio URL or host | `OUTSOURCE_STORAGE_ENDPOINT` differs between `.env` and the endpoint | `check --online` reports it; use the exact same value in both. |
+| A remote job fails with an error about the audio URL or host | `STORAGE_ENDPOINT` differs between `.env` and the endpoint | `check --online` reports it; use the exact same value in both. |
 
 Logs: `docker compose logs remote-worker` on this server, and the worker logs in the RunPod console. A healthy RunPod worker logs a line like `cuda:0: up to 12 requests at once` at startup; the number depends on the GPU.
 
@@ -181,7 +186,7 @@ docker run --rm --network piano-test yt-piano-to-midi-server-api python -c "impo
 ```powershell
 docker build -f Dockerfile.runpod -t piano-transcription-runpod:local .
 docker run -d --name runpod-local --network piano-test `
-  -e CUDA_VISIBLE_DEVICES= -e OUTSOURCE_STORAGE_ENDPOINT=http://seaweed:8333 `
+  -e CUDA_VISIBLE_DEVICES= -e STORAGE_ENDPOINT=http://seaweed:8333 `
   piano-transcription-runpod:local `
   python3 -u handler.py --rp_serve_api --rp_api_host 0.0.0.0 --rp_api_port 8010
 ```
@@ -191,20 +196,20 @@ docker run -d --name runpod-local --network piano-test `
 ```bash
 docker build -f Dockerfile.runpod -t piano-transcription-runpod:local .
 docker run -d --name runpod-local --network piano-test \
-  -e CUDA_VISIBLE_DEVICES= -e OUTSOURCE_STORAGE_ENDPOINT=http://seaweed:8333 \
+  -e CUDA_VISIBLE_DEVICES= -e STORAGE_ENDPOINT=http://seaweed:8333 \
   piano-transcription-runpod:local \
   python3 -u handler.py --rp_serve_api --rp_api_host 0.0.0.0 --rp_api_port 8010
 ```
 
-3. Put `test` in `secrets/runpod_api_key`, `test-access` in `secrets/outsource_storage_access_key`, and `test-secret` in `secrets/outsource_storage_secret_key`, and add to `.env`:
+3. Put `test` in `secrets/runpod_api_key`, `test-access` in `secrets/storage_access_key`, and `test-secret` in `secrets/storage_secret_key`, and add to `.env`:
 
 ```env
 OUTSOURCE_PROVIDER=runpod
 RUNPOD_ENDPOINT_ID=local
 RUNPOD_API_BASE=http://runpod-local:8010
-OUTSOURCE_STORAGE_ENDPOINT=http://seaweed:8333
-OUTSOURCE_STORAGE_BUCKET=piano-audio
-OUTSOURCE_STORAGE_REGION=us-east-1
+STORAGE_ENDPOINT=http://seaweed:8333
+STORAGE_BUCKET=piano-audio
+STORAGE_REGION=us-east-1
 OUTSOURCE_LOCAL_FIRST_MAX_WAIT=0s
 OUTSOURCE_MAX_CONCURRENCY=1
 ```

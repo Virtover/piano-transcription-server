@@ -26,7 +26,7 @@ docker compose run --rm api python -m app.config check --online
 | Service | Tested when | What is tested |
 | --- | --- | --- |
 | Storage | `OUTSOURCE_PROVIDER=runpod` | Uploads a small object, downloads it through a presigned URL like the RunPod handler, and deletes it. |
-| RunPod | `OUTSOURCE_PROVIDER=runpod` | The endpoint's health, and its settings against the requirements below: image, `OUTSOURCE_STORAGE_ENDPOINT`, allowed CUDA versions, execution timeout, workers, scaling, and idle timeout. |
+| RunPod | `OUTSOURCE_PROVIDER=runpod` | The endpoint's health, and its settings against the requirements below: image, `STORAGE_ENDPOINT`, allowed CUDA versions, execution timeout, workers, scaling, and idle timeout. |
 | Google sign-in | `BILLING_PROVIDER=google_play` | The format of `GOOGLE_OAUTH_CLIENT_IDS`. Google can only confirm a client ID with a signed-in user's token. |
 | Google Play | `BILLING_PROVIDER=google_play` | Lists the products with the service account and compares them with `BILLING_PRODUCTS`. |
 | Error reports | `ERROR_REPORT_URL` is set | Sends a test report, which the website shows as an info entry. |
@@ -65,7 +65,7 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 | `VIDEO_SITE_INTERVAL` | `3s` | Least time between the starts of two requests that read a link from the same video site, from the API and the workers together. `0s` turns spacing off. Longer intervals make users wait for link checks when many arrive at once. |
 | `VIDEO_SITE_MAX_DOWNLOADS` | `2` | Downloads from one video site at once, from all workers together, including downloads with the information the link check saved. Further jobs wait for a place. Set to `unlimited` to remove this concurrency limit. |
 | `RESULT_RETENTION` | `1h` | How long a finished job can be retrieved: its status and, when completed, its MIDI file. Counted from when the job completed, failed, or was cancelled. Then the job is gone (`404`) and its files are deleted at the next cleanup. `GET /api/server-info` returns it as `result_retention_seconds`. Longer periods keep more files on disk. |
-| `CLEANUP_INTERVAL` | `10m` | How often the cleanup service deletes the files of expired jobs. A file can stay on disk up to this long after its job expires, but cannot be downloaded. |
+| `CLEANUP_INTERVAL` | `10m` | How often the cleanup service deletes the files of expired jobs, and with `JOB_STORAGE=s3` how often the leading API deletes them from the bucket. A file can stay up to this long after its job expires, but cannot be downloaded. |
 
 ### Worker
 
@@ -143,9 +143,29 @@ partially initialize it. `python -m app.backups
 now` creates and verifies a `billing-<timestamp>.dump`; `fetch` validates
 off-site dumps with `pg_restore --list` before exposing them for restore.
 
+### Object storage
+
+One S3-compatible bucket, for example on Cloudflare R2, serves two purposes: outsourcing hands audio to RunPod through it (`OUTSOURCE_PROVIDER=runpod`), and `JOB_STORAGE=s3` keeps job files in it. Its keys are the secrets `storage_access_key` and `storage_secret_key`. `python -m app.config requirements` lists what the bucket must allow for the features you turned on.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `STORAGE_ENDPOINT` | unset | The bucket's S3 endpoint, for example `https://<account-id>.eu.r2.cloudflarestorage.com`. The RunPod endpoint needs the same value; see [Outsourcing to RunPod](runpod.md). |
+| `STORAGE_BUCKET` | unset | The bucket. With `JOB_STORAGE=s3`, no other server may use it. |
+| `STORAGE_REGION` | `auto` | Storage region. `auto` for Cloudflare R2. |
+
+### Job storage
+
+Where each job's files are kept: the uploaded file, the video information the API saved for the download, and the MIDI result.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `JOB_STORAGE` | `local` | `local` keeps them in the `data` volume, which the services of one machine share. `s3` keeps them in the [object storage](#object-storage) bucket under `jobs/<job_id>/`, so API replicas and workers on several machines can share them; the `data` volume then holds only each attempt's scratch files, under `work/`. With `s3`, `GET /api/transcriptions/<job_id>/midi` answers `307` with a signed link to the file, valid for 5 minutes, instead of the file itself. See [Job storage](architecture.md#job-storage). |
+
+Changing `JOB_STORAGE` keeps finished results downloadable: each job remembers where its result is. Queued jobs whose files are where the old setting put them fail; change it when no job is queued, for example during a planned restart.
+
 ### Outsourcing
 
-When local GPUs are overloaded, jobs can run on RunPod Serverless. Only the model runs remotely; downloading and converting stay on this server. See [Outsourcing to RunPod](runpod.md) and [how routing works](architecture.md#-outsourcing).
+When local GPUs are overloaded, jobs can run on RunPod Serverless. Only the model runs remotely; downloading and converting stay on this server. Audio reaches RunPod through the [object storage](#object-storage) bucket, which outsourcing needs. See [Outsourcing to RunPod](runpod.md) and [how routing works](architecture.md#-outsourcing).
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -155,9 +175,6 @@ When local GPUs are overloaded, jobs can run on RunPod Serverless. Only the mode
 | `OUTSOURCE_MAX_CONCURRENCY` | `4` | In `local_first` and `remote_first_overflow`, the maximum jobs assigned to the remote backend at once. In `remote_first_fallback`, it limits simultaneously running remote jobs while additional jobs wait in the remote-pending queue. `auto`: the RunPod endpoint's max workers times the requests one worker takes. See [below](#outsource_max_concurrencyauto). |
 | `OUTSOURCE_TIMEOUT` | `15m` | How long a remote job may take, including RunPod's queue and cold start. It is then cancelled. |
 | `OUTSOURCE_FALLBACK_LOCAL` | `true` | When a remote job fails or times out, put it back on the local queue instead of failing it. |
-| `OUTSOURCE_STORAGE_ENDPOINT` | unset | S3-compatible endpoint used to hand audio to RunPod, for example `https://<account-id>.eu.r2.cloudflarestorage.com`. |
-| `OUTSOURCE_STORAGE_BUCKET` | unset | Bucket for the audio files. |
-| `OUTSOURCE_STORAGE_REGION` | `auto` | Storage region. `auto` for Cloudflare R2. |
 | `OUTSOURCE_MAX_AUDIO_MB` | `512` | Read by the RunPod handler: largest audio file it downloads. |
 | `RUNPOD_ENDPOINT_ID` | unset | ID of the RunPod Serverless endpoint. |
 | `RUNPOD_API_BASE` | `https://api.runpod.ai/v2` | RunPod API URL. Change it only for local testing with the SDK's test server; the endpoint ID is then not added to the path. |
@@ -227,7 +244,7 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 | --- | --- | --- | --- |
 | `REDIS_URL` | `redis://localhost:6379/0` | `redis://app@redis:6379/0` | Redis connection URL, with the Redis user the services sign in as. |
 | `REDIS_PASSWORD_FILE` | empty | `/run/redis/password` | The file with that user's password, from `secrets/redis/app`. Empty for a Redis without users, such as one for local development. See [Redis users](architecture.md#-redis-users). |
-| `DATA_DIR` | `/data` | `/data` | Shared directory for job files. |
+| `DATA_DIR` | `/data` | `/data` | Shared directory for job files; with `JOB_STORAGE=s3`, for scratch files only. |
 | `BILLING_DATABASE_URL` | `postgresql://billing@postgres:5432/billing` | same | Production PostgreSQL URL for balances, purchases, and reservations. Keep passwords in `secrets/billing_database_url` (or use Compose's PostgreSQL password file). |
 | `BILLING_DATABASE_PATH` | `/billing/billing.sqlite3` | tests/tools | Explicit SQLite path retained for legacy tests and the one-time migration source. |
 | `BILLING_BACKUP_DIR` | `/billing/backups` | same | Directory for billing database backups. |
@@ -259,8 +276,8 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `google_play_service_account.json` | Google Play service-account JSON key, used to verify purchases and read the product catalog. |
 | `runpod_api_key` | RunPod API key, restricted to the transcription endpoint. It runs, follows, and cancels jobs. |
 | `runpod_read_api_key` | Optional. A RunPod key with read-only access to the account. Restricted keys cannot read endpoint settings, so `OUTSOURCE_MAX_CONCURRENCY=auto` and the endpoint settings check of `check --online` use this one. Without it, `auto` allows 4 remote jobs. |
-| `outsource_storage_access_key` | Access key ID of the storage token. |
-| `outsource_storage_secret_key` | Secret access key of the storage token. |
+| `storage_access_key` | Access key ID of the storage token. |
+| `storage_secret_key` | Secret access key of the storage token. |
 | `offsite_backup_access_key` | Optional. Access key ID for the off-site backup bucket. See [Off-site copies](#off-site-copies). |
 | `offsite_backup_secret_key` | Optional. Secret access key for the off-site backup bucket. |
 | `server_password` | Optional. When present, every request except `/health` and `/ready` needs this password, as the `X-Server-Password` header or HTTP Basic auth with any user name. At least 12 characters; the API refuses to start otherwise. See [Password protection](setup.md#-password-protection). |
@@ -284,6 +301,11 @@ Old names keep working. Each logs one deprecation warning when a service starts.
 | `CLEANUP_INTERVAL_SECONDS` | `CLEANUP_INTERVAL` | A plain number is read as seconds. |
 | `WORKER_BATCH_TIMEOUT_SECONDS` | `WORKER_BATCH_TIMEOUT` | A plain number is read as seconds. |
 | `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` | the secret file `google_play_service_account.json` | Still read if set: a file name in `secrets`, or an absolute path. It takes priority over the secret file. |
+| `OUTSOURCE_STORAGE_ENDPOINT` | `STORAGE_ENDPOINT` | The bucket also keeps job files now. The RunPod handler reads the old name too, so an endpoint that has it keeps working; `check --online` refuses an endpoint with both. |
+| `OUTSOURCE_STORAGE_BUCKET` | `STORAGE_BUCKET` | |
+| `OUTSOURCE_STORAGE_REGION` | `STORAGE_REGION` | |
+| the secret file `outsource_storage_access_key` | the secret file `storage_access_key` | Rename the file: `secrets/outsource_storage_access_key` to `secrets/storage_access_key`. Having both is an error. |
+| the secret file `outsource_storage_secret_key` | the secret file `storage_secret_key` | The same. |
 
 ### Migrating an existing deployment
 
@@ -291,9 +313,10 @@ An existing `.env` keeps working without changes; you only see deprecation warni
 
 1. Rename `CLEANUP_INTERVAL_SECONDS=86400` to `CLEANUP_INTERVAL=1d`, and `WORKER_BATCH_TIMEOUT_SECONDS=2` to `WORKER_BATCH_TIMEOUT=2s`.
 2. Rename the service-account key in `secrets` to `google_play_service_account.json` and remove `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE`.
-3. Remove `REDIS_URL`, `DATA_DIR`, `BILLING_DATABASE_URL`, and `BILLING_DATABASE_PATH` from `.env`. Compose sets them now; values left in `.env` are overridden by Compose.
-4. Remove any inline comments after values.
-5. Run `docker compose run --rm api python -m app.config check`, then `docker compose up -d --build`.
+3. Rename `OUTSOURCE_STORAGE_ENDPOINT`, `OUTSOURCE_STORAGE_BUCKET`, and `OUTSOURCE_STORAGE_REGION` to `STORAGE_ENDPOINT`, `STORAGE_BUCKET`, and `STORAGE_REGION`, and the secret files `outsource_storage_access_key` and `outsource_storage_secret_key` to `storage_access_key` and `storage_secret_key`. On the RunPod endpoint, `OUTSOURCE_STORAGE_ENDPOINT` keeps working; replace it with `STORAGE_ENDPOINT` whenever you like, but never set both.
+4. Remove `REDIS_URL`, `DATA_DIR`, `BILLING_DATABASE_URL`, and `BILLING_DATABASE_PATH` from `.env`. Compose sets them now; values left in `.env` are overridden by Compose.
+5. Remove any inline comments after values.
+6. Run `docker compose run --rm api python -m app.config check`, then `docker compose up -d --build`.
 
 `MAX_UPLOAD_SIZE_MB` limits disk use per upload. Uploads are written to the shared `DATA_DIR` and removed after conversion. Compressed files are small: an hour of MP3 at 192 kbit/s is about 85 MB. Uncompressed WAV is large: an hour of 16-bit 44.1 kHz stereo is about 635 MB. Raise the limit only if users need to upload long lossless recordings and the disk has room for several at once.
 

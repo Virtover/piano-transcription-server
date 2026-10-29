@@ -20,7 +20,17 @@ RUNPOD_CUDA_VERSION = "12.8"
 CUDA_CONTEXT_GIB = 1.0
 GPU_SIZES_GIB = (16, 24)
 IDLE_TIMEOUT_SECONDS = 5
-STORAGE_OBJECT_LIFETIME = "1 day"
+STORAGE_OBJECT_LIFETIME_DAYS = 1
+
+
+def storage_object_lifetime(config) -> str:
+    """How long after upload the bucket may delete objects by itself. Job
+    files stay until their result expires, after any wait in the queue, so
+    with JOB_STORAGE=s3 that is RESULT_RETENTION plus a day."""
+    days = STORAGE_OBJECT_LIFETIME_DAYS
+    if config.jobs.storage == "s3":
+        days += math.ceil(config.limits.result_retention / 86400)
+    return f"{days} day" if days == 1 else f"{days} days"
 
 
 @dataclass(frozen=True)
@@ -57,11 +67,101 @@ def _or_placeholder(value: str | None, name: str) -> str:
     return value or f"<set {name}>"
 
 
+def storage_sections(config) -> list[Section]:
+    """The bucket that outsourcing and JOB_STORAGE=s3 share. Each reason
+    says what the features in use need; with neither in use, what outsourcing
+    would."""
+    job_files = config.jobs.storage == "s3"
+    outsourcing = config.outsource.provider == "runpod"
+    uses = [name for name, used in (("OUTSOURCE_PROVIDER=runpod", outsourcing), ("JOB_STORAGE=s3", job_files)) if used]
+    note = (
+        f"enabled ({', '.join(uses)})"
+        if uses
+        else "not enabled; OUTSOURCE_PROVIDER=runpod and JOB_STORAGE=s3 use it"
+    )
+    # Without either, describe it as outsourcing uses it.
+    audio = outsourcing or not job_files
+    endpoint = _or_placeholder(config.storage.endpoint, "STORAGE_ENDPOINT")
+    bucket = _or_placeholder(config.storage.bucket, "STORAGE_BUCKET")
+
+    def joined(*parts: str | None) -> str:
+        return " ".join(part for part in parts if part)
+
+    return [
+        Section(
+            "Storage",
+            "S3-compatible object storage, for example Cloudflare R2",
+            bool(uses),
+            note,
+            [
+                Requirement(
+                    "Bucket",
+                    bucket,
+                    joined(
+                        "Audio is handed to the GPU endpoint through this bucket." if audio else None,
+                        "Job files are kept in it for every API and worker." if job_files else None,
+                    ),
+                    True,
+                ),
+                Requirement(
+                    "S3 endpoint URL",
+                    endpoint,
+                    "The server uploads here" + (", and the GPU endpoint downloads only from this host." if audio else "."),
+                    True,
+                ),
+                Requirement(
+                    "Credentials",
+                    f"an access key ID and secret key that can {'list, ' if job_files else ''}read, write, and delete "
+                    "objects in this bucket only, saved as secrets/storage_access_key and secrets/storage_secret_key",
+                    joined(
+                        "The server uploads audio, signs download links, and deletes the audio afterwards." if audio else None,
+                        "It keeps job files, signs links to results, and lists the files to find expired ones."
+                        if job_files else None,
+                    ),
+                    True,
+                ),
+                Requirement(
+                    "Network restriction",
+                    "none: signed download links must work from any IP address",
+                    joined(
+                        "GPU workers download from the provider's addresses, which change." if audio else None,
+                        "Users' apps download MIDI results through these links." if job_files else None,
+                        "check --online can only test downloads from this server.",
+                    ),
+                ),
+                Requirement(
+                    "Credential expiry",
+                    "none, or a renewal date you track",
+                    "When the credentials expire, " + ("every job fails." if job_files else "every outsourced job fails."),
+                ),
+                Requirement(
+                    "Automatic deletion",
+                    f"objects deleted {storage_object_lifetime(config)} after upload" + (", not sooner" if job_files else ""),
+                    joined(
+                        "The server deletes each object itself; this catches leftovers after a crash.",
+                        "Sooner would delete results that can still be downloaded." if job_files else None,
+                    ),
+                ),
+                *([Requirement(
+                    "Shared with",
+                    "no other server, such as a development or test copy",
+                    "Cleanup deletes job files whose job this server's Redis does not know, so two servers on one "
+                    "bucket delete each other's files.",
+                )] if job_files else []),
+                Requirement(
+                    "Location",
+                    "in the EU or EEA if your users are there",
+                    "User audio is personal data under GDPR. Usually fixed when the bucket is created.",
+                ),
+            ],
+        )
+    ]
+
+
 def outsourcing_sections(config) -> list[Section]:
     enabled = config.outsource.provider == "runpod"
     note = "enabled (OUTSOURCE_PROVIDER=runpod)" if enabled else "not enabled; set OUTSOURCE_PROVIDER=runpod to use it"
-    endpoint = _or_placeholder(config.outsource.storage_endpoint, "OUTSOURCE_STORAGE_ENDPOINT")
-    bucket = _or_placeholder(config.outsource.storage_bucket, "OUTSOURCE_STORAGE_BUCKET")
+    endpoint = _or_placeholder(config.storage.endpoint, "STORAGE_ENDPOINT")
     small, large = (jobs_per_gpu(size, config) for size in GPU_SIZES_GIB)
     timeout_minutes = execution_timeout_minutes(config)
     if config.outsource.max_concurrency:
@@ -77,49 +177,6 @@ def outsourcing_sections(config) -> list[Section]:
             "read key; without it, the server allows 4 remote jobs."
         )
 
-    storage = Section(
-        "Storage",
-        "S3-compatible object storage, for example Cloudflare R2",
-        enabled,
-        note,
-        [
-            Requirement("Bucket", bucket, "Audio is handed to the GPU endpoint through this bucket.", True),
-            Requirement(
-                "S3 endpoint URL",
-                endpoint,
-                "The server uploads here, and the GPU endpoint downloads only from this host.",
-                True,
-            ),
-            Requirement(
-                "Credentials",
-                "an access key ID and secret key that can read, write, and delete objects in this bucket only, "
-                "saved as secrets/outsource_storage_access_key and secrets/outsource_storage_secret_key",
-                "The server uploads audio, signs download links, and deletes the audio afterwards.",
-                True,
-            ),
-            Requirement(
-                "Network restriction",
-                "none: signed download links must work from any IP address",
-                "GPU workers download from the provider's addresses, which change. "
-                "check --online can only test downloads from this server.",
-            ),
-            Requirement(
-                "Credential expiry",
-                "none, or a renewal date you track",
-                "When the credentials expire, every outsourced job fails.",
-            ),
-            Requirement(
-                "Automatic deletion",
-                f"objects deleted {STORAGE_OBJECT_LIFETIME} after upload",
-                "The server deletes each object itself; this catches leftovers after a crash.",
-            ),
-            Requirement(
-                "Location",
-                "in the EU or EEA if your users are there",
-                "User audio is personal data under GDPR. Usually fixed when the bucket is created.",
-            ),
-        ],
-    )
     registry = Section(
         "Image registry",
         "any container registry the GPU provider can pull from, for example Docker Hub",
@@ -158,7 +215,7 @@ def outsourcing_sections(config) -> list[Section]:
             ),
             Requirement(
                 "Environment variable",
-                f"OUTSOURCE_STORAGE_ENDPOINT={endpoint}",
+                f"STORAGE_ENDPOINT={endpoint}",
                 "The handler downloads only from this host. It must match the server exactly.",
                 True,
             ),
@@ -234,7 +291,7 @@ def outsourcing_sections(config) -> list[Section]:
             ),
         ],
     )
-    return [storage, registry, gpu]
+    return [registry, gpu]
 
 
 def google_sections(config) -> list[Section]:
@@ -524,7 +581,7 @@ def offsite_sections(config) -> list[Section]:
 
 def build_requirements(config) -> list[Section]:
     return (
-        outsourcing_sections(config) + google_sections(config) + tunnel_sections(config)
+        storage_sections(config) + outsourcing_sections(config) + google_sections(config) + tunnel_sections(config)
         + admin_web_sections(config) + offsite_sections(config)
     )
 
