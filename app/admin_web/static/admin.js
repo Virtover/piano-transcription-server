@@ -606,6 +606,7 @@ async function overview() {
         state.disk ? [
           facts([["Job files", bytes(state.disk.jobs_bytes)], ["Free", `${bytes(state.disk.free_bytes)} of ${bytes(state.disk.total_bytes)}`]]),
           meter(state.disk.total_bytes - state.disk.free_bytes, state.disk.total_bytes, "Used"),
+          state.disk.virtual_disk ? el("p", { class: "muted", text: "Docker Desktop's virtual disk: its limit, not the host's drive, which may have less free." }) : null,
         ] : emptyState("No data folder", "disk")),
       iconCard("queue", "violet", "Queues", "Messages not finished yet, including taken ones",
         table([{ label: "Queue", key: "queue" }, { label: "Messages", num: true, key: "messages" }, { label: "Dead", num: true, render: (row) => (row.dead ? badge(String(row.dead), "bad") : "0") }],

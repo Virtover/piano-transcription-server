@@ -32,7 +32,7 @@ def handler():
 @pytest.fixture
 def requests_in(handler, monkeypatch):
     """Serve generated FLAC audio instead of downloading it, and record batch sizes."""
-    monkeypatch.setattr(settings.outsource, "storage_endpoint", STORAGE)
+    monkeypatch.setattr(settings.storage, "endpoint", STORAGE)
     sizes = []
     original = piano_transcription._transcribe_audio_batch
 

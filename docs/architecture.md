@@ -41,9 +41,20 @@ The Transkun checkpoint detects sustain-pedal events separately instead of autom
 
 ## 🗄️ Job retention and restart behavior
 
-Job files are stored under `/data/jobs/<job_id>/`. Queued and processing jobs do not receive a Redis expiration.
+Job files are stored under `/data/jobs/<job_id>/`, or in object storage with `JOB_STORAGE=s3`; see [Job storage](#job-storage). Queued and processing jobs do not receive a Redis expiration.
 
 A worker holds a lease on the job it runs: a Redis key it renews every 15 seconds and that expires after 60. A processing job whose lease has expired lost its worker, for example to a crash. The API checks every 30 seconds and at startup: such a job is marked failed, its billing reservation is released, and its partial files are removed. A job whose worker is still running keeps running, so restarting only the API interrupts nothing. On API startup, queued jobs are sent to their queue again and keep their reservation, so a restart does not lose them. A message for a queued job left over from before the restart is harmless, because only one delivery can claim a job.
+
+### Job storage
+
+A job's lasting files are the uploaded file, the video information the API saved when it checked the link's length, and the MIDI result. `JOB_STORAGE` decides where they are kept (`app/job_storage.py`):
+
+* **`local`** (default): in `/data/jobs/<job_id>/`, on the `data` volume that the API, the workers, and cleanup share. This needs every service on one machine.
+* **`s3`**: in the bucket of `STORAGE_BUCKET`, which outsourcing also uses, under `jobs/<job_id>/`, so API replicas and workers on several machines share them. The API stores a submission's file before queueing it and keeps no copy. Each attempt at a job downloads the files into a scratch folder of its own, `/data/work/<job_id>.<attempt>`, and removes the folder when it ends. A job that moves to another backend on the same machine therefore cannot lose the files of its next attempt. The result is uploaded before the job is marked completed, and the upload and video information are deleted when the job ends. The MIDI download answers with a signed link to the bucket, so results do not pass through the API.
+
+A completed job's `result` field names where its file is, a path or `s3:<key>`, and the download reads that rather than `JOB_STORAGE`. Results kept before `JOB_STORAGE` changed stay downloadable, if the bucket stays configured.
+
+Expired jobs' files are deleted every `CLEANUP_INTERVAL`: the cleanup service removes folders on the `data` volume, including scratch folders left by a worker that crashed, and with `s3` the leading API deletes them from the bucket. The cleanup service gets no storage keys. A bucket with `JOB_STORAGE=s3` must serve one server only: cleanup deletes the job files its own Redis does not know, so a development copy needs a bucket of its own. The bucket's own automatic deletion catches what both miss; `python -m app.config requirements` gives the shortest safe lifetime, which grows with `RESULT_RETENTION`.
 
 ### Several API replicas
 

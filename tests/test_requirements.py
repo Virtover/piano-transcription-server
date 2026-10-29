@@ -39,15 +39,15 @@ def test_max_workers_follow_max_concurrency(default_settings):
 
 
 def test_configured_values_replace_placeholders(default_settings):
-    assert requirement(default_settings, "Storage", "Bucket").value == "<set OUTSOURCE_STORAGE_BUCKET>"
+    assert requirement(default_settings, "Storage", "Bucket").value == "<set STORAGE_BUCKET>"
 
-    default_settings.outsource.storage_bucket = "audio"
-    default_settings.outsource.storage_endpoint = "https://storage.example"
+    default_settings.storage.bucket = "audio"
+    default_settings.storage.endpoint = "https://storage.example"
     default_settings.billing.products = {"minutes_60": 60}
 
     assert requirement(default_settings, "Storage", "Bucket").value == "audio"
     assert requirement(default_settings, "GPU endpoint", "Environment variable").value == (
-        "OUTSOURCE_STORAGE_ENDPOINT=https://storage.example"
+        "STORAGE_ENDPOINT=https://storage.example"
     )
     assert "minutes_60 (60 min)" in requirement(default_settings, "Google Play", "Products").value
 

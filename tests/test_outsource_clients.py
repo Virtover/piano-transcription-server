@@ -184,17 +184,17 @@ def test_storage_errors(tmp_path):
 
 
 def test_presigned_urls_are_path_style_on_the_endpoint(default_settings):
-    default_settings.outsource.storage_endpoint = "https://account.eu.r2.cloudflarestorage.com"
-    default_settings.outsource.storage_bucket = "piano-audio"
-    default_settings.secrets.outsource_storage_access_key = "access"
-    default_settings.secrets.outsource_storage_secret_key = "secret"
+    default_settings.storage.endpoint = "https://account.eu.r2.cloudflarestorage.com"
+    default_settings.storage.bucket = "piano-audio"
+    default_settings.secrets.storage_access_key = "access"
+    default_settings.secrets.storage_secret_key = "secret"
 
     url = S3Storage.from_settings().presigned_url("audio/abc.flac", 600)
 
     parts = urlsplit(url)
     assert (parts.scheme, parts.netloc, parts.path) == ("https", "account.eu.r2.cloudflarestorage.com", "/piano-audio/audio/abc.flac")
     assert parse_qs(parts.query)["X-Amz-Expires"] == ["600"]
-    assert validate_input({"audio_url": url, "job_id": "job-1"}, default_settings.outsource.storage_endpoint)[0] == url
+    assert validate_input({"audio_url": url, "job_id": "job-1"}, default_settings.storage.endpoint)[0] == url
 
 
 def test_storage_requires_configuration(default_settings):

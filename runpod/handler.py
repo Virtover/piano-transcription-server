@@ -1,6 +1,6 @@
 """RunPod Serverless handler: Transkun inference for the piano transcription server.
 
-Input:  {"audio_url": "<presigned GET URL on OUTSOURCE_STORAGE_ENDPOINT>", "job_id": "..."}
+Input:  {"audio_url": "<presigned GET URL on STORAGE_ENDPOINT>", "job_id": "..."}
 Output: {"midi_base64": "...", "timing": {...}} or {"error": "..."}
 
 The audio is FLAC at 44.1 kHz mono, prepared by the server's remote worker.
@@ -75,7 +75,7 @@ def transcribe_job(job: dict) -> dict:
     that arrive within WORKER_BATCH_TIMEOUT of each other."""
     started = time.monotonic()
     try:
-        audio_url, job_id = validate_input(job.get("input"), settings.outsource.storage_endpoint)
+        audio_url, job_id = validate_input(job.get("input"), settings.storage.endpoint)
         with tempfile.TemporaryDirectory() as directory:
             audio_path = Path(directory) / "audio.flac"
             size = download(audio_url, audio_path, int(settings.outsource.max_audio_mb * 1024 * 1024))

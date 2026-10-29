@@ -129,10 +129,12 @@ Invoke-WebRequest -Uri "http://localhost:8000/api/transcriptions/$($job.job_id)/
 **macOS and Linux**
 
 ```bash
-curl -o transcription.mid "http://localhost:8000/api/transcriptions/$JOB_ID/midi"
+curl -L -o transcription.mid "http://localhost:8000/api/transcriptions/$JOB_ID/midi"
 ```
 
 The MIDI can contain piano notes, velocities, onset and offset information, sustain-pedal events (`CC64`), and other detected MIDI control events. The download returns `409` while processing, `404` for an unknown or missing result, and `500` for invalid stored result metadata.
+
+With `JOB_STORAGE=s3` (see [Job storage](architecture.md#job-storage)), it answers `307 Temporary Redirect` instead, to a signed link to the file in object storage, valid for 5 minutes. Clients must follow the redirect without the `Authorization` header and without the server password: the link carries its own signature, and storage refuses a request with a second one. Most HTTP clients drop those headers when a redirect leads to another host; `curl -L` does. Ask the API again for a new link rather than keeping one.
 
 ## 🚦 Limits
 

@@ -20,6 +20,10 @@ def default_settings(tmp_path):
     for name, group in saved.items():
         setattr(config.settings, name, group)
     config.settings.secrets_dir = config.SECRETS_DIR
+    # The job storage chosen from this test's settings.
+    from app import job_storage
+
+    job_storage.reset()
 
 
 @pytest.fixture(autouse=True)

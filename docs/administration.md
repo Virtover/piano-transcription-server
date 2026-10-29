@@ -38,7 +38,7 @@ The first thing to look at when users say the server is slow:
 * **API leader:** the API replica that runs backups and the abandoned job check, by container. `none` means no API is running, or it lost Redis; see [Several API replicas](architecture.md#several-api-replicas).
 * **Remote:** remote slots in use out of the limit, when outsourcing is on.
 * **Queues:** messages in the local and remote queues that are not finished yet, including ones a worker has taken, and dead-lettered messages.
-* **Disk:** space used by job files, and space free on the data volume.
+* **Disk:** space used by job files, and space free on the data volume. With Docker Desktop (Windows and macOS), the volume is in Docker's virtual disk, so the free space and total are that disk's limit, about 1 TB by default, not the host's drive: check the drive itself, where the virtual disk grows.
 * **Backups:** how many billing backups are on this disk and the age of the newest; with off-site copies on, when the last copy succeeded, or why it failed.
 * **Maintenance:** a pending restart or shutdown, from `scripts/server.py`.
 * **Video sites:** for each site with something to report, whether its links are refused because it rate-limited this server or stopped answering, for how long and why, or whether they are read one at a time to recover; downloads running; and how many incidents there were. See [When a video site refuses the server](api.md#-when-a-video-site-refuses-the-server).

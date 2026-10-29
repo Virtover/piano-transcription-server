@@ -14,11 +14,11 @@ from redis import Redis
 from redis.exceptions import WatchError
 
 from app import error_report, job_limits
+from app.job_storage import WORK_FOLDER, delete_job_files, job_dir, s3, s3_key, storage, workspace_job_id
 from app.config import settings
 from app.billing import Billing, cancelled_cost
 from app.errors import GENERIC_MESSAGE, detail, error_code, public_message
 from app.outsource import routing
-from app.transcription.audio import remove_audio_files
 from app.transcription.audio import check_midi
 from app.errors import UserFacingError
 from app.transcription.cancellation import TranscriptionCancelled
@@ -163,7 +163,9 @@ class JobLease:
             logger.exception("Could not update the lease of job %s", self.job_id)
 
 
-def complete_job(job_id: str, result: Path) -> bool:
+def complete_job(job_id: str, result: Path, reference: str | None = None) -> bool:
+    """Mark the job completed with its MIDI file, checked at result, and
+    stored where reference says (by default, at result itself)."""
     key = job_key(job_id)
 
     while True:
@@ -183,7 +185,7 @@ def complete_job(job_id: str, result: Path) -> bool:
                     mapping={
                         "status": "completed",
                         "progress": "1.0",
-                        "result": str(result),
+                        "result": reference or str(result),
                     },
                 )
                 pipe.expire(key, job_ttl())
@@ -194,20 +196,34 @@ def complete_job(job_id: str, result: Path) -> bool:
 
 
 def cleanup_expired_jobs():
-    jobs_dir = Path(settings.service.data_dir) / "jobs"
-
-    if not jobs_dir.exists():
-        return
-
-    for job_dir in jobs_dir.iterdir():
-        if not job_dir.is_dir():
+    """Remove job folders on the data volume whose job expired, and scratch
+    folders left by a worker that crashed. Run by the cleanup service."""
+    data_dir = Path(settings.service.data_dir)
+    for folder, job_id_of in ((data_dir / "jobs", lambda path: path.name), (data_dir / WORK_FOLDER, workspace_job_id)):
+        if not folder.exists():
             continue
+        for path in folder.iterdir():
+            if not path.is_dir():
+                continue
+            job_id = job_id_of(path)
+            if not redis.exists(job_key(job_id)):
+                shutil.rmtree(path, ignore_errors=True)
+                print(f"Removed expired job: {job_id}")
 
-        job_id = job_dir.name
 
+def cleanup_stored_jobs() -> int:
+    """With JOB_STORAGE=s3, delete the stored files of jobs that expired.
+    Run periodically by the leading API, which has the storage keys."""
+    if settings.jobs.storage != "s3":
+        return 0
+    removed = 0
+    for job_id in list(s3().job_ids()):
         if not redis.exists(job_key(job_id)):
-            shutil.rmtree(job_dir)
-            print(f"Removed expired job: {job_id}")
+            s3().delete(job_id)
+            removed += 1
+    if removed:
+        logger.info("Removed the stored files of %d expired jobs", removed)
+    return removed
 
 
 def delete_user_jobs(user_id: str) -> None:
@@ -217,12 +233,7 @@ def delete_user_jobs(user_id: str) -> None:
         if redis.hget(key, "user_id") != user_id:
             continue
         redis.delete(key)
-        shutil.rmtree(
-            Path(settings.service.data_dir)
-            / "jobs"
-            / key.removeprefix("transcription:"),
-            ignore_errors=True,
-        )
+        delete_job_files(key.removeprefix("transcription:"))
     job_limits.forget_user(redis, user_id)
 
 
@@ -335,7 +346,7 @@ def fail_abandoned_job(job_id: str, reason: str) -> bool:
     record_job(job_id)
     if job.get("user_id"):
         billing.release(job_id)
-    shutil.rmtree(job_dir(job_id), ignore_errors=True)
+    delete_job_files(job_id)
     routing.mark_finished(redis, job_backend(job), job_id)
     return True
 
@@ -378,10 +389,16 @@ def recover_active_jobs(reason: str) -> None:
 
 def check_completed_result(job_id: str, job: dict[str, str]) -> bool:
     """Fail a completed job whose durable result is missing or invalid."""
-    result = Path(job.get("result", ""))
+    reference = job.get("result", "")
     try:
-        result.resolve().relative_to(Path(settings.service.data_dir).resolve())
-        check_midi(result)
+        key = s3_key(reference)
+        if key is not None:
+            if not s3().result_exists(key):
+                raise OSError(f"{key} is not in the bucket")
+        else:
+            result = Path(reference)
+            result.resolve().relative_to(Path(settings.service.data_dir).resolve())
+            check_midi(result)
     except (OSError, ValueError, UserFacingError) as error:
         reason = "The completed MIDI result is missing or invalid"
         logger.error("Job %s has no usable completed result: %s", job_id, error)
@@ -411,7 +428,7 @@ def requeue_after_restart(job_id: str, job: dict[str, str], reason: str) -> None
         record_job(job_id)
         if job.get("user_id"):
             billing.release(job_id)
-        shutil.rmtree(job_dir(job_id), ignore_errors=True)
+        delete_job_files(job_id)
 
 
 class JobContext:
@@ -470,10 +487,6 @@ class AverageDuration:
 local_job_duration = AverageDuration()
 
 
-def job_dir(job_id: str) -> Path:
-    return Path(settings.service.data_dir) / "jobs" / job_id
-
-
 def run_job(
     job_id: str,
     backend: routing.Backend,
@@ -485,7 +498,7 @@ def run_job(
     Every billing call is idempotent per job, so a job is charged at most
     once whichever path it takes.
     """
-    output_dir = job_dir(job_id)
+    output_dir = storage().workspace(job_id)
     requeued = False
     claimed = False
     lease = JobLease(job_id)
@@ -497,6 +510,7 @@ def run_job(
         record_job(job_id)
         started = time.monotonic()
         output_dir.mkdir(parents=True, exist_ok=True)
+        storage().fetch_inputs(job_id, output_dir)
         stored = redis.hgetall(job_key(job_id))
         try:
             floor = float(stored.get("progress") or 0)
@@ -513,11 +527,12 @@ def run_job(
         if is_job_cancelled(job_id):
             raise TranscriptionCancelled()
 
-        if not complete_job(job_id, midi_path):
+        reference = storage().save_result(job_id, midi_path)
+        if not complete_job(job_id, midi_path, reference):
             return
         record_job(job_id)
         billing.settle_success(job_id)
-        remove_audio_files(output_dir)
+        storage().discard_inputs(job_id, output_dir)
         if backend == "local":
             local_job_duration.add(time.monotonic() - started)
 
@@ -547,7 +562,7 @@ def run_job(
             error_detail=detail(e),
         )
         record_job(job_id)
-        remove_audio_files(output_dir)
+        storage().discard_inputs(job_id, output_dir)
 
         redis.expire(
             job_key(job_id),
@@ -556,6 +571,8 @@ def run_job(
     finally:
         if claimed:
             lease.stop()
+            # With S3, the attempt's scratch folder; the kept files stay.
+            storage().release(output_dir)
         # A second delivery of a job that is running elsewhere claims nothing
         # and must not remove the running job from the routing count.
         if not requeued and (claimed or redis.hget(job_key(job_id), "status") != "processing"):
@@ -566,12 +583,14 @@ def finish_cancelled(job_id: str, output_dir: Path) -> None:
     job = redis.hgetall(job_key(job_id))
     if job.get("status") == "failed":
         shutil.rmtree(output_dir, ignore_errors=True)
+        delete_job_files(job_id)
         return
     if job.get("user_id"):
         charged = int(job.get("full_cost", 0))
         progress = float(job.get("progress", 0))
         billing.settle_cancellation(job_id, cancelled_cost(charged, progress))
     shutil.rmtree(output_dir, ignore_errors=True)
+    delete_job_files(job_id)
     update_job(
         job_id,
         status="cancelled",

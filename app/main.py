@@ -23,6 +23,7 @@ from app import google_play
 from app.google_play import sync_products
 from app.worker.tasks import (
     ABANDONED_JOB_CHECK_INTERVAL,
+    cleanup_stored_jobs,
     fail_abandoned_jobs,
     reconcile_billing,
     recover_active_jobs,
@@ -89,6 +90,18 @@ def watch_abandoned_jobs(leader: Leadership | None = None) -> None:
             fail_abandoned_jobs()
         except Exception:
             logger.exception("Could not check for abandoned jobs")
+
+
+def clean_stored_jobs(leader: Leadership | None = None) -> None:
+    """With JOB_STORAGE=s3, delete expired jobs' files from the bucket. The
+    cleanup service cannot: it has no storage keys."""
+    while True:
+        wait_for_lead(leader)
+        try:
+            cleanup_stored_jobs()
+        except Exception:
+            logger.exception("Could not delete expired jobs' stored files")
+        time.sleep(settings.cleanup.interval)
 
 
 # The first wait after Google could not be reached; it doubles up to the
@@ -211,6 +224,8 @@ def sync_billing_catalog() -> None:
     threading.Thread(target=backup_billing_database, args=(leadership,), daemon=True).start()
     threading.Thread(target=monitor_backup_health, args=(leadership,), daemon=True).start()
     threading.Thread(target=watch_abandoned_jobs, args=(leadership,), daemon=True).start()
+    if settings.jobs.storage == "s3":
+        threading.Thread(target=clean_stored_jobs, args=(leadership,), daemon=True).start()
     if voided_purchases_enabled():
         threading.Thread(target=sync_voided_purchases, args=(leadership,), daemon=True).start()
 

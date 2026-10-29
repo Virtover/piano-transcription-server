@@ -3,11 +3,12 @@ import json
 import sys
 import time
 import types
+from pathlib import Path
 
 import pytest
 
 from app import controls, maintenance
-from app.admin import common
+from app.admin import common, status
 from app.admin.__main__ import main
 from app.billing import deleted_user_target
 from app.outsource import routing
@@ -93,6 +94,21 @@ def test_status_lists_several_workers(billed, capsys):
     assert "2 workers, 3 jobs at once, average job 40 s" in output
     assert "gpu-a:7: 2 at once, average 30 s" in output
     assert "gpu-b:9: 1 at once, average 1 m" in output
+
+
+@pytest.mark.parametrize("release, note", [
+    ("6.6.87.2-microsoft-standard-WSL2", True),
+    ("6.10.14-linuxkit", True),
+    ("6.8.0-45-generic", False),
+])
+def test_status_tells_docker_desktops_virtual_disk(billed, capsys, monkeypatch, release, note):
+    _, settings, _ = billed
+    Path(settings.service.data_dir).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(status.platform, "release", lambda: release)
+
+    _, output = admin(capsys, "status")
+
+    assert ("Docker Desktop's virtual disk" in output) is note
 
 
 def test_status_without_a_worker(billed, capsys):

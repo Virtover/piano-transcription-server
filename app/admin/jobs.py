@@ -4,11 +4,10 @@ the Redis job, and from Redis while they are active."""
 
 import json
 import time
-from pathlib import Path
 
 from fastapi import HTTPException
 
-from app import job_limits
+from app import job_limits, job_storage
 from app.admin.common import (
     AdminError,
     ask_reason,
@@ -32,7 +31,6 @@ from app.admin.common import (
 )
 from app.auth import AuthenticatedUser
 from app.billing import cancelled_cost
-from app.config import settings
 from app.outsource import routing
 from app.worker import tasks
 
@@ -85,13 +83,16 @@ def job_details(job: str) -> dict:
         (job_id,),
     )
     reservations = tasks.billing.read("SELECT * FROM transcription_reservations WHERE job_id = ?", (job_id,))
-    folder = Path(settings.service.data_dir) / "jobs" / job_id
+    try:
+        files = job_storage.storage().names(job_id)
+    except Exception as error:
+        files = [f"(cannot list the stored files: {type(error).__name__})"]
     return {
         "job_id": job_id,
         "live": live or None,
         "record": row_dict(records[0]) if records else None,
         "reservation": row_dict(reservations[0]) if reservations else None,
-        "files": sorted(path.name for path in folder.iterdir()) if folder.is_dir() else None,
+        "files": files,
     }
 
 

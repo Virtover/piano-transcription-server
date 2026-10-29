@@ -24,6 +24,30 @@ class AudioStorage(Protocol):
         """Delete the object. Must not raise."""
 
 
+def storage_configured(config=None) -> bool:
+    config = config or settings
+    storage, secrets = config.storage, config.secrets
+    return bool(storage.endpoint and storage.bucket and secrets.storage_access_key and secrets.storage_secret_key)
+
+
+def s3_client(config=None) -> Any:
+    """A client for the bucket of outsourcing and job storage."""
+    import boto3
+    from botocore.config import Config
+
+    config = config or settings
+    return boto3.client(
+        "s3",
+        endpoint_url=config.storage.endpoint,
+        region_name=config.storage.region,
+        aws_access_key_id=config.secrets.storage_access_key.get_secret_value(),
+        aws_secret_access_key=config.secrets.storage_secret_key.get_secret_value(),
+        # Path-style URLs keep presigned URLs on the endpoint host, which
+        # is the only host the remote handler downloads from.
+        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}, retries={"max_attempts": 3}),
+    )
+
+
 class S3Storage:
     def __init__(self, client: Any, bucket: str):
         self.client = client
@@ -31,26 +55,10 @@ class S3Storage:
 
     @classmethod
     def from_settings(cls, config=None) -> "S3Storage":
-        import boto3
-        from botocore.config import Config
-
         config = config or settings
-        outsource = config.outsource
-        access_key = config.secrets.outsource_storage_access_key
-        secret_key = config.secrets.outsource_storage_secret_key
-        if not (outsource.storage_endpoint and outsource.storage_bucket and access_key and secret_key):
-            raise RemoteFailed("Outsourcing storage is not configured")
-        client = boto3.client(
-            "s3",
-            endpoint_url=outsource.storage_endpoint,
-            region_name=outsource.storage_region,
-            aws_access_key_id=access_key.get_secret_value(),
-            aws_secret_access_key=secret_key.get_secret_value(),
-            # Path-style URLs keep presigned URLs on the endpoint host, which
-            # is the only host the remote handler downloads from.
-            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}, retries={"max_attempts": 3}),
-        )
-        return cls(client, outsource.storage_bucket)
+        if not storage_configured(config):
+            raise RemoteFailed("Storage is not configured (STORAGE_ENDPOINT, STORAGE_BUCKET, and their secrets)")
+        return cls(s3_client(config), config.storage.bucket)
 
     def upload(self, path: Path) -> str:
         key = f"audio/{uuid.uuid4().hex}{path.suffix}"

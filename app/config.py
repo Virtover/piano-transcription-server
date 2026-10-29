@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 SECRETS_DIR = "/run/secrets"
 # Unknown variables with these prefixes are reported as possible typos.
-CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_", "OFFSITE_", "ERROR_REPORT_")
+CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "STORAGE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_", "OFFSITE_", "ERROR_REPORT_")
 MIN_SERVER_PASSWORD_LENGTH = 12
 # Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
 COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD"}
@@ -244,6 +244,15 @@ class WorkerSettings(BaseSettings):
     max_concurrency: AutoInt = None
 
 
+class JobSettings(BaseSettings):
+    model_config = _group_config("JOB_")
+
+    # local: job files on the data volume, which one machine's services
+    # share. s3: in the outsourcing bucket, for API replicas and workers on
+    # several machines; see app/job_storage.py.
+    storage: Literal["local", "s3"] = "local"
+
+
 class CleanupSettings(BaseSettings):
     model_config = _group_config("CLEANUP_")
 
@@ -305,8 +314,8 @@ class SecretSettings(BaseSettings):
     # Optional. A Restricted key cannot use RunPod's management API, so
     # reading the endpoint's settings needs a separate key with read access.
     runpod_read_api_key: SecretStr | None = None
-    outsource_storage_access_key: SecretStr | None = None
-    outsource_storage_secret_key: SecretStr | None = None
+    storage_access_key: SecretStr | None = None
+    storage_secret_key: SecretStr | None = None
     offsite_backup_access_key: SecretStr | None = None
     offsite_backup_secret_key: SecretStr | None = None
     # Optional. When present, every request except /health and /ready needs it.
@@ -339,12 +348,19 @@ class OutsourceSettings(BaseSettings):
     timeout: Duration = 15 * 60.0
     # On remote failure, put the job back on the local queue instead of failing it.
     fallback_local: bool = True
-    # S3-compatible storage used to hand audio to the remote provider.
-    storage_endpoint: str | None = None
-    storage_bucket: str | None = None
-    storage_region: str = "auto"
     # Largest audio file the remote handler downloads.
     max_audio_mb: float = Field(default=512, gt=0)
+
+
+class StorageSettings(BaseSettings):
+    """S3-compatible object storage: outsourcing hands audio to the remote
+    provider through it, and JOB_STORAGE=s3 keeps job files in it."""
+
+    model_config = _group_config("STORAGE_")
+
+    endpoint: str | None = None
+    bucket: str | None = None
+    region: str = "auto"
 
 
 class OffsiteSettings(BaseSettings):
@@ -475,11 +491,13 @@ GROUPS: dict[str, type[BaseSettings]] = {
     "service": ServiceSettings,
     "limits": LimitsSettings,
     "worker": WorkerSettings,
+    "jobs": JobSettings,
     "cleanup": CleanupSettings,
     "auth": AuthSettings,
     "billing": BillingSettings,
     "google_play": GooglePlaySettings,
     "outsource": OutsourceSettings,
+    "storage": StorageSettings,
     "runpod": RunPodSettings,
     "offsite": OffsiteSettings,
     "tunnel": TunnelSettings,
@@ -494,11 +512,13 @@ class Settings:
     service: ServiceSettings
     limits: LimitsSettings
     worker: WorkerSettings
+    jobs: JobSettings
     cleanup: CleanupSettings
     auth: AuthSettings
     billing: BillingSettings
     google_play: GooglePlaySettings
     outsource: OutsourceSettings
+    storage: StorageSettings
     runpod: RunPodSettings
     offsite: OffsiteSettings
     tunnel: TunnelSettings
@@ -556,6 +576,16 @@ ALIASES: dict[str, Alias] = {
     "CLEANUP_INTERVAL_SECONDS": Alias("CLEANUP_INTERVAL", _seconds_or_duration),
     "WORKER_BATCH_TIMEOUT_SECONDS": Alias("WORKER_BATCH_TIMEOUT", _seconds_or_duration),
     "OUTSOURCE_MAX_WAIT": Alias("OUTSOURCE_LOCAL_FIRST_MAX_WAIT", str),
+    # The bucket also keeps job files now, not only outsourced audio.
+    "OUTSOURCE_STORAGE_ENDPOINT": Alias("STORAGE_ENDPOINT", str),
+    "OUTSOURCE_STORAGE_BUCKET": Alias("STORAGE_BUCKET", str),
+    "OUTSOURCE_STORAGE_REGION": Alias("STORAGE_REGION", str),
+}
+
+# Old secret file name -> replacement, read the same way as ALIASES.
+SECRET_ALIASES: dict[str, str] = {
+    "outsource_storage_access_key": "storage_access_key",
+    "outsource_storage_secret_key": "storage_secret_key",
 }
 
 # Still supported, but replaced by another mechanism.
@@ -597,6 +627,27 @@ def resolve_aliases(environment: dict[str, str]) -> dict[str, dict[str, str]]:
     return overrides
 
 
+def resolve_secret_aliases(secrets_dir: str | None) -> dict[str, str]:
+    """Read secrets from deprecated file names, as init values for SecretSettings."""
+    values: dict[str, str] = {}
+    problems = []
+    if not secrets_dir:
+        return values
+    for old_name, new_name in SECRET_ALIASES.items():
+        old_path = Path(secrets_dir) / old_name
+        if not old_path.is_file():
+            continue
+        if (Path(secrets_dir) / new_name).is_file():
+            problems.append(f"The secret files {old_name} and {new_name} both exist; remove {old_name}")
+            continue
+        logger.warning("The secret file %s is deprecated; rename it to %s", old_name, new_name)
+        # The same as pydantic-settings reads a secret file.
+        values[new_name] = old_path.read_text(encoding="utf-8").strip()
+    if problems:
+        raise ConfigError(problems)
+    return values
+
+
 def unknown_variable_warnings(environment: dict[str, str]) -> list[str]:
     known = set(known_variables()) | set(ALIASES)
     messages = []
@@ -631,6 +682,9 @@ def load_settings(env_file: str | None = ".env", secrets_dir: str | None = SECRE
         logger.warning(message)
 
     secrets = secrets_dir if secrets_dir and Path(secrets_dir).is_dir() else None
+    secret_values = resolve_secret_aliases(secrets)
+    if secret_values:
+        overrides.setdefault("secrets", {}).update(secret_values)
     groups = {}
     problems = []
     for group_name, group in GROUPS.items():
@@ -685,17 +739,27 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
     if role in ("api", "remote", "all") and config.outsource.provider == "runpod":
         required = {
             "RUNPOD_ENDPOINT_ID": config.runpod.endpoint_id,
-            "OUTSOURCE_STORAGE_ENDPOINT": config.outsource.storage_endpoint,
-            "OUTSOURCE_STORAGE_BUCKET": config.outsource.storage_bucket,
+            "STORAGE_ENDPOINT": config.storage.endpoint,
+            "STORAGE_BUCKET": config.storage.bucket,
         }
         for name, value in required.items():
             if not value:
                 problems.append(f"{name} is required when OUTSOURCE_PROVIDER=runpod")
-        for name in ("runpod_api_key", "outsource_storage_access_key", "outsource_storage_secret_key"):
+        for name in ("runpod_api_key", "storage_access_key", "storage_secret_key"):
             if getattr(config.secrets, name) is None:
                 problems.append(
                     f"OUTSOURCE_PROVIDER=runpod needs the secret file {config.secrets_dir}/{name}"
                 )
+    if role in ("api", "worker", "remote", "all") and config.jobs.storage == "s3":
+        for name, value in {
+            "STORAGE_ENDPOINT": config.storage.endpoint,
+            "STORAGE_BUCKET": config.storage.bucket,
+        }.items():
+            if not value:
+                problems.append(f"{name} is required when JOB_STORAGE=s3")
+        for name in ("storage_access_key", "storage_secret_key"):
+            if getattr(config.secrets, name) is None:
+                problems.append(f"JOB_STORAGE=s3 needs the secret file {config.secrets_dir}/{name}")
     if role in ("api", "all") and config.billing.provider == "google_play":
         if not config.google_play.package_name:
             problems.append("GOOGLE_PLAY_PACKAGE_NAME is required when BILLING_PROVIDER=google_play")
@@ -809,8 +873,8 @@ def configuration_warnings(config: "Settings", environment: dict[str, str]) -> l
                 "Port 8000 is published on every network interface, so the server is also reachable without the "
                 "tunnel's HTTPS. Set API_BIND_ADDRESS=127.0.0.1 unless devices on your network connect directly."
             )
-    offsite, outsource = config.offsite, config.outsource
-    if offsite.enabled and (offsite.endpoint, offsite.bucket) == (outsource.storage_endpoint, outsource.storage_bucket):
+    offsite = config.offsite
+    if offsite.enabled and (offsite.endpoint, offsite.bucket) == (config.storage.endpoint, config.storage.bucket):
         warnings.append(
             "Off-site backups use the outsourcing bucket. Use a bucket and keys of their own, so the keys used "
             "for every outsourced job cannot delete the backups."

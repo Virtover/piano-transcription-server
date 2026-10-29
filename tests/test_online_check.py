@@ -177,7 +177,7 @@ def test_unreachable_storage_endpoint():
     result = storage_check(FakeS3Client(put_error=EndpointConnectionError(endpoint_url="https://x")))
 
     assert result.status == "fail"
-    assert "OUTSOURCE_STORAGE_ENDPOINT" in result.hint
+    assert "STORAGE_ENDPOINT" in result.hint
 
 
 def test_rejected_signed_download_suggests_ip_filtering_and_still_deletes():
@@ -202,7 +202,7 @@ def test_failed_delete_is_reported():
 
 GOOD_SETTINGS = {
     "template": {"imageName": "user/piano-transcription-runpod:4", "env": {}},
-    "env": {"OUTSOURCE_STORAGE_ENDPOINT": "https://storage.example"},
+    "env": {"STORAGE_ENDPOINT": "https://storage.example"},
     "minCudaVersion": "12.8",
     "executionTimeoutMs": 20 * 60_000,
     "workersMin": 0,
@@ -215,7 +215,7 @@ GOOD_SETTINGS = {
 
 @pytest.fixture
 def outsourcing(default_settings):
-    default_settings.outsource.storage_endpoint = "https://storage.example"
+    default_settings.storage.endpoint = "https://storage.example"
     default_settings.outsource.max_concurrency = 4
     return default_settings
 
@@ -258,7 +258,10 @@ def test_runpod_errors_explain_the_fix(default_settings, status, hint):
     "changes, status, text",
     [
         ({"env": {}}, "fail", "is missing"),
-        ({"env": {"OUTSOURCE_STORAGE_ENDPOINT": "https://other.example"}}, "fail", "differs"),
+        ({"env": {"STORAGE_ENDPOINT": "https://other.example"}}, "fail", "differs"),
+        ({"env": {"OUTSOURCE_STORAGE_ENDPOINT": "https://other.example"}}, "fail", "OUTSOURCE_STORAGE_ENDPOINT on the endpoint differs"),
+        ({"env": {"STORAGE_ENDPOINT": "https://storage.example", "OUTSOURCE_STORAGE_ENDPOINT": "https://storage.example"}},
+         "fail", "both"),
         ({"minCudaVersion": None, "allowedCudaVersions": []}, "warn", "older than 12.8"),
         ({"minCudaVersion": None, "allowedCudaVersions": ["12.6", "12.8"]}, "warn", "older than 12.8"),
         ({"executionTimeoutMs": 10 * 60_000}, "warn", "needs at least 20 min"),
@@ -275,6 +278,12 @@ def test_endpoint_settings_mismatches(outsourcing, changes, status, text):
     assert problem.status == status
     assert text in problem.detail
     assert problem.hint
+
+
+def test_an_endpoint_with_the_deprecated_storage_name_passes(outsourcing):
+    results = endpoint_check(outsourcing, env={"OUTSOURCE_STORAGE_ENDPOINT": "https://storage.example"})
+
+    assert all(result.status == "ok" for result in results)
 
 
 def test_new_cuda_versions_only_are_accepted(outsourcing):

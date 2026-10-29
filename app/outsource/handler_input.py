@@ -38,7 +38,7 @@ def validate_input(job_input: Any, storage_endpoint: str | None) -> tuple[str, s
     if not isinstance(job_id, str) or not JOB_ID_PATTERN.match(job_id):
         raise InvalidInput("job_id is missing or invalid")
     if not storage_endpoint:
-        raise InvalidInput("OUTSOURCE_STORAGE_ENDPOINT is not configured on the handler")
+        raise InvalidInput("STORAGE_ENDPOINT is not configured on the handler")
 
     allowed = _origin(storage_endpoint)
     scheme, host, port = _origin(audio_url)

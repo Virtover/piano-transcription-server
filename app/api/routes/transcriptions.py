@@ -6,11 +6,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
 
-from app import job_limits, maintenance, video_info
+from app import job_limits, job_storage, maintenance, video_info
+from app.job_storage import StorageUnavailable, delete_job_files
 from app.maintenance import NoticeResponse
 from app.config import settings
 from app.billing import Billing, transcription_cost, InsufficientMinutes
@@ -351,12 +352,19 @@ def create_transcription(
         return submit_link(job_id, str(request.source_url), user)
     except BaseException:
         give_back_place(job_id, user_id)
-        shutil.rmtree(job_directory(job_id), ignore_errors=True)
+        delete_job_files(job_id)
         raise
 
 
-def job_directory(job_id: str) -> Path:
-    return Path(settings.service.data_dir) / "jobs" / job_id
+STORAGE_UNAVAILABLE = "Job storage is unavailable; try again shortly"
+
+
+def keep_job_file(job_id: str, path: Path) -> None:
+    """Keep a file of the job for whichever worker takes it."""
+    try:
+        job_storage.storage().save(job_id, path)
+    except StorageUnavailable as error:
+        raise HTTPException(status_code=503, detail=STORAGE_UNAVAILABLE) from error
 
 
 def submit_link(
@@ -368,7 +376,13 @@ def submit_link(
     """Check a video link and queue it, for a job whose place is held."""
     video = check_video(source_url)
     # The worker downloads with this info instead of asking the site again.
-    video_info.save_video_info(job_directory(job_id), video.info, video.checked_at)
+    folder = job_storage.storage().workspace(job_id)
+    try:
+        keep_job_file(job_id, video_info.save_video_info(folder, video.info, video.checked_at))
+    finally:
+        # Freed before the job is queued, so it cannot remove what a worker
+        # on this machine fetched.
+        job_storage.storage().release(folder)
     fields = {"source_url": source_url}
     # Clients see the title while the job waits; the download updates it.
     metadata = video_info.video_metadata(video.info, source_url)
@@ -427,7 +441,7 @@ async def upload_transcription(
         raise too_large
     await run_in_threadpool(ensure_minimum_balance, user)
 
-    job_dir = Path(settings.service.data_dir) / "jobs" / job_id
+    job_dir = job_storage.storage().workspace(job_id)
     upload_path = job_dir / UPLOAD_FILE_NAME
     title = title_from_filename(filename)
 
@@ -454,6 +468,9 @@ async def upload_transcription(
         except UnsupportedMedia as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         ensure_allowed_length(duration)
+        await run_in_threadpool(keep_job_file, job_id, upload_path)
+        # Before the job is queued, as for a link.
+        job_storage.storage().release(job_dir)
 
         return await run_in_threadpool(
             queue_job,
@@ -467,6 +484,7 @@ async def upload_transcription(
     except BaseException:
         give_back_place(job_id, user_id)
         shutil.rmtree(job_dir, ignore_errors=True)
+        await run_in_threadpool(delete_job_files, job_id)
         raise
 
 
@@ -574,6 +592,17 @@ def get_midi(
             status_code=500,
             detail="Result path missing",
         )
+
+    key = job_storage.s3_key(path)
+    if key is not None:
+        # A signed link to the bucket: the file does not pass through the API.
+        try:
+            bucket = job_storage.s3()
+            if not bucket.result_exists(key):
+                raise HTTPException(status_code=404, detail="MIDI result is no longer available")
+            return RedirectResponse(bucket.result_link(key), status_code=307)
+        except StorageUnavailable as error:
+            raise HTTPException(status_code=503, detail=STORAGE_UNAVAILABLE) from error
 
     result_path = Path(path)
     data_root = Path(settings.service.data_dir).resolve()

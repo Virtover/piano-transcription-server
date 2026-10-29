@@ -1,6 +1,7 @@
 """`status`: what the server is doing now, from Redis and the data folder."""
 
 import json
+import platform
 import shutil
 import time
 from pathlib import Path
@@ -25,6 +26,14 @@ def folder_size(path: Path) -> int:
             # A job finished and removed its files while this ran.
             continue
     return total
+
+
+def in_docker_desktop_vm() -> bool:
+    """Docker Desktop runs containers in a virtual machine (WSL 2 on Windows,
+    LinuxKit on macOS) whose disk can grow up to its limit, not to what the
+    host's drive has free."""
+    release = platform.release().lower()
+    return "microsoft" in release or "linuxkit" in release
 
 
 def collect() -> dict:
@@ -70,6 +79,7 @@ def collect() -> dict:
             "jobs_bytes": folder_size(jobs_dir) if jobs_dir.is_dir() else 0,
             "free_bytes": usage.free,
             "total_bytes": usage.total,
+            "virtual_disk": in_docker_desktop_vm(),
         }
 
     local_backups = backups.local_backups(settings.billing.backup_dir)
@@ -168,6 +178,8 @@ def render(state: dict) -> str:
             f"Disk          jobs use {size(disk['jobs_bytes'])}; {size(disk['free_bytes'])} free "
             f"of {size(disk['total_bytes'])} on {disk['path']}"
         )
+        if disk["virtual_disk"]:
+            lines.append("              Docker Desktop's virtual disk: its limit, not the host's drive, which may have less free")
 
     backup_state = state["backups"]
     if backup_state["newest_at"] is None:

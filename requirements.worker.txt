@@ -4,6 +4,8 @@ redis==8.1.0
 psycopg[binary]==3.2.9
 dramatiq[redis]==2.2.1
 psutil==7.2.2
+# For JOB_STORAGE=s3; the same version as the API image.
+boto3==1.43.117
 pydantic-settings==2.15.0
 torch==2.14.1
 torchaudio==2.11.0

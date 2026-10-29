@@ -30,12 +30,12 @@ class Result:
 # --- Storage ----------------------------------------------------------------
 
 STORAGE_HINTS = {
-    "InvalidAccessKeyId": "The access key ID is wrong. Rewrite secrets/outsource_storage_access_key, or create a new R2 API token.",
-    "SignatureDoesNotMatch": "The secret access key does not match the access key ID. Rewrite secrets/outsource_storage_secret_key.",
+    "InvalidAccessKeyId": "The access key ID is wrong. Rewrite secrets/storage_access_key, or create a new R2 API token.",
+    "SignatureDoesNotMatch": "The secret access key does not match the access key ID. Rewrite secrets/storage_secret_key.",
     "Unauthorized": "The storage keys are wrong. Rewrite both key files, or create a new R2 API token.",
     "AccessDenied": "The token cannot write to this bucket. It needs Object Read & Write, applied to this bucket.",
     "NoSuchBucket": (
-        "No bucket with this name at this endpoint. Check OUTSOURCE_STORAGE_BUCKET; a bucket in the EU "
+        "No bucket with this name at this endpoint. Check STORAGE_BUCKET; a bucket in the EU "
         "jurisdiction is only visible through the .eu. endpoint, and other buckets only without it."
     ),
 }
@@ -54,7 +54,7 @@ def _storage_failure(step: str, error: Exception) -> Result:
         return Result("Storage", "fail", f"{step}: {code}", STORAGE_HINTS.get(code))
     hint = None
     if "Endpoint" in type(error).__name__ or "Connect" in type(error).__name__:
-        hint = "The endpoint cannot be reached. Check OUTSOURCE_STORAGE_ENDPOINT."
+        hint = "The endpoint cannot be reached. Check STORAGE_ENDPOINT."
     return Result("Storage", "fail", f"{step}: {type(error).__name__}", hint)
 
 
@@ -191,15 +191,27 @@ def check_endpoint_settings(config, provider) -> list[Result]:
     )
 
     env = {**(template.get("env") or {}), **(endpoint.get("env") or {})}
-    expected = config.outsource.storage_endpoint
-    if env.get("OUTSOURCE_STORAGE_ENDPOINT") != expected:
+    expected = config.storage.endpoint
+    # The handler also reads the deprecated name, which older endpoints have.
+    names = [name for name in ("STORAGE_ENDPOINT", "OUTSOURCE_STORAGE_ENDPOINT") if name in env]
+    if len(names) == 2:
         results.append(
             Result(
                 name,
                 "fail",
-                "OUTSOURCE_STORAGE_ENDPOINT on the endpoint "
-                + ("is missing" if "OUTSOURCE_STORAGE_ENDPOINT" not in env else "differs from .env"),
-                f"Set the endpoint's environment variable OUTSOURCE_STORAGE_ENDPOINT to {expected}; "
+                "the endpoint sets both STORAGE_ENDPOINT and OUTSOURCE_STORAGE_ENDPOINT",
+                "Remove OUTSOURCE_STORAGE_ENDPOINT from the endpoint's environment variables; "
+                "the handler refuses to start with both.",
+            )
+        )
+    elif (env.get(names[0]) if names else None) != expected:
+        results.append(
+            Result(
+                name,
+                "fail",
+                f"{names[0] if names else 'STORAGE_ENDPOINT'} on the endpoint "
+                + ("differs from .env" if names else "is missing"),
+                f"Set the endpoint's environment variable STORAGE_ENDPOINT to {expected}; "
                 "the handler refuses downloads from any other host.",
             )
         )
@@ -635,14 +647,54 @@ def check_admin_web(config, http=requests) -> list[Result]:
     return results
 
 
+def check_job_storage(config, storage_factory: Callable | None = None) -> Result:
+    """With JOB_STORAGE=s3: what job storage needs beyond what check_storage
+    tests. Listing finds expired jobs, and metadata keeps when a video was
+    checked."""
+    from app.job_storage import PREFIX, S3JobStorage
+
+    try:
+        storage = (storage_factory or S3JobStorage.from_settings)(config)
+    except Exception as error:
+        return Result("Job storage", "fail", str(error))
+    job_id = f"online-check-{uuid.uuid4().hex}"
+    key = storage.key(job_id, "check.txt")
+    try:
+        storage.client.put_object(Bucket=storage.bucket, Key=key, Body=TEST_BODY, Metadata={"mtime": "1"})
+    except Exception as error:
+        return _storage_failure("Upload", error)
+    try:
+        try:
+            listed = job_id in set(storage.job_ids())
+        except Exception as error:
+            return Result(
+                "Job storage", "fail", f"Listing {PREFIX}: {type(error).__name__}",
+                "The storage key must be allowed to list objects in the bucket.",
+            )
+        if not listed:
+            return Result("Job storage", "fail", f"An object written under {PREFIX} is not listed")
+        try:
+            metadata = storage.client.head_object(Bucket=storage.bucket, Key=key).get("Metadata", {})
+        except Exception as error:
+            return _storage_failure("Reading metadata", error)
+        if metadata.get("mtime") != "1":
+            return Result("Job storage", "fail", "The storage does not keep object metadata")
+    finally:
+        storage.delete(job_id)
+    return Result("Job storage", "ok", f"listing and metadata work under {PREFIX} in bucket {storage.bucket}")
+
+
 # --- Running ----------------------------------------------------------------
 
 def run_checks(config) -> list[Result]:
     results = [check_redis(config)]
     if config.admin_web.enabled:
         results.extend(check_admin_web(config))
-    if config.outsource.provider == "runpod":
+    if config.outsource.provider == "runpod" or config.jobs.storage == "s3":
         results.append(check_storage(config))
+    if config.jobs.storage == "s3":
+        results.append(check_job_storage(config))
+    if config.outsource.provider == "runpod":
         results.extend(check_runpod(config))
     else:
         results.append(Result("Outsourcing", "skip", "OUTSOURCE_PROVIDER=none"))

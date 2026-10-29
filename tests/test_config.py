@@ -418,14 +418,41 @@ def test_worker_cpu_enforcement(tmp_path):
 RUNPOD_ENV = (
     "OUTSOURCE_PROVIDER=runpod\n"
     "RUNPOD_ENDPOINT_ID=abc123\n"
-    "OUTSOURCE_STORAGE_ENDPOINT=https://account.eu.r2.cloudflarestorage.com\n"
-    "OUTSOURCE_STORAGE_BUCKET=piano-audio\n"
+    "STORAGE_ENDPOINT=https://account.eu.r2.cloudflarestorage.com\n"
+    "STORAGE_BUCKET=piano-audio\n"
 )
 RUNPOD_SECRETS = {
     "runpod_api_key": "rp-key",
-    "outsource_storage_access_key": "access",
-    "outsource_storage_secret_key": "secret",
+    "storage_access_key": "access",
+    "storage_secret_key": "secret",
 }
+
+
+def test_deprecated_storage_names_keep_working(tmp_path, caplog):
+    settings = load(
+        tmp_path,
+        "OUTSOURCE_STORAGE_ENDPOINT=https://account.eu.r2.cloudflarestorage.com\n"
+        "OUTSOURCE_STORAGE_BUCKET=piano-audio\nOUTSOURCE_STORAGE_REGION=eu\n",
+        {"outsource_storage_access_key": "access\n", "outsource_storage_secret_key": "secret"},
+    )
+
+    assert settings.storage.endpoint == "https://account.eu.r2.cloudflarestorage.com"
+    assert settings.storage.bucket == "piano-audio"
+    assert settings.storage.region == "eu"
+    assert settings.secrets.storage_access_key.get_secret_value() == "access"
+    assert settings.secrets.storage_secret_key.get_secret_value() == "secret"
+    assert "OUTSOURCE_STORAGE_BUCKET is deprecated; use STORAGE_BUCKET instead" in caplog.text
+    assert "The secret file outsource_storage_access_key is deprecated; rename it to storage_access_key" in caplog.text
+
+
+def test_old_and_new_storage_secret_files_together_are_an_error(tmp_path):
+    with pytest.raises(ConfigError, match="remove outsource_storage_secret_key"):
+        load(tmp_path, secrets={"outsource_storage_secret_key": "old", "storage_secret_key": "new"})
+
+
+def test_old_and_new_storage_names_together_are_an_error(tmp_path):
+    with pytest.raises(ConfigError, match="remove OUTSOURCE_STORAGE_BUCKET"):
+        load(tmp_path, "OUTSOURCE_STORAGE_BUCKET=old\nSTORAGE_BUCKET=new\n")
 
 
 def test_outsourcing_defaults(tmp_path):
@@ -451,7 +478,7 @@ def test_complete_runpod_configuration_is_valid(tmp_path):
 
 @pytest.mark.parametrize(
     "missing",
-    ["RUNPOD_ENDPOINT_ID", "OUTSOURCE_STORAGE_ENDPOINT", "OUTSOURCE_STORAGE_BUCKET", *RUNPOD_SECRETS],
+    ["RUNPOD_ENDPOINT_ID", "STORAGE_ENDPOINT", "STORAGE_BUCKET", *RUNPOD_SECRETS],
 )
 def test_runpod_requirements(tmp_path, missing):
     env = "".join(line + "\n" for line in RUNPOD_ENV.splitlines() if not line.startswith(missing))
@@ -471,10 +498,10 @@ def test_runpod_settings_not_needed_by_gpu_worker(tmp_path):
 def test_runpod_secrets_cannot_come_from_env(tmp_path, monkeypatch):
     monkeypatch.setenv("RUNPOD_API_KEY", "leaked")
 
-    settings = load(tmp_path, RUNPOD_ENV + "OUTSOURCE_STORAGE_SECRET_KEY=leaked\n")
+    settings = load(tmp_path, RUNPOD_ENV + "STORAGE_SECRET_KEY=leaked\n")
 
     assert settings.secrets.runpod_api_key is None
-    assert settings.secrets.outsource_storage_secret_key is None
+    assert settings.secrets.storage_secret_key is None
 
 
 def test_old_max_wait_name_is_supported_as_a_deprecated_alias(tmp_path, caplog):

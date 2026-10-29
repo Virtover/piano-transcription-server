@@ -248,8 +248,8 @@ def test_off_site_settings_are_validated(api_context, identity):
 
 def test_sharing_the_outsourcing_bucket_is_warned_about(api_context):
     _, settings, _ = api_context
-    settings.outsource.storage_endpoint = settings.offsite.endpoint = "https://storage.example.com"
-    settings.outsource.storage_bucket = settings.offsite.bucket = "shared"
+    settings.storage.endpoint = settings.offsite.endpoint = "https://storage.example.com"
+    settings.storage.bucket = settings.offsite.bucket = "shared"
 
     warnings = config.configuration_warnings(settings, {})
 
