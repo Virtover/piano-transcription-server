@@ -1,3 +1,4 @@
+import hmac
 import logging
 import threading
 import time
@@ -6,10 +7,11 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from redis import Redis
 
 from app import error_report, maintenance
+from app import metrics as app_metrics
 from app.auth import server_password_matches, server_password_required
 from app.api.routes import transcriptions as transcription_routes
 from app.api.routes.transcriptions import (
@@ -180,6 +182,13 @@ async def server_password(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def count_requests(request: Request, call_next):
+    """For piano_api_requests_in_flight."""
+    with app_metrics.in_flight:
+        return await call_next(request)
+
+
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -236,6 +245,20 @@ def sync_billing_catalog() -> None:
 def hand_over_lead() -> None:
     if leadership is not None:
         leadership.stop()
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics(request: Request):
+    """Queue depth and wait for autoscaling, with secrets/metrics_token as a
+    Bearer token. Without the secret it does not exist."""
+    token = settings.secrets.metrics_token
+    if token is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    expected = f"Bearer {token.get_secret_value()}"
+    if not hmac.compare_digest(request.headers.get("authorization", "").encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="Metrics token required", headers={"WWW-Authenticate": "Bearer"})
+    body = app_metrics.render(app_metrics.collect(transcription_routes.redis))
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
 
 @app.get("/health")

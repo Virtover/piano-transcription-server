@@ -1,5 +1,6 @@
 import json
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -292,6 +293,8 @@ def queue_job(
         job_key(job_id),
         mapping={
             "status": "queued",
+            # For the oldest-wait metric.
+            "queued_at": str(time.time()),
             "progress": "0.0",
             "user_id": current_user,
             "duration": str(duration),

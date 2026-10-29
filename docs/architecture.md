@@ -202,6 +202,28 @@ When the user cancels, the dispatcher calls RunPod `/cancel` and stops. A remote
 
 Remote and local jobs share one lifecycle (`run_job` in `app/worker/tasks.py`), so they reserve, settle, and release minutes the same way. A job keeps its reservation when it moves between backends, and every billing call is idempotent per job, so a job is never charged twice.
 
+## 📈 Metrics for scaling
+
+`GET /metrics` answers in Prometheus's text format when the secret `metrics_token` exists, and only to a request with `Authorization: Bearer <token>`; without the secret it answers `404`. The server password does not apply to it, because the token protects it. Every API replica reads the same values from Redis, so a scraper can ask any of them; only `piano_api_requests_in_flight` is the replica's own.
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `piano_queue_jobs` | `queue`, `backend` | Jobs waiting to start: `default` (local workers) or `remote` (RunPod). |
+| `piano_queue_oldest_job_age_seconds` | `queue`, `backend` | How long the oldest waiting job has waited, counted from when it entered that queue; 0 when none waits. |
+| `piano_jobs_running` | `queue`, `backend` | Jobs being transcribed. |
+| `piano_local_workers`, `piano_local_worker_capacity` | | Local workers with a live heartbeat, and the jobs they run at once together. |
+| `piano_remote_job_limit` | | Remote jobs allowed at once, with outsourcing on. |
+| `piano_video_checks`, `piano_video_checks_limit` | | Video links being checked by every replica, and `MAX_VIDEO_CHECKS`. |
+| `piano_api_requests_in_flight` | | Requests this replica is answering. |
+
+Scale on the queue, not on CPU. A GPU worker that waits for its next job uses little CPU while users wait, and one that transcribes uses all of it however long the queue is.
+
+* **Local workers:** add one while `piano_queue_jobs{queue="default"}` stays above `piano_local_worker_capacity`, or `piano_queue_oldest_job_age_seconds{queue="default"}` above what users should wait, for example 60 seconds. Remove one when nothing has waited for several minutes. A new GPU worker loads the model before it takes jobs, which takes about a minute.
+* **The remote worker** only waits for RunPod, so one is enough; RunPod scales the GPUs.
+* **API replicas:** on `piano_api_requests_in_flight` and CPU. Uploads and video checks hold a request for seconds, so in-flight requests rise before CPU does.
+
+`python scripts/admin.py status` shows the same waits in its `Waiting` line.
+
 ## ⚠️ Limitations
 
 Transcription quality depends on the source recording. Dense arrangements, multiple instruments, noise, reverb, sustain effects, and ambiguous note offsets can produce incorrect or missing notes. Generated MIDI may need manual cleanup. The service does not provide MIDI editing, sheet-music generation, playback controls, performance feedback, or piano-roll visualization.

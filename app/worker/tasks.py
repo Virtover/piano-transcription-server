@@ -641,7 +641,13 @@ def requeue_job(job_id: str, source: routing.Backend, target: routing.Backend, r
                 pipe.multi()
                 pipe.hset(
                     key,
-                    mapping={"status": "queued", "backend": target, "outsourced": "1", "requeue_reason": reason},
+                    mapping={
+                        "status": "queued",
+                        "backend": target,
+                        "outsourced": "1",
+                        "requeue_reason": reason,
+                        "queued_at": str(time.time()),
+                    },
                 )
                 pipe.execute()
                 break

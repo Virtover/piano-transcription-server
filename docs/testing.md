@@ -139,6 +139,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_launcher.py` | Worker resources resolved at startup: threads, CPU threads, and the values passed to Dramatiq. |
 | `test_job_storage.py` | `JOB_STORAGE=s3` with an in-memory bucket: submissions kept only in the bucket, workers' scratch folders, results and signed download links, cleanup, account deletion, settings, requirements, and the online check. |
 | `test_managed_services.py` | Redis and PostgreSQL outside the stack: TLS options, warnings about unencrypted connections, the online check without `CONFIG`, backups turned off, and their requirements. |
+| `test_metrics.py` | `GET /metrics`: its token, waiting and running jobs per queue, the oldest wait, worker capacity, the text format, and the requests in flight. |
 | `test_slots.py` | Places limited across processes through Redis: the limit, unlimited places, a crashed holder's place freeing itself, and waiting for a place. |
 | `test_leader.py` | Which API replica leads: one at a time, handover on shutdown and after a crash, periodic tasks waiting for the lead, and startup recovery only when no other API runs. |
 | `test_batching.py` | Batch size rules (`auto` per GPU, clamping, CPU default) and splitting a batch in half on GPU out-of-memory. |

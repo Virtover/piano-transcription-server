@@ -338,6 +338,8 @@ class SecretSettings(BaseSettings):
     billing_database_url: SecretStr | None = None
     # Sent with every error report to ERROR_REPORT_URL.
     error_report_token: SecretStr | None = None
+    # Optional. Turns on GET /metrics, for a scraper that sends it.
+    metrics_token: SecretStr | None = None
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):

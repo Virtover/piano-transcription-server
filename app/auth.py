@@ -29,7 +29,8 @@ _token_cache: TTLCache = TTLCache(maxsize=10_000, ttl=300)
 
 SERVER_PASSWORD_HEADER = "X-Server-Password"
 # Probes from Docker and scripts/server.py, which do not know the password.
-PASSWORD_FREE_PATHS = {"/health", "/ready"}
+# /metrics checks a token of its own.
+PASSWORD_FREE_PATHS = {"/health", "/ready", "/metrics"}
 
 
 def server_password_required(path: str) -> bool:

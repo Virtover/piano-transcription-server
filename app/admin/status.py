@@ -6,7 +6,7 @@ import shutil
 import time
 from pathlib import Path
 
-from app import backups, controls, job_limits, leader, maintenance, video_sites
+from app import backups, controls, job_limits, leader, maintenance, metrics, video_sites
 from app.admin import web
 from app.admin.common import ago, size, span
 from app.config import settings
@@ -107,6 +107,7 @@ def collect() -> dict:
         } if workers else None,
         "local_workers": workers,
         "api_leader": leader.current_leader(redis),
+        "waiting": metrics.job_queues(redis),
         "video_checks": {"in_use": in_use(redis, VIDEO_CHECKS_KEY), "limit": settings.limits.max_video_checks},
         "remote": remote,
         "queues": queues,
@@ -175,6 +176,13 @@ def render(state: dict) -> str:
             text += f", {queue['dead']} dead-lettered"
         queue_text.append(text)
     lines.append("Queues        " + "; ".join(queue_text))
+    waits = []
+    for backend, queue in state["waiting"].items():
+        text = f"{backend} {queue['waiting']}"
+        if queue["waiting"] and queue["oldest_wait_seconds"]:
+            text += f", the oldest for {span(queue['oldest_wait_seconds'])}"
+        waits.append(text)
+    lines.append("Waiting       " + "; ".join(waits) + " (jobs queued, not running yet)")
 
     disk = state["disk"]
     if disk is None:
