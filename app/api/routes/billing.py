@@ -292,6 +292,47 @@ def cost(
     return CostResponse(duration_seconds=duration, cost_minutes=transcription_cost(duration))
 
 
+def purchase_summary(response: dict) -> str:
+    """What Google reported about a purchase, for the log: no token, no user."""
+    return ", ".join(
+        f"{field}={response.get(field)}"
+        for field in ("orderId", "purchaseState", "consumptionState", "acknowledgementState", "purchaseType")
+    )
+
+
+# Google refuses to consume a purchase while another change to it is under
+# way, as right after the purchase or while a duplicate request consumes it.
+# The waits double: 1, 2, and 4 seconds.
+CONSUME_ATTEMPTS = 4
+CONSUME_FIRST_WAIT = 1.0
+
+
+def is_concurrent_update(error: Exception) -> bool:
+    status = getattr(getattr(error, "resp", None), "status", None)
+    return status == 409 and b"concurrentUpdate" in (getattr(error, "content", None) or b"")
+
+
+def consume_purchase(service: Any, product_id: str, token: str) -> None:
+    """Consume the purchase, waiting out concurrent changes. Returns once it
+    is consumed, by this call or by another; raises otherwise."""
+    products = service.purchases().products()
+    package = settings.google_play.package_name
+    wait = CONSUME_FIRST_WAIT
+    for attempt in range(1, CONSUME_ATTEMPTS + 1):
+        try:
+            products.consume(packageName=package, productId=product_id, token=token).execute()
+            return
+        except Exception as error:
+            if attempt == CONSUME_ATTEMPTS or not is_concurrent_update(error):
+                raise
+        time.sleep(wait)
+        wait *= 2
+        # The change under way may have been another request's consumption.
+        state = products.get(packageName=package, productId=product_id, token=token).execute()
+        if state.get("consumptionState") == 1:
+            return
+
+
 @router.post("/google-play/verify")
 def verify_google_purchase(
     request: GooglePurchaseRequest,
@@ -302,6 +343,11 @@ def verify_google_purchase(
     if user is None:
         raise HTTPException(status_code=409, detail="Google Play billing is disabled")
     if request.product_id not in settings.billing.products:
+        logger.warning(
+            "Refused Google Play purchase %s: product %s is not in BILLING_PRODUCTS",
+            request.purchase_token[:8],
+            request.product_id,
+        )
         raise HTTPException(status_code=400, detail="Unknown product")
     if not google_play.is_configured():
         raise HTTPException(status_code=503, detail="Google Play verification is not configured")
@@ -318,6 +364,12 @@ def verify_google_purchase(
         raise HTTPException(status_code=502, detail="Google Play purchase verification failed") from error
 
     if response.get("purchaseState") != 0:
+        logger.warning(
+            "Refused Google Play purchase %s of %s: not completed (%s)",
+            request.purchase_token[:8],
+            request.product_id,
+            purchase_summary(response),
+        )
         raise HTTPException(status_code=400, detail="Purchase is not completed")
     order_id = response.get("orderId")
     if not isinstance(order_id, str) or not order_id:
@@ -331,14 +383,17 @@ def verify_google_purchase(
     )
     consumed = True
     try:
-        service.purchases().products().consume(
-            packageName=settings.google_play.package_name,
-            productId=request.product_id,
-            token=request.purchase_token,
-        ).execute()
+        # A repeated request finds it consumed already.
+        if response.get("consumptionState") != 1:
+            consume_purchase(service, request.product_id, request.purchase_token)
     except Exception:
         consumed = False
-        logger.exception("Could not consume Google Play purchase %s", request.purchase_token[:8])
+        logger.exception(
+            "Could not consume Google Play purchase %s of %s (%s)",
+            request.purchase_token[:8],
+            request.product_id,
+            purchase_summary(response),
+        )
     return VerifyPurchaseResponse(
         user_id=user.user_id,
         credited_minutes=credited,

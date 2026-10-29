@@ -1,4 +1,7 @@
+import types
 from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 
 
 def test_none_provider_exposes_balance_and_rejects_google_play(api_context):
@@ -46,6 +49,162 @@ def test_cost_endpoint_validates_duration_and_calculates_minutes(api_context, mo
 
     assert response.status_code == 200
     assert response.json() == {"duration_seconds": 130.0, "cost_minutes": 2}
+
+
+class FakeRequest:
+    def __init__(self, result):
+        self.result = result
+
+    def execute(self):
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def concurrent_update():
+    from googleapiclient.errors import HttpError
+
+    return HttpError(
+        types.SimpleNamespace(status=409, reason="Conflict"),
+        b'{"error": {"errors": [{"reason": "concurrentUpdate"}]}}',
+    )
+
+
+class FakeProducts:
+    """Google Play's purchases of one product: get answers purchase, updated
+    by later_states one call at a time; consume answers consume_results."""
+
+    def __init__(self, purchase, consume_results=None):
+        self.purchase = dict(purchase)
+        self.consume_results = list(consume_results or [{}])
+        self.consumed = 0
+        self.later_states = []
+
+    def get(self, **kwargs):
+        if self.later_states:
+            self.purchase.update(self.later_states.pop(0))
+        return FakeRequest(dict(self.purchase))
+
+    def consume(self, **kwargs):
+        result = self.consume_results.pop(0) if self.consume_results else {}
+        if not isinstance(result, Exception):
+            self.consumed += 1
+        return FakeRequest(result)
+
+
+def google_play_service(monkeypatch, settings, purchase, products=None):
+    """Google Play reporting purchase for every token. Returns its products."""
+    from app import google_play
+    from app.api.routes import billing as billing_routes
+
+    monkeypatch.setattr(billing_routes.time, "sleep", lambda seconds: None)
+
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 5}
+    settings.google_play.package_name = "com.example.piano"
+    settings.secrets.google_play_service_account = '{"type": "service_account"}'
+    google_play.synced_products = {"starter"}
+    products = products or FakeProducts(purchase)
+    service = types.SimpleNamespace(purchases=lambda: types.SimpleNamespace(products=lambda: products))
+    monkeypatch.setattr(
+        "google.oauth2.service_account.Credentials.from_service_account_info",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr("googleapiclient.discovery.build", lambda *args, **kwargs: service)
+    return products
+
+
+def verify(client, token="token"):
+    return client.post(
+        "/api/billing/google-play/verify",
+        headers={"Authorization": "Bearer user-1"},
+        json={"product_id": "starter", "purchase_token": token},
+    )
+
+
+COMPLETED = {"purchaseState": 0, "orderId": "GPA.1", "consumptionState": 0}
+
+
+def test_consuming_waits_out_a_concurrent_update(api_context, monkeypatch):
+    client, settings, _ = api_context
+    products = FakeProducts(COMPLETED, [concurrent_update(), concurrent_update(), {}])
+    google_play_service(monkeypatch, settings, COMPLETED, products)
+
+    response = verify(client)
+
+    assert response.status_code == 200
+    assert response.json()["consumed"] is True
+    assert response.json()["credited_minutes"] == 5
+    assert products.consumed == 1
+
+
+def test_a_purchase_consumed_meanwhile_counts_as_consumed(api_context, monkeypatch):
+    client, settings, _ = api_context
+    # A duplicate request consumed it while this one waited.
+    products = FakeProducts(COMPLETED, [concurrent_update()])
+    products.later_states = [{"consumptionState": 1}]
+    google_play_service(monkeypatch, settings, COMPLETED, products)
+
+    response = verify(client)
+
+    assert response.json()["consumed"] is True
+    assert products.consumed == 0
+
+
+def test_consuming_gives_up_after_its_attempts(api_context, monkeypatch, caplog):
+    from app.api.routes import billing as billing_routes
+
+    client, settings, _ = api_context
+    attempts = [concurrent_update() for _ in range(billing_routes.CONSUME_ATTEMPTS)]
+    google_play_service(monkeypatch, settings, COMPLETED, FakeProducts(COMPLETED, attempts))
+
+    response = verify(client)
+
+    # Credited all the same; the app sends it again later, which consumes it.
+    assert response.status_code == 200
+    assert response.json()["consumed"] is False
+    assert response.json()["minutes"] == 5
+    assert "Could not consume Google Play purchase" in caplog.text
+
+
+def test_other_consume_errors_are_not_retried(api_context, monkeypatch):
+    client, settings, _ = api_context
+    products = FakeProducts(COMPLETED, [RuntimeError("forbidden"), {}])
+    google_play_service(monkeypatch, settings, COMPLETED, products)
+
+    assert verify(client).json()["consumed"] is False
+    assert products.consumed == 0
+
+
+def test_an_already_consumed_purchase_is_not_consumed_again(api_context, monkeypatch):
+    client, settings, _ = api_context
+    products = google_play_service(monkeypatch, settings, {**COMPLETED, "consumptionState": 1})
+
+    response = verify(client)
+
+    assert response.json()["consumed"] is True
+    assert products.consumed == 0
+
+
+@pytest.mark.parametrize("product, purchase, logged", [
+    ("other", {"purchaseState": 0, "orderId": "GPA.1"}, "product other is not in BILLING_PRODUCTS"),
+    ("starter", {"purchaseState": 2, "orderId": "GPA.2", "consumptionState": 0},
+     "not completed (orderId=GPA.2, purchaseState=2, consumptionState=0"),
+])
+def test_a_refused_purchase_logs_why(api_context, monkeypatch, caplog, product, purchase, logged):
+    client, settings, _ = api_context
+    google_play_service(monkeypatch, settings, purchase)
+
+    response = client.post(
+        "/api/billing/google-play/verify",
+        headers={"Authorization": "Bearer user-1"},
+        json={"product_id": product, "purchase_token": "secret-token-value"},
+    )
+
+    assert response.status_code == 400
+    assert logged in caplog.text
+    # Only the start of the token, which cannot be used to claim the purchase.
+    assert "secret-t" in caplog.text and "secret-token-value" not in caplog.text
 
 
 def test_google_play_purchase_is_idempotent(api_context, monkeypatch):

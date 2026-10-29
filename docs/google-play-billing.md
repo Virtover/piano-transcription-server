@@ -84,7 +84,7 @@ curl -X POST http://localhost:8000/api/billing/google-play/verify \
   -d '{"product_id":"transcription_60","purchase_token":"<token-returned-by-google-play>"}'
 ```
 
-The server verifies the purchase with Google Play, credits the configured minutes once per purchase token, and consumes the purchase. Repeating the same token returns `credited_minutes: 0`.
+The server verifies the purchase with Google Play, credits the configured minutes once per purchase token, and consumes the purchase. Repeating the same token returns `credited_minutes: 0`. Google refuses to consume a purchase while another change to it is under way, which happens right after the purchase and when the app sends the same token twice at once; the server then tries again for about 7 seconds, and counts the purchase as consumed if another request consumed it meanwhile. If it still fails, the answer has `consumed: false` and the log says why. The minutes are credited anyway, and the app should send the token again later, for example at its next start, when the purchase is still unconsumed.
 
 ## ↩️ Refunds and chargebacks
 
