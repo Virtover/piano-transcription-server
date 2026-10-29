@@ -483,6 +483,13 @@ class Billing:
             )
             _log_minutes(connection, reservation["user_id"], "used", -charge, job_id)
 
+    def has_purchase(self, product_id: str, token: str) -> bool:
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM purchases WHERE product_id = ? AND purchase_token = ?",
+                (product_id, token),
+            ).fetchone() is not None
+
     def credit_purchase(
         self,
         user_id: str,
