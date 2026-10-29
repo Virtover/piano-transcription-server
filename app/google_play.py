@@ -90,6 +90,10 @@ def sync_products() -> None:
 VOIDED_HISTORY_MS = 30 * 24 * 60 * 60 * 1000
 VOIDED_OVERLAP_MS = 24 * 60 * 60 * 1000
 VOIDED_SYNCED_UNTIL = "google_play_voided_synced_until"
+# Google refuses an end time that is not in its past. A clock running a
+# little ahead, as Docker Desktop's often does after the host sleeps, must
+# not fail every sync; the overlap reads the last minutes again next time.
+VOIDED_CLOCK_MARGIN_MS = 5 * 60 * 1000
 
 
 def sync_voided_purchases(billing, service=None, now_ms: int | None = None) -> int:
@@ -97,6 +101,7 @@ def sync_voided_purchases(billing, service=None, now_ms: int | None = None) -> i
     chargebacks, and cancelled orders. Safe to repeat: each purchase is
     voided once. Returns how many purchases were voided now."""
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    end = now_ms - VOIDED_CLOCK_MARGIN_MS
     oldest = now_ms - VOIDED_HISTORY_MS + 60_000
     synced_until = billing.get_state(VOIDED_SYNCED_UNTIL)
     if synced_until is None:
@@ -118,7 +123,7 @@ def sync_voided_purchases(billing, service=None, now_ms: int | None = None) -> i
         arguments = {
             "packageName": settings.google_play.package_name,
             "startTime": start,
-            "endTime": now_ms,
+            "endTime": end,
             "maxResults": 1000,
         }
         if page_token:
@@ -142,5 +147,5 @@ def sync_voided_purchases(billing, service=None, now_ms: int | None = None) -> i
         page_token = (response.get("tokenPagination") or {}).get("nextPageToken")
         if not page_token:
             break
-    billing.set_state(VOIDED_SYNCED_UNTIL, str(now_ms))
+    billing.set_state(VOIDED_SYNCED_UNTIL, str(end))
     return voided

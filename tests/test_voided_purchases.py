@@ -171,7 +171,7 @@ def test_first_sync_reads_the_last_30_days(billed):
     google_play.sync_voided_purchases(billing, service, NOW_MS)
 
     request = service.requests[0]
-    assert request["endTime"] == NOW_MS
+    assert request["endTime"] == NOW_MS - google_play.VOIDED_CLOCK_MARGIN_MS
     assert NOW_MS - request["startTime"] < 30 * DAY_MS
 
 
@@ -182,7 +182,9 @@ def test_later_syncs_continue_with_an_overlap(billed):
 
     google_play.sync_voided_purchases(billing, service, NOW_MS + 60 * 60 * 1000)
 
-    assert service.requests[0]["startTime"] == NOW_MS - google_play.VOIDED_OVERLAP_MS
+    assert service.requests[0]["startTime"] == (
+        NOW_MS - google_play.VOIDED_CLOCK_MARGIN_MS - google_play.VOIDED_OVERLAP_MS
+    )
 
 
 def test_sync_after_a_long_pause_reads_what_google_still_has(billed, caplog):
@@ -220,7 +222,9 @@ def test_failed_sync_is_retried_from_the_same_point(billed):
     service = VoidedService(voided())
     google_play.sync_voided_purchases(billing, service, NOW_MS + 2 * DAY_MS)
 
-    assert service.requests[0]["startTime"] == NOW_MS - google_play.VOIDED_OVERLAP_MS
+    assert service.requests[0]["startTime"] == (
+        NOW_MS - google_play.VOIDED_CLOCK_MARGIN_MS - google_play.VOIDED_OVERLAP_MS
+    )
 
 
 def test_sync_runs_only_with_configured_google_play(billed, monkeypatch):
