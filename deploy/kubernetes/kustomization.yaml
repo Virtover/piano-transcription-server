@@ -1,0 +1,44 @@
+# The server on Kubernetes, for several machines: API replicas behind one
+# Service, GPU workers that KEDA adds as the queue grows, and Redis and
+# PostgreSQL as managed services. See docs/kubernetes.md.
+#
+#   kubectl apply -k deploy/kubernetes
+#
+# Before the first apply: settings.env next to this file, the Secrets in
+# docs/kubernetes.md, and the image names below.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Also in the metrics URL of worker.yaml, which KEDA reads from its own
+# namespace; change both together.
+namespace: piano-transcription
+
+resources:
+  - namespace.yaml
+  - wiring.yaml
+  - api.yaml
+  - worker.yaml
+  - remote-worker.yaml
+  - cleanup.yaml
+  - cloudflared.yaml
+
+# The admin web page; uncomment to deploy it. See docs/kubernetes.md.
+# components:
+#   - components/admin-web
+
+# Operator choices, as in .env. Not committed: copy .env here, without
+# COMPOSE_PROFILES, and add REDIS_URL. A change rolls the pods out again.
+configMapGenerator:
+  - name: settings
+    envs:
+      - settings.env
+
+# Built from Dockerfile.api and Dockerfile.worker, and pushed to a registry
+# the cluster can pull from.
+images:
+  - name: piano-api
+    newName: registry.example.com/piano-transcription-api
+    newTag: "1"
+  - name: piano-worker
+    newName: registry.example.com/piano-transcription-worker
+    newTag: "1"

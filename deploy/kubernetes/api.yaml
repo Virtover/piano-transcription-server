@@ -1,0 +1,125 @@
+# The API, as api in docker-compose.yml, on two or more replicas. Any of them
+# may answer any request; one leads the periodic tasks (app/leader.py).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  strategy:
+    # A new replica is ready before an old one stops.
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      # Uploads in progress get time to finish.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        # Gives the scratch volume to the services' user.
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: piano-api
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: settings
+            - configMapRef:
+                name: wiring
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            # Scratch only: with JOB_STORAGE=s3 job files are in the bucket.
+            - name: data
+              mountPath: /data
+            - name: secrets
+              mountPath: /run/secrets
+              readOnly: true
+            - name: redis
+              mountPath: /run/redis/password
+              subPath: app
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: secrets
+          secret:
+            secretName: piano-secrets
+        - name: redis
+          secret:
+            secretName: piano-redis
+---
+# The name cloudflared sends requests to, as in Compose: http://api:8000.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app: api
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: api
+---
+# Uploads and video checks hold requests for seconds, so CPU is a fair
+# measure of an API replica's load; workers scale on the queue instead.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

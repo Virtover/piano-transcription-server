@@ -141,6 +141,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_managed_services.py` | Redis and PostgreSQL outside the stack: TLS options, warnings about unencrypted connections, the online check without `CONFIG`, backups turned off, and their requirements. |
 | `test_metrics.py` | `GET /metrics`: its token, waiting and running jobs per queue, the oldest wait, worker capacity, the text format, and the requests in flight. |
 | `test_slots.py` | Places limited across processes through Redis: the limit, unlimited places, a crashed holder's place freeing itself, and waiting for a place. |
+| `test_kubernetes.py` | `deploy/kubernetes` against `docker-compose.yml`: images, commands, wiring, secret mounts, the tunnel token's isolation, the non-root user and hardening, and scaling on metrics the API reports. |
 | `test_leader.py` | Which API replica leads: one at a time, handover on shutdown and after a crash, periodic tasks waiting for the lead, and startup recovery only when no other API runs. |
 | `test_batching.py` | Batch size rules (`auto` per GPU, clamping, CPU default) and splitting a batch in half on GPU out-of-memory. |
 | `test_gpu_batcher.py` | The real batcher and batch loop with a fake model that runs out of memory. Needs the worker image. |

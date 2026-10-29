@@ -1,0 +1,7 @@
+# The admin web page, as admin in docker-compose.yml: enable it in
+# ../../kustomization.yaml under components. See docs/kubernetes.md.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - admin.yaml

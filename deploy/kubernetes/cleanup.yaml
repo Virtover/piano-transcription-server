@@ -1,0 +1,61 @@
+# As cleanup in docker-compose.yml: forgets routing entries of jobs that ended
+# without being counted out. Job files are the leading API's to delete from
+# the bucket; this pod has no secret but its Redis password.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cleanup
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cleanup
+  template:
+    metadata:
+      labels:
+        app: cleanup
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cleanup
+          image: piano-api
+          command: ["python", "-m", "app.worker.cleanup"]
+          envFrom:
+            - configMapRef:
+                name: settings
+            - configMapRef:
+                name: wiring
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: redis
+              mountPath: /run/redis/password
+              subPath: app
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: redis
+          secret:
+            secretName: piano-redis

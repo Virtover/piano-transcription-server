@@ -82,6 +82,10 @@ def collect(redis: Redis) -> list[tuple[str, str, dict[str, str], float]]:
             ("piano_queue_oldest_job_age_seconds", "How long the oldest waiting job has waited.", labels,
              queue["oldest_wait_seconds"]),
             ("piano_jobs_running", "Jobs being transcribed.", labels, queue["running"]),
+            # What workers are needed for: scaling on waiting jobs alone would
+            # remove busy workers once the queue is empty.
+            ("piano_queue_active_jobs", "Jobs waiting or being transcribed.", labels,
+             queue["waiting"] + queue["running"]),
         ]
     capacity, _ = routing.local_capacity(redis)
     samples += [

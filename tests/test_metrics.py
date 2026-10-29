@@ -71,6 +71,7 @@ def test_queues_report_waiting_and_running_jobs_and_the_oldest_wait(api_context,
     assert found['piano_queue_jobs{queue="default",backend="local"}'] == 2
     assert 89 <= found['piano_queue_oldest_job_age_seconds{queue="default",backend="local"}'] <= 92
     assert found['piano_jobs_running{queue="default",backend="local"}'] == 1
+    assert found['piano_queue_active_jobs{queue="default",backend="local"}'] == 3
     assert found['piano_queue_jobs{queue="remote",backend="remote"}'] == 1
     assert found["piano_local_workers"] == 1
     assert found["piano_local_worker_capacity"] == 2

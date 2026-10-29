@@ -211,6 +211,7 @@ Remote and local jobs share one lifecycle (`run_job` in `app/worker/tasks.py`), 
 | `piano_queue_jobs` | `queue`, `backend` | Jobs waiting to start: `default` (local workers) or `remote` (RunPod). |
 | `piano_queue_oldest_job_age_seconds` | `queue`, `backend` | How long the oldest waiting job has waited, counted from when it entered that queue; 0 when none waits. |
 | `piano_jobs_running` | `queue`, `backend` | Jobs being transcribed. |
+| `piano_queue_active_jobs` | `queue`, `backend` | Both together: what workers are needed for. |
 | `piano_local_workers`, `piano_local_worker_capacity` | | Local workers with a live heartbeat, and the jobs they run at once together. |
 | `piano_remote_job_limit` | | Remote jobs allowed at once, with outsourcing on. |
 | `piano_video_checks`, `piano_video_checks_limit` | | Video links being checked by every replica, and `MAX_VIDEO_CHECKS`. |
@@ -218,7 +219,7 @@ Remote and local jobs share one lifecycle (`run_job` in `app/worker/tasks.py`), 
 
 Scale on the queue, not on CPU. A GPU worker that waits for its next job uses little CPU while users wait, and one that transcribes uses all of it however long the queue is.
 
-* **Local workers:** add one while `piano_queue_jobs{queue="default"}` stays above `piano_local_worker_capacity`, or `piano_queue_oldest_job_age_seconds{queue="default"}` above what users should wait, for example 60 seconds. Remove one when nothing has waited for several minutes. A new GPU worker loads the model before it takes jobs, which takes about a minute.
+* **Local workers:** run as many as `piano_queue_active_jobs{queue="default"}` divided by the jobs one worker runs at once, and one more while `piano_queue_oldest_job_age_seconds{queue="default"}` stays above what users should wait, for example 60 seconds. Scaling on waiting jobs alone would remove workers that are still transcribing once the queue is empty. Remove workers slowly, a few minutes apart: a new GPU worker loads the model before it takes jobs, which takes about a minute, and a stopping one finishes its jobs first.
 * **The remote worker** only waits for RunPod, so one is enough; RunPod scales the GPUs.
 * **API replicas:** on `piano_api_requests_in_flight` and CPU. Uploads and video checks hold a request for seconds, so in-flight requests rise before CPU does.
 

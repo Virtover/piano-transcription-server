@@ -4,3 +4,4 @@
 /.venv
 /billing-data/
 __pycache__/
+/deploy/kubernetes/settings.env

@@ -1,0 +1,63 @@
+# Sends jobs to RunPod, as remote-worker in docker-compose.yml. It only waits
+# for RunPod, which scales the GPUs, so one is enough; with
+# OUTSOURCE_PROVIDER=none it idles.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remote-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: remote-worker
+  template:
+    metadata:
+      labels:
+        app: remote-worker
+    spec:
+      terminationGracePeriodSeconds: 900
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: remote-worker
+          image: piano-api
+          command: ["python", "-m", "app.worker.launcher", "remote"]
+          envFrom:
+            - configMapRef:
+                name: settings
+            - configMapRef:
+                name: wiring
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: secrets
+              mountPath: /run/secrets
+              readOnly: true
+            - name: redis
+              mountPath: /run/redis/password
+              subPath: app
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: secrets
+          secret:
+            secretName: piano-secrets
+        - name: redis
+          secret:
+            secretName: piano-redis

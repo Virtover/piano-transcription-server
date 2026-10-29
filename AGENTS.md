@@ -35,6 +35,7 @@ python scripts/admin.py status                                  # live picture; 
 | `runpod/handler.py` | The RunPod Serverless handler, built with `Dockerfile.runpod` |
 | `app/admin_web/` | The optional admin web page behind Cloudflare Access: token checks, read-only routes, lowering its own access |
 | `app/admin/`, `app/controls.py`, `scripts/admin.py` | `python -m app.admin`: status, jobs, users, the billing report, and temporary limits the API reads from Redis; the host script runs it in the API container |
+| `deploy/kubernetes/` | The Kubernetes deployment for several machines; `tests/test_kubernetes.py` keeps it in step with `docker-compose.yml` |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
 
 ## Conventions

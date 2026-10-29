@@ -1,0 +1,69 @@
+# HTTPS through a Cloudflare Tunnel, as cloudflared in docker-compose.yml. Two
+# connectors keep the tunnel up while one restarts. The tunnel's public
+# hostnames stay as with Compose: http://api:8000, and http://admin:8100 for
+# the admin web page. The token is a Secret of its own, which no other pod
+# mounts.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      securityContext:
+        # The image's own non-root user.
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:2026.10.0
+          args:
+            - tunnel
+            - --metrics
+            - 0.0.0.0:20241
+            - run
+            - --token-file
+            - /run/secrets/cloudflare/tunnel_token
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 20241
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: token
+              mountPath: /run/secrets/cloudflare
+              readOnly: true
+      volumes:
+        - name: token
+          secret:
+            secretName: piano-cloudflare
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cloudflared
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: cloudflared

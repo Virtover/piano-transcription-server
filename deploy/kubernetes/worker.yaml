@@ -1,0 +1,133 @@
+# GPU workers, as worker in docker-compose.yml, one GPU each. KEDA adds and
+# removes them on the queue that /metrics reports; see "Metrics for scaling"
+# in docs/architecture.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      # A stopping worker finishes the jobs it runs; Dramatiq takes no new
+      # ones after SIGTERM. A job still running at the end fails and is
+      # refunded.
+      terminationGracePeriodSeconds: 900
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # Put the workers on the GPU nodes: a label and taint of your cluster's.
+      # nodeSelector:
+      #   nvidia.com/gpu.present: "true"
+      # tolerations:
+      #   - key: nvidia.com/gpu
+      #     operator: Exists
+      #     effect: NoSchedule
+      containers:
+        - name: worker
+          image: piano-worker
+          envFrom:
+            - configMapRef:
+                name: settings
+            - configMapRef:
+                name: wiring
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              nvidia.com/gpu: 1
+              memory: 16Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            # Each attempt's scratch folder; the bucket keeps the job files.
+            - name: data
+              mountPath: /data
+            # piano-secrets holds no tunnel token or Redis passwords other
+            # than this one: workers decode untrusted media.
+            - name: secrets
+              mountPath: /run/secrets
+              readOnly: true
+            - name: redis
+              mountPath: /run/redis/password
+              subPath: app
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: secrets
+          secret:
+            secretName: piano-secrets
+        - name: redis
+          secret:
+            secretName: piano-redis
+---
+# The scraper's credential: the secret metrics_token, sent as a Bearer token.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: metrics
+spec:
+  secretTargetRef:
+    - parameter: token
+      name: piano-secrets
+      key: metrics_token
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker
+spec:
+  scaleTargetRef:
+    name: worker
+  minReplicaCount: 1
+  maxReplicaCount: 4
+  pollingInterval: 15
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        # Removing a worker waits for its jobs, and starting one loads the
+        # model for about a minute: remove them one at a time, slowly.
+        scaleDown:
+          stabilizationWindowSeconds: 600
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 300
+  triggers:
+    # Jobs waiting or running, per worker: targetValue is the jobs one worker
+    # runs at once, which its log shows at startup.
+    - type: metrics-api
+      metricType: AverageValue
+      metadata:
+        url: http://api.piano-transcription.svc.cluster.local:8000/metrics
+        format: prometheus
+        valueLocation: 'piano_queue_active_jobs{queue="default",backend="local"}'
+        targetValue: "2"
+        authMode: bearer
+      authenticationRef:
+        name: metrics
+    # One worker more while the oldest job waits longer than a minute.
+    - type: metrics-api
+      metricType: Value
+      metadata:
+        url: http://api.piano-transcription.svc.cluster.local:8000/metrics
+        format: prometheus
+        valueLocation: 'piano_queue_oldest_job_age_seconds{queue="default",backend="local"}'
+        targetValue: "60"
+        authMode: bearer
+      authenticationRef:
+        name: metrics

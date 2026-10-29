@@ -1,0 +1,83 @@
+# The admin web page signs in to Redis and PostgreSQL as roles of its own,
+# with only what ADMIN_WEB_MODE needs, as in Compose: the Secret
+# piano-admin-web holds their URLs and Redis password, and it gets no other
+# secret. cloudflared sends its hostname, behind Cloudflare Access, to
+# http://admin:8100.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: admin
+  template:
+    metadata:
+      labels:
+        app: admin
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: admin
+          image: piano-api
+          command: ["python", "-m", "app.admin_web"]
+          envFrom:
+            - configMapRef:
+                name: settings
+            - configMapRef:
+                name: wiring
+          env:
+            # rediss://admin-read-only@<host>:<port>/0, or admin-read-write.
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: piano-admin-web
+                  key: redis_url
+          ports:
+            - containerPort: 8100
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: admin
+              mountPath: /run/redis/password
+              subPath: redis_password
+              readOnly: true
+            # The URL of its PostgreSQL role, with password and TLS options.
+            - name: admin
+              mountPath: /run/secrets/billing_database_url
+              subPath: billing_database_url
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: admin
+          secret:
+            secretName: piano-admin-web
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin
+spec:
+  selector:
+    app: admin
+  ports:
+    - port: 8100
+      targetPort: 8100
