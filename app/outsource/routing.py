@@ -6,6 +6,8 @@ Redis set of its active (queued or processing) job IDs, so counting is O(1).
 """
 
 import math
+import os
+import socket
 import time
 from typing import Literal
 
@@ -17,7 +19,11 @@ from app.config import settings
 
 Backend = Literal["local", "remote"]
 
-HEARTBEAT_KEY = "workers:local:heartbeat"
+# Each local worker process publishes its own heartbeat, a hash that expires
+# unless renewed. A sorted set of worker IDs by last heartbeat finds them
+# without scanning every key.
+WORKERS_KEY = "workers:local"
+HEARTBEAT_PREFIX = "workers:local:heartbeat:"
 HEARTBEAT_TTL = 60
 ACTIVE_KEYS: dict[str, str] = {
     "local": "jobs:active:local",
@@ -28,37 +34,90 @@ REMOTE_RUNNING_KEY = "jobs:running:remote"
 DEFAULT_JOB_SECONDS = 60.0
 
 
-def publish_heartbeat(redis: Redis, capacity: int, average_job_seconds: float | None) -> None:
-    """Called periodically by the GPU worker. Expires if the worker stops."""
+def worker_id() -> str:
+    """This process's worker ID: its host, which names the container, and
+    its process ID."""
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def heartbeat_key(worker: str) -> str:
+    return f"{HEARTBEAT_PREFIX}{worker}"
+
+
+def publish_heartbeat(
+    redis: Redis,
+    capacity: int,
+    average_job_seconds: float | None,
+    worker: str | None = None,
+) -> None:
+    """Called periodically by each GPU worker. Expires if the worker stops."""
+    worker = worker or worker_id()
+    now = time.time()
     with redis.pipeline() as pipe:
         pipe.hset(
-            HEARTBEAT_KEY,
+            heartbeat_key(worker),
             mapping={
                 "capacity": capacity,
                 "average_job_seconds": average_job_seconds or "",
-                "updated_at": time.time(),
+                "updated_at": now,
             },
         )
-        pipe.expire(HEARTBEAT_KEY, HEARTBEAT_TTL)
+        pipe.expire(heartbeat_key(worker), HEARTBEAT_TTL)
+        pipe.zadd(WORKERS_KEY, {worker: now})
+        # Forget workers that stopped without clearing their heartbeat.
+        pipe.zremrangebyscore(WORKERS_KEY, "-inf", now - HEARTBEAT_TTL)
         pipe.execute()
 
 
-def clear_heartbeat(redis: Redis) -> None:
-    redis.delete(HEARTBEAT_KEY)
+def clear_heartbeat(redis: Redis, worker: str | None = None) -> None:
+    worker = worker or worker_id()
+    with redis.pipeline() as pipe:
+        pipe.delete(heartbeat_key(worker))
+        pipe.zrem(WORKERS_KEY, worker)
+        pipe.execute()
+
+
+def local_workers(redis: Redis) -> list[dict]:
+    """The local workers with a live heartbeat, oldest first. Only reads, so
+    the admin web page's read-only Redis user may call it."""
+    workers = redis.zrangebyscore(WORKERS_KEY, time.time() - HEARTBEAT_TTL, "+inf")
+    if not workers:
+        return []
+    with redis.pipeline() as pipe:
+        for worker in workers:
+            pipe.hgetall(heartbeat_key(worker))
+        heartbeats = pipe.execute()
+    alive = []
+    for worker, heartbeat in zip(workers, heartbeats):
+        if not heartbeat:
+            continue
+        try:
+            capacity = int(heartbeat.get("capacity") or 0)
+        except (TypeError, ValueError):
+            capacity = 0
+        try:
+            average = float(heartbeat["average_job_seconds"]) if heartbeat.get("average_job_seconds") else None
+        except (TypeError, ValueError):
+            average = None
+        try:
+            updated_at = float(heartbeat.get("updated_at") or 0)
+        except (TypeError, ValueError):
+            updated_at = 0.0
+        alive.append({"id": worker, "capacity": capacity, "average_job_seconds": average, "updated_at": updated_at})
+    return alive
 
 
 def local_capacity(redis: Redis) -> tuple[int, float]:
-    """(job capacity, average job seconds). Capacity is 0 without a heartbeat."""
-    heartbeat = redis.hgetall(HEARTBEAT_KEY)
-    try:
-        capacity = int(heartbeat.get("capacity", 0))
-    except (TypeError, ValueError):
-        capacity = 0
-    try:
-        average = float(heartbeat.get("average_job_seconds") or DEFAULT_JOB_SECONDS)
-    except (TypeError, ValueError):
-        average = DEFAULT_JOB_SECONDS
-    return capacity, average
+    """(job capacity, average job seconds) of all local workers together.
+    Capacity is 0 without a heartbeat. The average weighs each worker by its
+    capacity, because it runs that share of the jobs."""
+    workers = local_workers(redis)
+    capacity = sum(worker["capacity"] for worker in workers)
+    timed = [worker for worker in workers if worker["average_job_seconds"] and worker["capacity"] > 0]
+    weight = sum(worker["capacity"] for worker in timed)
+    if not weight:
+        return capacity, DEFAULT_JOB_SECONDS
+    return capacity, sum(worker["average_job_seconds"] * worker["capacity"] for worker in timed) / weight
 
 
 def estimated_local_wait(redis: Redis) -> float:

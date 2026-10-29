@@ -84,6 +84,17 @@ def test_status_shows_jobs_workers_and_controls(billed, capsys):
     assert "submissions paused" in output
 
 
+def test_status_lists_several_workers(billed, capsys):
+    routing.publish_heartbeat(tasks.redis, 2, 30.0, worker="gpu-a:7")
+    routing.publish_heartbeat(tasks.redis, 1, 60.0, worker="gpu-b:9")
+
+    _, output = admin(capsys, "status")
+
+    assert "2 workers, 3 jobs at once, average job 40 s" in output
+    assert "gpu-a:7: 2 at once, average 30 s" in output
+    assert "gpu-b:9: 1 at once, average 1 m" in output
+
+
 def test_status_without_a_worker(billed, capsys):
     _, output = admin(capsys, "status")
 
@@ -103,6 +114,7 @@ def test_status_as_json(billed, capsys):
     assert state["jobs"]["queued"] == 1
     assert state["places"]["used"] == 1
     assert state["local_worker"] is None
+    assert state["local_workers"] == []
     assert state["queues"]["default"] == {"messages": 0, "dead": 0}
 
 

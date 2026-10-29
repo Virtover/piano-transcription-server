@@ -41,15 +41,8 @@ def collect() -> dict:
         if redis.hget(tasks.job_key(job_id), "status") in job_limits.ACTIVE_STATUSES
     )
 
-    heartbeat = redis.hgetall(routing.HEARTBEAT_KEY)
-    worker = None
-    if heartbeat:
-        average = heartbeat.get("average_job_seconds")
-        worker = {
-            "capacity": int(heartbeat.get("capacity") or 0),
-            "average_job_seconds": float(average) if average else None,
-            "updated_at": float(heartbeat.get("updated_at") or 0),
-        }
+    workers = routing.local_workers(redis)
+    capacity, average = routing.local_capacity(redis)
 
     remote = {"enabled": routing.outsourcing_enabled(), "in_use": redis.scard(routing.ACTIVE_KEYS["remote"])}
     if remote["enabled"]:
@@ -94,7 +87,14 @@ def collect() -> dict:
         "jobs": jobs,
         "places": {"used": places, "limit": settings.limits.max_active_jobs},
         "backends": {"local": redis.scard(routing.ACTIVE_KEYS["local"]), "remote": remote["in_use"]},
-        "local_worker": worker,
+        # All local workers together, or None without a heartbeat.
+        "local_worker": {
+            "count": len(workers),
+            "capacity": capacity,
+            "average_job_seconds": average if any(worker["average_job_seconds"] for worker in workers) else None,
+            "updated_at": max(worker["updated_at"] for worker in workers),
+        } if workers else None,
+        "local_workers": workers,
         "api_leader": leader.current_leader(redis),
         "remote": remote,
         "queues": queues,
@@ -126,10 +126,18 @@ def render(state: dict) -> str:
         lines.append("Local worker  no heartbeat: the worker is stopped or not consuming the local queue")
     else:
         average = worker["average_job_seconds"]
+        count = f"{worker['count']} workers, " if worker["count"] > 1 else ""
         lines.append(
-            f"Local worker  {worker['capacity']} jobs at once, average job "
+            f"Local worker  {count}{worker['capacity']} jobs at once, average job "
             f"{span(average) if average else 'unknown yet'}, heartbeat {ago(worker['updated_at'])}"
         )
+        if worker["count"] > 1:
+            for each in state["local_workers"]:
+                each_average = each["average_job_seconds"]
+                lines.append(
+                    f"              {each['id']}: {each['capacity']} at once, average "
+                    f"{span(each_average) if each_average else 'unknown yet'}, heartbeat {ago(each['updated_at'])}"
+                )
 
     api_leader = state["api_leader"]
     lines.append(

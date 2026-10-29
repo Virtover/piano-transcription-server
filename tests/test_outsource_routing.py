@@ -1,4 +1,5 @@
 import math
+import time
 
 import pytest
 
@@ -49,13 +50,71 @@ def test_missing_heartbeat_means_no_local_capacity():
 def test_heartbeat_expires():
     heartbeat(capacity=4)
 
-    assert 0 < tasks.redis.ttl(routing.HEARTBEAT_KEY) <= routing.HEARTBEAT_TTL
+    assert 0 < tasks.redis.ttl(routing.heartbeat_key(routing.worker_id())) <= routing.HEARTBEAT_TTL
 
 
 def test_heartbeat_without_history_uses_default_duration():
     routing.publish_heartbeat(tasks.redis, 3, None)
 
     assert routing.local_capacity(tasks.redis) == (3, routing.DEFAULT_JOB_SECONDS)
+
+
+# --- Several local workers ---------------------------------------------------
+
+def test_capacity_of_several_workers_adds_up():
+    routing.publish_heartbeat(tasks.redis, 2, 60.0, worker="gpu-a:1")
+    routing.publish_heartbeat(tasks.redis, 1, 60.0, worker="gpu-b:1")
+
+    assert routing.local_capacity(tasks.redis) == (3, 60.0)
+    busy(3)
+    assert routing.estimated_local_wait(tasks.redis) == 60.0
+
+
+def test_average_job_weighs_workers_by_capacity():
+    routing.publish_heartbeat(tasks.redis, 3, 40.0, worker="fast:1")
+    routing.publish_heartbeat(tasks.redis, 1, 120.0, worker="slow:1")
+    # A worker that has not finished a job yet does not count.
+    routing.publish_heartbeat(tasks.redis, 2, None, worker="new:1")
+
+    assert routing.local_capacity(tasks.redis) == (6, 60.0)
+
+
+def test_a_worker_whose_heartbeat_expired_does_not_count(monkeypatch):
+    routing.publish_heartbeat(tasks.redis, 2, 60.0, worker="stopped:1")
+    # Its heartbeat key expired; only the list still names it.
+    tasks.redis.delete(routing.heartbeat_key("stopped:1"))
+    routing.publish_heartbeat(tasks.redis, 1, 60.0, worker="running:1")
+
+    assert routing.local_capacity(tasks.redis) == (1, 60.0)
+    assert [worker["id"] for worker in routing.local_workers(tasks.redis)] == ["running:1"]
+
+
+def test_a_worker_silent_for_longer_than_the_ttl_is_forgotten(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(routing.time, "time", lambda: now - routing.HEARTBEAT_TTL - 1)
+    routing.publish_heartbeat(tasks.redis, 2, 60.0, worker="silent:1")
+    monkeypatch.setattr(routing.time, "time", lambda: now)
+
+    assert routing.local_workers(tasks.redis) == []
+    routing.publish_heartbeat(tasks.redis, 1, 60.0, worker="running:1")
+    assert tasks.redis.zrange(routing.WORKERS_KEY, 0, -1) == ["running:1"]
+
+
+def test_a_stopping_worker_clears_only_its_own_heartbeat():
+    routing.publish_heartbeat(tasks.redis, 2, 60.0, worker="a:1")
+    routing.publish_heartbeat(tasks.redis, 1, 60.0, worker="b:1")
+
+    routing.clear_heartbeat(tasks.redis, worker="a:1")
+
+    assert routing.local_capacity(tasks.redis) == (1, 60.0)
+
+
+def test_reading_workers_writes_nothing(monkeypatch):
+    routing.publish_heartbeat(tasks.redis, 2, 60.0, worker="a:1")
+    for command in ("zrem", "zremrangebyscore", "delete", "hset"):
+        monkeypatch.setattr(tasks.redis, command, lambda *args, **kwargs: pytest.fail(f"wrote with {command}"))
+
+    assert routing.local_capacity(tasks.redis) == (2, 60.0)
 
 
 def test_provider_none_always_routes_locally(api_context):

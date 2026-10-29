@@ -157,7 +157,7 @@ With `OUTSOURCE_PROVIDER=runpod`, jobs can run on RunPod Serverless when the loc
 
 Overload means a long **expected wait**, not low VRAM. The worker's thread count already caps GPU concurrency, so overload shows up as jobs waiting in the queue.
 
-1. The GPU worker publishes a heartbeat to Redis every 15 seconds, with a 60-second TTL: its job capacity (thread count) and a rolling average job duration.
+1. Each GPU worker publishes a heartbeat of its own to Redis every 15 seconds, with a 60-second TTL: its job capacity (thread count) and a rolling average job duration. With several workers, on one machine or more, the API adds up their capacities and averages their job durations, weighing each worker by its capacity. A worker that stops cleanly removes its heartbeat; one that crashes stops counting within 60 seconds.
 2. Each backend keeps a Redis set of its queued and processing job IDs, so counting is cheap and no job keys are scanned per request. The cleanup service removes stale IDs, for example after a crash.
 3. When a job is queued, the API estimates its local wait from the active local jobs, the capacity, and the average duration. Without a heartbeat, local capacity counts as zero.
 4. With `OUTSOURCE_ROUTING=local_first`, if the wait is longer than `OUTSOURCE_LOCAL_FIRST_MAX_WAIT` and fewer than `OUTSOURCE_MAX_CONCURRENCY` jobs are remote, the job goes to the `remote` queue. With `remote_first_overflow`, every new job tries RunPod and uses local capacity when RunPod is full. With `remote_first_fallback`, every new job enters the remote-pending queue and waits for a RunPod slot; local work is used only after a genuine remote failure or timeout when fallback is enabled.
