@@ -50,6 +50,8 @@ def run_billing_backup() -> None:
 
 
 def backup_billing_database(leader: Leadership | None = None) -> None:
+    if settings.billing.backups == "provider":
+        return
     while True:
         wait_for_lead(leader)
         try:
@@ -61,7 +63,7 @@ def backup_billing_database(leader: Leadership | None = None) -> None:
 
 def monitor_backup_health(leader: Leadership | None = None) -> None:
     """Warn when configured off-site backups fail or stop advancing."""
-    if not settings.offsite.enabled:
+    if not settings.offsite.enabled or settings.billing.backups == "provider":
         return
     interval = settings.billing.backup_interval
     while True:

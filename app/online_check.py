@@ -576,7 +576,7 @@ def check_redis(config, connect: Callable | None = None) -> Result:
     parts = urlsplit(service.redis_url)
     anonymous = urlunsplit(parts._replace(netloc=parts.hostname + (f":{parts.port}" if parts.port else "")))
     try:
-        connect(anonymous, socket_timeout=REQUEST_TIMEOUT).ping()
+        connect(anonymous, socket_timeout=REQUEST_TIMEOUT, **service.redis_tls_options()).ping()
         return Result("Redis users", "fail", "Redis accepts clients without a password", REDIS_USERS_HINT)
     except (AuthenticationError, ResponseError) as error:
         if "NOAUTH" not in str(error) and not isinstance(error, AuthenticationError):
@@ -590,12 +590,22 @@ def check_redis(config, connect: Callable | None = None) -> Result:
         return Result("Redis users", "fail", str(error), REDIS_USERS_HINT)
     except RedisError as error:
         return Result("Redis users", "fail", f"the services cannot sign in: {type(error).__name__}", REDIS_USERS_HINT)
+    from app.config import runs_elsewhere
+
     try:
         client.config_get("maxmemory")
-        return Result("Redis users", "fail", "the services' user may change Redis's configuration",
-                      "Recreate Redis so it reads redis/users.acl: docker compose up -d --force-recreate redis")
+        hint = (
+            "Take the CONFIG commands from the services' Redis user at the provider; redis/users.acl lists its rules."
+            if runs_elsewhere(service.redis_url)
+            else "Recreate Redis so it reads redis/users.acl: docker compose up -d --force-recreate redis"
+        )
+        return Result("Redis users", "fail", "the services' user may change Redis's configuration", hint)
     except NoPermissionError:
         pass
+    except ResponseError as error:
+        # Managed services often remove CONFIG altogether.
+        if "unknown command" not in str(error).lower():
+            return Result("Redis users", "fail", f"unexpected answer to CONFIG GET: {type(error).__name__}")
     return Result("Redis users", "ok", "refused without a password; the services' user cannot change the configuration")
 
 

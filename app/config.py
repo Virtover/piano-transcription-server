@@ -175,14 +175,24 @@ class ServiceSettings(BaseSettings):
     # The password of the Redis user named in redis_url, as a file; empty
     # for a Redis without users, such as one for local development.
     redis_password_file: str = ""
+    # For a rediss:// URL whose certificate is signed by the provider's own
+    # CA rather than a public one, as many managed Redis services do.
+    redis_ca_file: str = ""
     data_dir: str = "/data"
+
+    def redis_tls_options(self) -> dict[str, str]:
+        """Keyword arguments that verify a rediss:// server's certificate
+        with redis_ca_file. A redis:// URL takes none."""
+        if self.redis_ca_file and self.redis_url.startswith("rediss://"):
+            return {"ssl_ca_certs": self.redis_ca_file}
+        return {}
 
     def redis_options(self) -> dict[str, str]:
         """Keyword arguments that sign in to Redis, for Redis.from_url: the
-        password from redis_password_file. It stays out of the URL, which
-        libraries may show in errors."""
+        TLS options, and the password from redis_password_file. It stays out
+        of the URL, which libraries may show in errors."""
         if not self.redis_password_file:
-            return {}
+            return self.redis_tls_options()
         try:
             password = Path(self.redis_password_file).read_text(encoding="utf-8").strip()
         except OSError as error:
@@ -190,7 +200,7 @@ class ServiceSettings(BaseSettings):
                 f"Cannot read the Redis password file {self.redis_password_file} ({type(error).__name__}); "
                 "python scripts/server.py start creates it"
             ) from None
-        return {"password": password}
+        return {**self.redis_tls_options(), "password": password}
 
 
 class LimitsSettings(BaseSettings):
@@ -277,6 +287,9 @@ class BillingSettings(BaseSettings):
     database_url: str = "postgresql://billing@postgres:5432/billing"
     database_path: str = "/billing/billing.sqlite3"
     backup_dir: str = "/billing/backups"
+    # Who backs the database up: the server, with pg_dump, or the provider
+    # of a managed database, which then must; see app/requirements.py.
+    backups: Literal["server", "provider"] = "server"
     backup_interval: Duration = 15 * 60.0
     # Backups kept, by age: every one, then one per hour, day, week, and
     # month (UTC). 0 turns a step off. See app/backups.py.
@@ -720,6 +733,33 @@ def google_play_service_account_json(config: "Settings | None" = None) -> str | 
     return None
 
 
+# Hosts of the Compose stack's own Redis and PostgreSQL, or of this machine.
+LOCAL_HOSTS = {"redis", "postgres", "localhost", "127.0.0.1", "::1"}
+# libpq's sslmode values that encrypt the connection.
+ENCRYPTED_SSLMODES = {"require", "verify-ca", "verify-full"}
+
+
+def runs_elsewhere(url: str | None) -> bool:
+    """Whether a Redis or PostgreSQL URL leads to a server outside the stack,
+    such as a managed service."""
+    host = urlsplit(url or "").hostname
+    return bool(host) and host not in LOCAL_HOSTS
+
+
+def billing_database_url(config: "Settings | None" = None) -> str:
+    """The PostgreSQL URL the billing database uses, as app.billing chooses it."""
+    config = config or settings
+    secret = config.secrets.billing_database_url
+    return secret.get_secret_value() if secret else config.billing.database_url
+
+
+def database_sslmode(url: str) -> str | None:
+    from urllib.parse import parse_qs
+
+    values = parse_qs(urlsplit(url).query).get("sslmode")
+    return values[-1] if values else None
+
+
 def validate_settings(config: "Settings | None" = None, role: str = "all") -> list[str]:
     """Cross-setting checks for a process role: api, worker, remote, cleanup, or all."""
     config = config or settings
@@ -730,6 +770,11 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
             f"The Redis password file {redis_password} is missing or empty; python scripts/server.py start "
             "creates the files in secrets/redis"
         )
+    ca_file = config.service.redis_ca_file
+    if ca_file and not config.service.redis_url.startswith("rediss://"):
+        problems.append("REDIS_CA_FILE is set, but REDIS_URL is not a rediss:// URL: the CA file is only used for TLS")
+    elif ca_file and not Path(ca_file).is_file():
+        problems.append(f"The Redis CA file {ca_file} (REDIS_CA_FILE) does not exist")
     password = config.secrets.server_password
     if role in ("api", "all") and password is not None:
         # Nothing slows down guessing, so the length is the only protection.
@@ -836,6 +881,10 @@ def admin_web_problems(config: "Settings", check_profile: bool = True) -> list[s
 def offsite_problems(config: "Settings") -> list[str]:
     offsite = config.offsite
     problems = []
+    if config.billing.backups == "provider":
+        problems.append(
+            "OFFSITE_BACKUP_BUCKET copies the server's backups, which BILLING_BACKUPS=provider turns off"
+        )
     if not offsite.endpoint:
         problems.append("OFFSITE_BACKUP_ENDPOINT is required when OFFSITE_BACKUP_BUCKET is set")
     if not offsite.recipient:
@@ -863,6 +912,23 @@ def offsite_problems(config: "Settings") -> list[str]:
 def configuration_warnings(config: "Settings", environment: dict[str, str]) -> list[str]:
     """Choices that work but are probably mistakes."""
     warnings = []
+    if config.billing.backups == "provider":
+        warnings.append(
+            "The server does not back up the billing database (BILLING_BACKUPS=provider): its provider must. "
+            "python -m app.config requirements says how."
+        )
+    redis_url = config.service.redis_url
+    if runs_elsewhere(redis_url) and not redis_url.startswith("rediss://"):
+        warnings.append(
+            f"REDIS_URL leads to {urlsplit(redis_url).hostname} without TLS: job state and the password travel "
+            "unencrypted. Use a rediss:// URL."
+        )
+    database_url = billing_database_url(config)
+    if runs_elsewhere(database_url) and database_sslmode(database_url) not in ENCRYPTED_SSLMODES:
+        warnings.append(
+            f"The billing database at {urlsplit(database_url).hostname} is reached without required TLS. Add "
+            "sslmode=verify-full and sslrootcert=<the provider's CA file> to the URL in secrets/billing_database_url."
+        )
     if config.tunnel.enabled:
         if config.secrets.server_password is None and config.billing.provider == "none":
             warnings.append(

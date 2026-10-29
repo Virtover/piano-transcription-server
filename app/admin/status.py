@@ -188,7 +188,9 @@ def render(state: dict) -> str:
             lines.append("              Docker Desktop's virtual disk: its limit, not the host's drive, which may have less free")
 
     backup_state = state["backups"]
-    if backup_state["newest_at"] is None:
+    if settings.billing.backups == "provider":
+        text = "left to the database's provider (BILLING_BACKUPS=provider)"
+    elif backup_state["newest_at"] is None:
         text = "none yet"
     else:
         text = f"{backup_state['count']} local, newest {ago(backup_state['newest_at'])}"

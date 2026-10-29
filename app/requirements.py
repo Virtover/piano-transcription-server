@@ -11,6 +11,7 @@ documentation. Requirements marked `checked` are verified by
 
 import math
 from dataclasses import asdict, dataclass, field
+from urllib.parse import urlsplit
 
 # PyTorch in the RunPod image is built for this CUDA version (see
 # Dockerfile.runpod; a test keeps both in sync). Hosts need a driver for it.
@@ -65,6 +66,122 @@ def execution_timeout_minutes(config) -> int:
 
 def _or_placeholder(value: str | None, name: str) -> str:
     return value or f"<set {name}>"
+
+
+# The postgres image in docker-compose.yml; the API image's pg_dump is of the
+# same major version, and dumps servers of that version and older only.
+POSTGRES_MAJOR_VERSION = 17
+# Threads FastAPI runs blocking requests on, each with a database connection
+# of its own: AnyIO's default.
+API_REQUEST_THREADS = 40
+
+
+def database_sections(config) -> list[Section]:
+    """Redis and PostgreSQL run by a provider, when their URLs lead outside the
+    Compose stack, as in the Kubernetes deployment."""
+    from app.backups import RetentionPolicy
+    from app.config import billing_database_url, runs_elsewhere
+
+    redis_host = urlsplit(config.service.redis_url).hostname
+    redis_managed = runs_elsewhere(config.service.redis_url)
+    database_url = billing_database_url(config)
+    database_host = urlsplit(database_url).hostname
+    database_managed = runs_elsewhere(database_url)
+    backups = config.billing.backups == "server"
+    longest = RetentionPolicy.from_settings(config.billing).longest()
+    redis = Section(
+        "Redis",
+        "a managed Redis service",
+        redis_managed,
+        f"enabled (REDIS_URL leads to {redis_host})" if redis_managed else "not used: Redis runs in the Compose stack",
+        [
+            Requirement(
+                "Version",
+                "Redis 7 or later, or a compatible service",
+                "The Redis users' rules (redis/users.acl) use Redis 7's key permissions.",
+            ),
+            Requirement(
+                "Encryption",
+                "TLS (a rediss:// URL), with a certificate from a public CA or with the provider's CA in REDIS_CA_FILE",
+                "Job state, results' locations, and the password cross networks you do not control.",
+                True,
+            ),
+            Requirement(
+                "Users",
+                "the users of redis/users.acl with their rules, each with a password of its own; at least the "
+                "services' user (app), which must not change the configuration",
+                "With only one user, the admin web page signs in with the services' rights instead of its own, "
+                "which can only read.",
+                True,
+            ),
+            Requirement(
+                "Commands",
+                "Lua scripts (EVAL, EVALSHA) and KEYS allowed for the services' user",
+                "Dramatiq, which queues the jobs, runs Lua scripts and lists keys.",
+            ),
+            Requirement(
+                "Eviction",
+                "none (maxmemory-policy noeviction)",
+                "Evicting keys would silently drop queued jobs, their status, and their leases.",
+            ),
+            Requirement(
+                "Persistence",
+                "an append-only file synced every second, or replicas with automatic failover",
+                "Queued jobs and every job's status live only in Redis. A failover can lose the last second of "
+                "writes; a job queued in it stays queued until the next full restart sends it again.",
+            ),
+            Requirement(
+                "Location",
+                "in the EU or EEA if your users are there, close to the API and workers",
+                "Job titles and users' IDs are personal data. Every request reads Redis several times.",
+            ),
+        ],
+    )
+    postgres = Section(
+        "PostgreSQL",
+        "a managed PostgreSQL service",
+        database_managed,
+        f"enabled (the billing database is at {database_host})"
+        if database_managed
+        else "not used: PostgreSQL runs in the Compose stack",
+        [
+            Requirement(
+                "Version",
+                f"{POSTGRES_MAJOR_VERSION} or older" if backups else "11 or later",
+                "The API's pg_dump makes the billing backups, and reads servers of its own version and older."
+                if backups
+                else "The server needs hashtextextended, from PostgreSQL 11; backups are off, so pg_dump is not used.",
+            ),
+            Requirement(
+                "Encryption",
+                "TLS with certificate checks: sslmode=verify-full and sslrootcert=<the provider's CA file> in the "
+                "URL in secrets/billing_database_url",
+                "Balances, purchases, and users' email addresses cross networks you do not control.",
+            ),
+            Requirement(
+                "Connections",
+                f"at least {API_REQUEST_THREADS} per API replica, plus 1 per worker thread",
+                "Each request and each job opens a connection of its own while it reads or changes billing. A "
+                "pooler in transaction mode works too: the server's locks last one transaction.",
+            ),
+            Requirement(
+                "Backups",
+                "pg_dump allowed for the billing user, and BILLING_BACKUP_DIR on lasting storage"
+                if backups
+                else f"automatic backups with point-in-time recovery, kept {_days(longest)} or longer",
+                f"The API dumps the database every {config.billing.backup_interval / 60:g} minutes."
+                if backups
+                else "With BILLING_BACKUPS=provider, the server makes none; the provider's are the only ones. The "
+                "retention follows BILLING_BACKUP_KEEP_*.",
+            ),
+            Requirement(
+                "Location",
+                "in the EU or EEA if your users are there",
+                "The database holds users' email addresses and purchase records, personal data under GDPR.",
+            ),
+        ],
+    )
+    return [redis, postgres]
 
 
 def storage_sections(config) -> list[Section]:
@@ -581,7 +698,7 @@ def offsite_sections(config) -> list[Section]:
 
 def build_requirements(config) -> list[Section]:
     return (
-        storage_sections(config) + outsourcing_sections(config) + google_sections(config) + tunnel_sections(config)
+        database_sections(config) + storage_sections(config) + outsourcing_sections(config) + google_sections(config) + tunnel_sections(config)
         + admin_web_sections(config) + offsite_sections(config)
     )
 

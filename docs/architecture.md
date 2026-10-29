@@ -144,6 +144,16 @@ Each user's password is a file in `secrets/redis`, which `scripts/server.py star
 
 `check --online` confirms that Redis refuses a client without a password and that the `app` user cannot read Redis's configuration. Redis builds its users when it starts, and `scripts/server.py start` and `restart` make it read them again afterwards (`redis/start.sh reload`), so a user or password added by an update takes effect without restarting Redis. A reload that fails keeps the users Redis has. After changing a password file by hand, run `docker compose exec redis sh /redis/start.sh reload`, then restart the services that use it.
 
+### Managed Redis and PostgreSQL
+
+The Compose stack runs Redis and PostgreSQL itself. Several machines need them as services they all reach, usually managed ones; the server then connects by URL alone, and `python -m app.config requirements` lists what each service must provide when its URL leads outside the stack.
+
+* **Redis:** a `rediss://` `REDIS_URL` encrypts the connection. A provider whose certificates its own CA signs needs that CA's file in `REDIS_CA_FILE`. `redis/start.sh` does not run there: create the users of `redis/users.acl` at the provider, or at least the services' user, which must not change the configuration. `check --online` confirms that Redis refuses strangers, and accepts a provider that removed `CONFIG` altogether. Redis must never evict keys, because queued jobs exist only there.
+* **PostgreSQL:** the URL in `secrets/billing_database_url` carries the TLS options, for example `postgresql://billing:<password>@db.example.com:5432/billing?sslmode=verify-full&sslrootcert=/run/secrets/postgres_ca.crt`, with the provider's CA file next to the other secrets. The server opens a connection per request and per job, so the database must allow one per request thread; a pooler in transaction mode works, because every lock the server takes lasts one transaction.
+* **Backups:** the API's pg_dump reads servers of its own major version and older. With a provider that keeps point-in-time backups, `BILLING_BACKUPS=provider` leaves backups to it and the server makes none; `check` warns as a reminder. Off-site copies need the server's backups, so they cannot be on then.
+
+`check` warns when either URL leads outside the stack without TLS. A Redis failover with asynchronous replicas can lose the last second of writes: a job queued in it stays queued until the next full restart sends it again.
+
 ### 🩺 Job diagnostics
 
 Redis job state disappears `RESULT_RETENTION` after a job ends, so each job also has a record in the `job_diagnostics` table of the billing database. Because it is in that database, the billing backups include it. A record is written when the job is queued, starts, is moved between backends, and ends, and holds:

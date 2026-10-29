@@ -90,7 +90,8 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 | `BILLING_PRODUCTS` | `{}` | JSON mapping of Google Play product IDs to transcription minutes. |
 | `FREE_MINUTES` | unset | Free minutes granted per period; omit to disable. |
 | `FREE_MINUTES_PERIOD` | `30d` | How often free minutes are topped up. |
-| `BILLING_BACKUP_INTERVAL` | `15m` | How often the billing database is backed up. |
+| `BILLING_BACKUPS` | `server` | Who backs up the billing database. `server`: the API, every `BILLING_BACKUP_INTERVAL`, as described in [Billing database backups](#-billing-database-backups). `provider`: the provider of a [managed database](architecture.md#managed-redis-and-postgresql), which must then keep point-in-time backups; the server makes none, off-site copies cannot be on, and `check` warns as a reminder. |
+| `BILLING_BACKUP_INTERVAL` | `15m` | How often the server backs up the billing database, with `BILLING_BACKUPS=server`. |
 | `BILLING_BACKUP_KEEP_ALL` | `1d` | Every backup younger than this is kept. See [Which backups are kept](#which-backups-are-kept). |
 | `BILLING_BACKUP_KEEP_HOURLY` | `2d` | Then the first backup of each hour, up to this age. `0s` turns a step off. |
 | `BILLING_BACKUP_KEEP_DAILY` | `14d` | Then the first of each day. |
@@ -245,6 +246,7 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 | --- | --- | --- | --- |
 | `REDIS_URL` | `redis://localhost:6379/0` | `redis://app@redis:6379/0` | Redis connection URL, with the Redis user the services sign in as. |
 | `REDIS_PASSWORD_FILE` | empty | `/run/redis/password` | The file with that user's password, from `secrets/redis/app`. Empty for a Redis without users, such as one for local development. See [Redis users](architecture.md#-redis-users). |
+| `REDIS_CA_FILE` | empty | unset | For a `rediss://` `REDIS_URL` whose certificate is signed by the provider's own CA: that CA's certificate file. Empty trusts the public CAs. See [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). |
 | `DATA_DIR` | `/data` | `/data` | Shared directory for job files; with `JOB_STORAGE=s3`, for scratch files only. |
 | `BILLING_DATABASE_URL` | `postgresql://billing@postgres:5432/billing` | same | Production PostgreSQL URL for balances, purchases, and reservations. Keep passwords in `secrets/billing_database_url` (or use Compose's PostgreSQL password file). |
 | `BILLING_DATABASE_PATH` | `/billing/billing.sqlite3` | tests/tools | Explicit SQLite path retained for legacy tests and the one-time migration source. |
