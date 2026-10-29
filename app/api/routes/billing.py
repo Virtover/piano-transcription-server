@@ -322,11 +322,6 @@ def verify_google_purchase(
     order_id = response.get("orderId")
     if not isinstance(order_id, str) or not order_id:
         raise HTTPException(status_code=502, detail="Google Play purchase has no order ID")
-    # Consumed, but not credited here: another server with the same app, such
-    # as a test one, already credited and consumed it. Crediting it again
-    # would give its minutes twice.
-    if response.get("consumptionState") == 1 and not billing.has_purchase(request.product_id, request.purchase_token):
-        raise HTTPException(status_code=409, detail="Purchase was already used")
     credited = billing.credit_purchase(
         user.user_id,
         request.product_id,
