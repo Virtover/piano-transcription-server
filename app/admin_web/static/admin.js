@@ -248,7 +248,8 @@ function table(columns, rows, { onRow, empty = "Nothing to show", emptyIcon } = 
   const headRow = el("tr", {}, columns.map((column) => el("th", { scope: "col", class: column.num ? "num" : null, text: column.label })));
   const body = rows.map((row) => {
     const line = el("tr", { class: onRow ? "clickable" : null },
-      columns.map((column) => el("td", { class: column.num ? "num" : null },
+      // On phones each row becomes a card, labelled from data-label.
+      columns.map((column) => el("td", { class: column.num ? "num" : null, "data-label": column.label },
         column.render ? column.render(row) : (row[column.key] ?? "–"))));
     if (onRow) {
       line.tabIndex = 0;
@@ -339,7 +340,8 @@ function columnPath(x, y, width, height, round) {
 }
 
 function columnChart({ labels, series, format = fmt, suffix = "", shortLabel = (label) => label }) {
-  const width = 520, height = 210, left = 40, right = 6, top = 12, bottom = 26;
+  // Narrower on phones, so the ticks stay readable when the chart is scaled down.
+  const width = main.clientWidth < 640 ? 340 : 520, height = 210, left = 40, right = 6, top = 12, bottom = 26;
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
   const totals = labels.map((_, index) => series.reduce((sum, one) => sum + (one.values[index] || 0), 0));
   const max = niceMax(Math.max(0, ...totals));
@@ -380,9 +382,12 @@ function columnChart({ labels, series, format = fmt, suffix = "", shortLabel = (
           el("b", { text: `${format(one.values[index] || 0)}${suffix}` }))),
         series.length > 1 ? el("div", {}, el("span", { text: "Total" }), el("b", { text: `${format(totals[index])}${suffix}` })) : null);
       const box = chart.getBoundingClientRect();
-      tip.style.left = `${((left + band * index + band / 2) / width) * box.width}px`;
-      tip.style.top = `${(y(totals[index]) / height) * box.height}px`;
       tip.hidden = false;
+      // Kept inside the chart, so it never runs off a narrow screen.
+      const half = tip.offsetWidth / 2;
+      const center = ((left + band * index + band / 2) / width) * box.width;
+      tip.style.left = `${Math.max(half, Math.min(box.width - half, center))}px`;
+      tip.style.top = `${(y(totals[index]) / height) * box.height}px`;
     };
     const hide = () => { highlight.classList.remove("on"); tip.hidden = true; };
     chart.append(svg("rect", {
@@ -1078,8 +1083,14 @@ const VIEWS = { overview, jobs, users, billing, limits: limitsView, audit: audit
 
 function setCurrent(view) {
   for (const button of document.querySelectorAll(".adm-nav button")) {
-    if (button.dataset.view === view) button.setAttribute("aria-current", "page");
-    else button.removeAttribute("aria-current");
+    if (button.dataset.view === view) {
+      button.setAttribute("aria-current", "page");
+      // On phones the sections are one scrolling row: keep the current one in sight.
+      const nav = button.parentElement;
+      if (nav.scrollWidth > nav.clientWidth) nav.scrollLeft = button.offsetLeft - (nav.clientWidth - button.offsetWidth) / 2;
+    } else {
+      button.removeAttribute("aria-current");
+    }
   }
 }
 

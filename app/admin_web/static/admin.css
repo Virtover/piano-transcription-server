@@ -145,16 +145,18 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .stat.lit { border-color: rgba(var(--lamp), 0.35); background: linear-gradient(180deg, rgba(var(--lamp), 0.08), var(--card-bg) 70%); }
 .stat.alarm { border-color: rgba(248, 113, 113, 0.45); background: linear-gradient(180deg, rgba(248, 113, 113, 0.07), var(--card-bg) 70%); }
 
-/* Six section cards: always full rows, 3 x 2, then 2 x 3, then one column. */
+/* Six section cards: always full rows, 3 x 2, then 2 x 3 (compact on phones). */
 .ov-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 @media (max-width: 1100px) { .ov-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 640px) { .ov-grid { grid-template-columns: minmax(0, 1fr); } }
 .ov-card {
   background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 22px;
   text-align: left; color: inherit; cursor: pointer; display: flex; flex-direction: column; align-items: flex-start;
   transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
 }
-.ov-card:hover { border-color: rgba(255, 204, 0, 0.35); transform: translateY(-2px); box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3); }
+@media (hover: hover) {
+  .ov-card:hover { border-color: rgba(255, 204, 0, 0.35); transform: translateY(-2px); box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3); }
+}
+.ov-card:active { border-color: rgba(255, 204, 0, 0.35); }
 .ov-card h3 { font-size: 1.05rem; margin-bottom: 6px; }
 .ov-card p { color: var(--text-secondary); font-size: 0.86rem; line-height: 1.5; }
 .ov-card .summary { margin-top: auto; padding-top: 14px; font-family: var(--mono); font-size: 0.72rem; color: var(--text-primary); }
@@ -386,23 +388,110 @@ pre.code { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mo
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
+/* --- Tablets and phones ------------------------------------------------------------------ */
+/* The sidebar becomes a sticky top bar: the brand and the account on one row,
+   the sections below as one row that scrolls sideways. */
+
 @media (max-width: 900px) {
+  body { background-attachment: scroll; }
   .adm { grid-template-columns: minmax(0, 1fr); }
-  .adm-side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border-color); }
-  .adm-nav { flex-direction: row; flex-wrap: wrap; padding: 10px; }
-  .adm-nav button, .adm-nav a { width: auto; }
-  .adm-nav .sep { display: none; }
-  .adm-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
-  .adm-foot .adm-role { gap: 8px; }
-  .adm-foot .adm-role, .adm-foot .adm-user { margin: 0; }
-  .adm-foot-btn { width: auto; margin-top: 0; }
-  .adm-main { padding: 16px; }
+  .adm-side {
+    position: sticky; top: 0; z-index: 20; height: auto;
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "brand foot" "nav nav";
+    background: rgba(16, 13, 12, 0.88); border-right: 0; border-bottom: 1px solid var(--border-color);
+  }
+  .adm-brand { grid-area: brand; padding: 10px 16px; gap: 10px; border-bottom: 0; min-width: 0; }
+  .adm-brand img { width: 30px; height: 30px; border-radius: 8px; }
+  .adm-brand small { font-size: 0.6rem; }
+  .adm-nav {
+    grid-area: nav; position: relative; flex-direction: row; flex-wrap: nowrap; gap: 4px;
+    overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; padding: 0 12px 10px;
+  }
+  .adm-nav::-webkit-scrollbar { display: none; }
+  .adm-nav button, .adm-nav a { width: auto; flex-shrink: 0; white-space: nowrap; padding: 8px 12px; }
+  .adm-nav .sep { flex-shrink: 0; width: 1px; height: 20px; margin: auto 4px; }
+  .adm-foot { grid-area: foot; display: flex; align-items: center; gap: 12px; padding: 10px 16px 10px 0; border-top: 0; background: none; min-width: 0; }
+  .adm-role span:first-child { display: none; }
+  .adm-user { margin: 0; max-width: 220px; font-size: 0.72rem; font-weight: 400; color: var(--text-secondary); }
+  .adm-foot-btn { width: auto; margin-top: 0; padding: 7px 10px; }
+  .adm-main { padding: 16px 16px 40px; }
+  .card, .ov-card { padding: 16px; }
   .stat .value { font-size: 1.4rem; }
-  .adm-head { padding: 18px; }
+  .adm-head { padding: 18px; margin-bottom: 18px; }
+  .adm-head h1 { font-size: 1.35rem; }
+  .section-title { flex-wrap: wrap; gap: 2px 12px; margin-top: 26px; }
   .grid.two { grid-template-columns: minmax(0, 1fr); }
   dl.facts { grid-template-columns: 1fr; gap: 2px 0; }
   dl.facts dd { margin-bottom: 8px; }
   .hbar { grid-template-columns: 5.5rem 1fr 2.5rem; }
+  /* At 16px, phones do not zoom in when a field gets focus. */
+  .pw-input, .pw-select { font-size: 16px; }
+}
+
+@media (max-width: 640px) {
+  .adm-user { display: none; }
+  .stats { gap: 10px; }
+  .stat { padding: 14px; }
+
+  /* Section cards two by two, without their description. */
+  .ov-grid { gap: 10px; }
+  .ov-card { padding: 14px; }
+  .ov-card .ov-icon { width: 36px; height: 36px; margin-bottom: 10px; }
+  .ov-card .ov-icon svg { width: 18px; height: 18px; }
+  .ov-card h3 { font-size: 0.98rem; margin-bottom: 0; }
+  .ov-card p { display: none; }
+  .ov-card .summary { padding-top: 6px; font-size: 0.68rem; color: var(--text-secondary); }
+
+  /* Toolbars stack; filter chips scroll sideways to the screen's edges. */
+  .toolbar { flex-direction: column; align-items: stretch; }
+  .toolbar .chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 -16px; padding: 0 16px; }
+  .toolbar .chips::-webkit-scrollbar { display: none; }
+  .toolbar .seg { display: flex; }
+  .toolbar .seg button { flex: 1; }
+  .filters .btn { width: 100%; }
+
+  /* Each table row becomes a small card of label and value. */
+  .table-wrap { overflow: visible; }
+  .admin-table thead { display: none; }
+  .admin-table, .admin-table tbody, .admin-table tr { display: block; }
+  .admin-table tr { padding: 12px 0; border-bottom: 1px solid var(--border-color); }
+  .admin-table tbody tr:first-child { padding-top: 0; }
+  .admin-table tbody tr:last-child { padding-bottom: 0; border-bottom: 0; }
+  .admin-table td, .admin-table td.num {
+    display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); justify-items: start; align-items: center; gap: 12px;
+    padding: 3px 0; border: 0; text-align: left; white-space: normal;
+  }
+  .admin-table td::before {
+    content: attr(data-label); font-family: var(--mono); font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted);
+  }
+  .admin-table td[data-label=""] { grid-template-columns: minmax(0, 1fr); padding-top: 8px; }
+  .admin-table td[data-label=""]::before { display: none; }
+  .admin-table tbody tr.clickable { margin: 0 -16px; padding-left: 16px; padding-right: 16px; }
+  .admin-table tbody tr.clickable:first-child { padding-top: 12px; margin-top: -12px; }
+  .admin-table tbody tr.clickable:last-child { padding-bottom: 12px; margin-bottom: -12px; }
+  .admin-table tbody tr.clickable:hover td { background: none; }
+  .admin-table tbody tr.clickable:hover td:first-child { box-shadow: none; }
+  .admin-table tbody tr.clickable:hover, .admin-table tbody tr.clickable:active { background: rgba(var(--lamp), 0.05); box-shadow: inset 2px 0 0 var(--accent-gold); }
+
+  /* Dialogs rise from the bottom, as a sheet. */
+  .modal-backdrop { padding: 24px 0 0; }
+  .modal { margin-top: auto; border-radius: 16px 16px 0 0; border-bottom: 0; }
+  .modal-head, .modal-body { padding: 16px; }
+  .modal-foot { padding: 14px 16px 18px; }
+  .modal-foot .btn, .modal-foot .qbtn { flex: 1 1 auto; }
+  .modal-foot .pw-check, .modal-foot .countdown { flex-basis: 100%; }
+  .delta { font-size: 1.2rem; }
+
+  .toast-wrap { left: 12px; right: 12px; bottom: 12px; align-items: stretch; }
+  .toast { max-width: none; }
+}
+
+/* Fingers need bigger targets than a pointer. */
+@media (pointer: coarse) {
+  .btn, .qbtn, .seg button { min-height: 40px; }
+  .adm-foot-btn { min-height: 36px; }
+  .modal-close { width: 40px; height: 40px; }
+  .pw-check input { width: 20px; height: 20px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

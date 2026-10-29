@@ -448,6 +448,15 @@ def test_the_page_never_inserts_html_or_loads_anything_else():
     assert not re.search(r"\son[a-z]+\s*=", html)
 
 
+def test_tables_stay_readable_on_phones():
+    script = (STATIC / "admin.js").read_text(encoding="utf-8")
+    css = (STATIC / "admin.css").read_text(encoding="utf-8")
+
+    # Each cell carries its column's name, shown beside the value when rows become cards.
+    assert '"data-label": column.label' in script
+    assert "content: attr(data-label)" in css
+
+
 def test_lowering_is_never_one_keystroke_away():
     script = (STATIC / "admin.js").read_text(encoding="utf-8")
 
