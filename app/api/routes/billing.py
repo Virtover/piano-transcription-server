@@ -2,7 +2,6 @@ import hashlib
 import json
 import logging
 import subprocess
-import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +15,7 @@ from app.config import settings
 from app import controls, google_play, maintenance, video_info, video_sites
 from app.errors import SourceBusy, SourceError, SourceTimedOut, SourceUnsupported, SourceVideoUnavailable
 from app.maintenance import NoticeResponse
+from app.slots import VIDEO_CHECKS_KEY, LeasedSlot
 from app.auth import AuthenticatedUser, current_user, google_oauth_client_ids
 from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url
 
@@ -24,11 +24,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/billing", tags=["billing"])
 redis = Redis.from_url(settings.service.redis_url, decode_responses=True, **settings.service.redis_options())
 billing = Billing()
-# Each video check runs yt-dlp for up to a minute. This bounds the CPU and the
-# requests this server's IP sends to video sites, whoever calls.
-METADATA_SLOTS = 4
+# Each video check runs yt-dlp for up to a minute. MAX_VIDEO_CHECKS bounds
+# them across every API replica, as it bounds the requests the server's
+# addresses send to video sites, whoever calls.
+METADATA_SLOTS_KEY = VIDEO_CHECKS_KEY
 METADATA_WAIT = 10
-metadata_slots = threading.BoundedSemaphore(METADATA_SLOTS)
 # Recent video checks, by URL. A video's info is a few KB.
 VIDEO_CHECK_KEY = "video_check:"
 VIDEO_CHECK_TTL = 300
@@ -152,7 +152,8 @@ def run_check(key: str, safe_url: str) -> dict[str, Any]:
 
 def read_video_info(safe_url: str) -> dict[str, Any]:
     site = video_sites.site_of(safe_url)
-    if not metadata_slots.acquire(timeout=METADATA_WAIT):
+    slot = LeasedSlot(redis, METADATA_SLOTS_KEY, settings.limits.max_video_checks)
+    if not slot.take(METADATA_WAIT):
         raise SourceBusy(video_sites.BUSY_MESSAGE, retry_after=5)
     try:
         with video_sites.access(site, METADATA_WAIT):
@@ -180,7 +181,7 @@ def read_video_info(safe_url: str) -> dict[str, Any]:
     except json.JSONDecodeError as error:
         raise SourceError("Unable to read video metadata") from error
     finally:
-        metadata_slots.release()
+        slot.release()
     duration = info.get("duration") if isinstance(info, dict) else None
     if not isinstance(duration, (int, float)) or duration <= 0:
         raise SourceError("Video duration is unavailable")

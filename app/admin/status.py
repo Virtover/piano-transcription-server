@@ -11,6 +11,7 @@ from app.admin import web
 from app.admin.common import ago, size, span
 from app.config import settings
 from app.outsource import routing
+from app.slots import VIDEO_CHECKS_KEY, in_use
 from app.worker import tasks
 
 STATUS_ORDER = ("preparing", "uploading", "queued", "processing")
@@ -106,6 +107,7 @@ def collect() -> dict:
         } if workers else None,
         "local_workers": workers,
         "api_leader": leader.current_leader(redis),
+        "video_checks": {"in_use": in_use(redis, VIDEO_CHECKS_KEY), "limit": settings.limits.max_video_checks},
         "remote": remote,
         "queues": queues,
         "disk": disk,
@@ -155,6 +157,10 @@ def render(state: dict) -> str:
         if api_leader
         else "API leader    none: no API is running, or it lost Redis"
     )
+
+    checks = state["video_checks"]
+    limit = "unlimited" if checks["limit"] is None else checks["limit"]
+    lines.append(f"Video checks  {checks['in_use']} of {limit} at once, by every API (MAX_VIDEO_CHECKS)")
 
     remote = state["remote"]
     if remote["enabled"]:

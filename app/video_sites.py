@@ -24,7 +24,6 @@ import math
 import re
 import secrets
 import subprocess
-import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -34,6 +33,7 @@ from redis import Redis
 from redis.exceptions import WatchError
 
 from app.config import settings
+from app.slots import LeasedSlot
 from app.errors import (
     SourceBusy,
     SourceError,
@@ -342,50 +342,15 @@ def _wait_for_start(site: str, deadline: float, cancelled: CancellationCallback 
         time.sleep(min(POLL_INTERVAL, remaining))
 
 
-class DownloadSlot:
+class DownloadSlot(LeasedSlot):
     """One of a site's VIDEO_SITE_MAX_DOWNLOADS places, across processes."""
 
     def __init__(self, site: str):
-        self.key = _key(site, DOWNLOADS)
-        self.token = secrets.token_hex(8)
-        self._stop = threading.Event()
+        super().__init__(redis, _key(site, DOWNLOADS), settings.limits.video_site_max_downloads, DOWNLOAD_LEASE)
 
     def take(self, deadline: float, cancelled: CancellationCallback | None) -> None:
-        while not self._try_take():
+        while not self.try_take():
             _pause(deadline, cancelled)
-        threading.Thread(target=self._renew, name="video-site-download", daemon=True).start()
-
-    def _try_take(self) -> bool:
-        while True:
-            try:
-                with redis.pipeline() as pipe:
-                    pipe.watch(self.key)
-                    now = time.time()
-                    if (
-                        settings.limits.video_site_max_downloads is not None
-                        and pipe.zcount(self.key, now, "+inf") >= settings.limits.video_site_max_downloads
-                    ):
-                        return False
-                    pipe.multi()
-                    pipe.zremrangebyscore(self.key, "-inf", now)
-                    pipe.zadd(self.key, {self.token: now + DOWNLOAD_LEASE})
-                    pipe.expire(self.key, DOWNLOAD_LEASE * 2)
-                    pipe.execute()
-                    return True
-            except WatchError:
-                continue
-
-    def _renew(self) -> None:
-        while not self._stop.wait(DOWNLOAD_LEASE / 3):
-            try:
-                redis.zadd(self.key, {self.token: time.time() + DOWNLOAD_LEASE}, xx=True)
-                redis.expire(self.key, DOWNLOAD_LEASE * 2)
-            except Exception:
-                logger.exception("Could not renew a video site download place")
-
-    def release(self) -> None:
-        self._stop.set()
-        redis.zrem(self.key, self.token)
 
 
 def sites() -> list[str]:

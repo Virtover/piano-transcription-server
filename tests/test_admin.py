@@ -111,6 +111,16 @@ def test_status_tells_docker_desktops_virtual_disk(billed, capsys, monkeypatch, 
     assert ("Docker Desktop's virtual disk" in output) is note
 
 
+def test_status_counts_video_checks_of_every_api(billed, capsys):
+    from app.slots import VIDEO_CHECKS_KEY, LeasedSlot
+
+    assert LeasedSlot(tasks.redis, VIDEO_CHECKS_KEY, 4).try_take()
+
+    _, output = admin(capsys, "status")
+
+    assert "Video checks  1 of 4 at once" in output
+
+
 def test_status_without_a_worker(billed, capsys):
     _, output = admin(capsys, "status")
 

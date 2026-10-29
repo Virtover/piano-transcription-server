@@ -215,6 +215,8 @@ class LimitsSettings(BaseSettings):
     video_site_interval: DurationOrZero = 3.0
     # Downloads from one video site at once, across the API and the workers.
     video_site_max_downloads: UnlimitedInt = Field(default=2, ge=1)
+    # Video checks at once, across every API replica.
+    max_video_checks: UnlimitedInt = Field(default=4, ge=1)
     source_url_allowed_hosts: list[str] = [
         "youtube.com", "youtu.be", "youtube-nocookie.com",
         "vimeo.com", "soundcloud.com", "bandcamp.com", "dailymotion.com",

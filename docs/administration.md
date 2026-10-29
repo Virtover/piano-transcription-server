@@ -35,6 +35,7 @@ The first thing to look at when users say the server is slow:
 
 * **Jobs:** places used out of `MAX_ACTIVE_JOBS`, jobs by status (being checked, uploading, queued, processing), and how many are assigned to the local and the remote backend.
 * **Local worker:** its heartbeat, with how many jobs it runs at once and its average job time. With several local workers, their totals and then one line for each, named by container and process. No heartbeat means the worker is stopped or not consuming the local queue.
+* **Video checks:** links being checked for their length right now, by every API replica together, out of `MAX_VIDEO_CHECKS`. When all places stay taken, users get `503` when they submit or price a link.
 * **API leader:** the API replica that runs backups and the abandoned job check, by container. `none` means no API is running, or it lost Redis; see [Several API replicas](architecture.md#several-api-replicas).
 * **Remote:** remote slots in use out of the limit, when outsourcing is on.
 * **Queues:** messages in the local and remote queues that are not finished yet, including ones a worker has taken, and dead-lettered messages.
