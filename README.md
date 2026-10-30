@@ -48,11 +48,15 @@ Optional features, such as HTTPS, Google Play billing, or outsourcing to RunPod,
 
 * [Architecture and operations](docs/architecture.md) - service boundaries, transcription behavior, retention, cleanup, and limitations.
 
-## <img src="docs/images/pianoweave-icon.png" height="36" align="absmiddle" alt="" /> Piano Weave
+## 🎼 Piano Weave
+
+<a href="https://github.com/Virtover/pianoweave"><img src="docs/images/pianoweave-icon.png" width="72" align="left" alt="Piano Weave icon" /></a>
 
 The server works with any client that can make HTTP requests and download MIDI files. **[Piano Weave](https://github.com/Virtover/pianoweave)** is an Android app built on it, for learning piano from the songs you love: send a video link, then practice the piano part on a falling-notes piano roll with looping, speed control, and a wait mode that listens to your piano.
 
 [![Piano Weave on GitHub](https://img.shields.io/badge/Piano%20Weave-on%20GitHub-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/Virtover/pianoweave)
+
+<br clear="left" />
 
 ## 💬 Community & Support
 
