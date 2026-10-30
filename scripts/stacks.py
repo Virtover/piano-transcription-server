@@ -4,7 +4,7 @@ Stack says what the scripts ask of a running server, such as a maintenance
 notice, a Redis command, or a restore, once, in terms of a few primitives:
 run a command in a service, run a one-off container, and start or stop the
 services. ComposeStack gives those primitives with the docker CLI. The
-scripts never build a docker command themselves.
+scripts never build a docker command themselves; a test keeps it so.
 
 Runs on the host with only the Python standard library.
 """
@@ -57,12 +57,15 @@ class Stack:
     primitives; what the scripts ask for is built on them here."""
 
     root: Path = ROOT
+    # The program the primitives run, for "not found" messages.
+    cli: str = ""
 
     # --- Primitives --------------------------------------------------------------
 
-    def exec(self, service: str, *command: str, input: str | None = None, stdin=None,
-             capture: bool = True) -> subprocess.CompletedProcess:
-        """Run a command in the running service."""
+    def exec(self, service: str, *command: str, input: str | None = None, stdin=None, capture: bool = True,
+             terminal: bool = False, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+        """Run a command in the running service; with terminal, give it this
+        terminal, and env adds to its environment."""
         raise NotImplementedError
 
     def one_off(self, service: str, *command: str, input: str | None = None, capture: bool = True,
@@ -95,6 +98,11 @@ class Stack:
         raise NotImplementedError
 
     # --- What the scripts ask for ------------------------------------------------
+
+    def config(self, *arguments: str, capture: bool = True) -> subprocess.CompletedProcess:
+        """python -m app.config, which reads the settings and secrets as the
+        services do."""
+        return self.one_off("api", "python", "-m", "app.config", *arguments, capture=capture)
 
     def maintenance(self, *arguments: str) -> str:
         result = self.exec("api", "python", "-m", "app.maintenance", *arguments)
@@ -140,7 +148,10 @@ class Stack:
 
 
 class ComposeStack(Stack):
-    """The Docker Compose stack, reached through the docker CLI."""
+    """The Docker Compose stack, reached through the docker CLI from the
+    checkout, wherever the script was started."""
+
+    cli = "docker"
 
     def __init__(self, profiles: list[str], run=subprocess.run, popen=subprocess.Popen, root: Path = ROOT,
                  prepare: Callable[[Path], list[str]] | None = None):
@@ -154,33 +165,42 @@ class ComposeStack(Stack):
         selected = self.profiles if profiles is None else profiles
         return ["docker", "compose"] + [part for name in selected for part in ("--profile", name)]
 
-    def exec(self, service, *command, input=None, stdin=None, capture=True):
-        return self._run(self.compose() + ["exec", "-T", service, *command], **run_options(input, stdin, capture))
+    def docker(self, command: list[str], **options) -> subprocess.CompletedProcess:
+        return self._run(command, cwd=self.root, **options)
+
+    def exec(self, service, *command, input=None, stdin=None, capture=True, terminal=False, env=None):
+        no_terminal = [] if terminal else ["-T"]
+        variables = [part for name, value in (env or {}).items() for part in ("-e", f"{name}={value}")]
+        return self.docker(self.compose() + ["exec", *no_terminal, *variables, service, *command],
+                           **run_options(input, stdin, capture))
 
     def one_off(self, service, *command, input=None, capture=True, terminal=False):
         no_terminal = [] if terminal else ["-T"]
-        return self._run(self.compose() + ["run", "--rm", "--no-deps", *no_terminal, service, *command],
-                         **run_options(input, None, capture))
+        return self.docker(self.compose() + ["run", "--rm", "--no-deps", *no_terminal, service, *command],
+                           **run_options(input, None, capture))
 
     def prepare_files(self) -> list[str]:
         return self._prepare(self.root) if self._prepare else []
 
+    def build(self, *services: str, quiet: bool = False) -> int:
+        return self.docker(self.compose() + ["build", *(["--quiet"] if quiet else []), *services]).returncode
+
     def start_build(self):
-        return self._popen(self.compose() + ["build"])
+        return self._popen(self.compose() + ["build"], cwd=self.root)
 
     def up(self, command: str | None = None, build: bool = True) -> int:
         if command:
-            return self._run(shlex.split(command, posix=(sys.platform != "win32"))).returncode
-        return self._run(self.compose() + ["up", "-d"] + (["--build"] if build else [])).returncode
+            return self.docker(shlex.split(command, posix=(sys.platform != "win32"))).returncode
+        return self.docker(self.compose() + ["up", "-d"] + (["--build"] if build else [])).returncode
 
     def stop(self, down: bool) -> int:
-        return self._run(self.compose(ALL_PROFILES) + (["down"] if down else ["stop"])).returncode
+        return self.docker(self.compose(ALL_PROFILES) + (["down"] if down else ["stop"])).returncode
 
     def start_postgres(self) -> int:
-        return self._run(self.compose() + ["up", "-d", "--wait", "postgres"]).returncode
+        return self.docker(self.compose() + ["up", "-d", "--wait", "postgres"]).returncode
 
     def stop_services(self, services: list[str]) -> int:
-        return self._run(self.compose() + ["stop", *services]).returncode
+        return self.docker(self.compose() + ["stop", *services]).returncode
 
     def host_path(self, container_path: str) -> Path:
         # billing-data is mounted at /billing in docker-compose.yml.

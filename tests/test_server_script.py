@@ -161,7 +161,7 @@ def test_profiles_reach_restart_commands():
         calls.append(command)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    stack = server.ComposeStack(["outsource"], run=fake_run, popen=lambda command: calls.append(command))
+    stack = server.ComposeStack(["outsource"], run=fake_run, popen=lambda command, **options: calls.append(command))
     stack.maintenance("status")
     stack.start_build()
     stack.up()
@@ -1107,3 +1107,33 @@ def test_both_places_failing_changes_nothing(terminal, tmp_path, capsys):
     assert code == 1
     assert [step[0] for step in stack.steps] == ["fetch"]
     assert "there are no local backups in billing-data/backups: nothing was changed" in capsys.readouterr().out
+
+
+def test_only_stacks_builds_compose_commands():
+    """Every script reaches the services through scripts/stacks.py, so a new
+    place to run the server needs nothing changed in them."""
+    scripts = SCRIPT.parent
+    building = [path.name for path in scripts.glob("*.py")
+                if path.name != "stacks.py" and '"compose"' in path.read_text(encoding="utf-8")]
+
+    assert building == []
+
+
+def test_compose_exec_passes_variables_and_a_terminal(tmp_path):
+    calls = []
+
+    def fake_run(command, **options):
+        calls.append((command, options))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    stack = server.ComposeStack([], run=fake_run, root=tmp_path)
+    stack.exec("api", "true", terminal=True, env={"A": "1"}, capture=False)
+    stack.config("check", "--online", capture=False)
+    stack.build("api", quiet=True)
+
+    assert [command for command, _ in calls] == [
+        ["docker", "compose", "exec", "-e", "A=1", "api", "true"],
+        ["docker", "compose", "run", "--rm", "--no-deps", "-T", "api", "python", "-m", "app.config", "check", "--online"],
+        ["docker", "compose", "build", "--quiet", "api"],
+    ]
+    assert all(options["cwd"] == tmp_path for _, options in calls)

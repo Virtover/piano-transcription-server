@@ -48,6 +48,9 @@ def load_server_script():
 
 
 SERVER_SCRIPT = load_server_script()
+# Setup checks the files on this machine, which kube.py copies to a cluster,
+# so it always asks Compose.
+COMPOSE = SERVER_SCRIPT.ComposeStack([], root=ROOT)
 EnvFile = SERVER_SCRIPT.EnvFile
 ADDED_HEADER = SERVER_SCRIPT.ADDED_HEADER
 COMPOSE_ENV, SERVER_ENV = SERVER_SCRIPT.COMPOSE_ENV, SERVER_SCRIPT.SERVER_ENV
@@ -92,14 +95,13 @@ def _plain(markdown: str) -> str:
 def run_config(*arguments: str, capture: bool = True) -> subprocess.CompletedProcess:
     """python -m app.config in a one-off API container, which reads .env, server.env, and
     ./secrets as the services do. The first run builds the API image."""
-    command = ["docker", "compose", "run", "--rm", "--no-deps", "-T", "api", "python", "-m", "app.config", *arguments]
-    return subprocess.run(command, cwd=ROOT, capture_output=capture, text=True)
+    return COMPOSE.config(*arguments, capture=capture)
 
 
 def build_api_image() -> None:
     """Bring the API image up to this code, which answers the questions. A
     cached build that finds nothing changed takes seconds."""
-    subprocess.run(["docker", "compose", "build", "--quiet", "api"], cwd=ROOT, check=False)
+    COMPOSE.build("api", quiet=True)
 
 
 # --- Output ---------------------------------------------------------------------------------
