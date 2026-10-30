@@ -2,6 +2,9 @@
 
 The Compose stack runs everything on one machine. For more than one machine, `deploy/kubernetes` runs the same images on Kubernetes. [Scaling beyond one machine](scaling.md) compares the two and moves a running server over.
 
+> [!WARNING]
+> **Not yet run on real infrastructure.** The Kubernetes deployment has been tested only on the test cluster on this PC (`python scripts/kube.py local up`) and by `tests/test_kubernetes.py`. A real cluster with managed Redis, PostgreSQL, and a bucket, GPU nodes, and KEDA has not served users yet. Docker Compose is the supported way to run the server; try a real cluster on a copy first, with its own bucket and database, before moving users to it.
+
 * **API replicas**, two or more behind the Service `api`, added on CPU. Any replica answers any request; one leads the periodic tasks.
 * **GPU workers**, one GPU each. KEDA adds them while jobs wait and removes them slowly afterwards; see [Metrics for scaling](architecture.md#-metrics-for-scaling).
 * **One remote worker** for RunPod, **one cleanup**, **two `cloudflared` connectors**, and optionally the [admin web page](#-the-admin-web-page).

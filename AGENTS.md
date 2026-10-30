@@ -40,7 +40,7 @@ python scripts/kube.py restart 5m                               # server.py's an
 | `runpod/handler.py` | The RunPod Serverless handler, built with `Dockerfile.runpod` |
 | `app/admin_web/` | The optional admin web page behind Cloudflare Access: token checks, read-only routes, lowering its own access |
 | `app/admin/`, `app/controls.py`, `scripts/admin.py` | `python -m app.admin`: status, jobs, users, the billing report, and temporary limits the API reads from Redis; the host script runs it in the API container |
-| `deploy/kubernetes/` | The Kubernetes deployment: `base/`, the real cluster's overlay, and `local/`, a test cluster on this PC; `tests/test_kubernetes.py` keeps it in step with `docker-compose.yml` |
+| `deploy/kubernetes/` | The Kubernetes deployment: `base/`, the real cluster's overlay, and `local/`, a test cluster on this PC; `tests/test_kubernetes.py` keeps it in step with `docker-compose.yml`. Tested only on the local cluster, never yet on real infrastructure |
 | `scripts/kube.py` | Kubernetes from the host: up, update, status, down, for a real cluster and, with `local`, the test cluster |
 | `scripts/setup.py` | Guided setup of the optional features on the host, from `features --json` and `requirements --json` |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |

@@ -2,6 +2,9 @@
 
 The server runs in one of two ways, from the same code:
 
+> [!WARNING]
+> The Kubernetes deployment has been tested only on a test cluster on one PC, not yet on real infrastructure; see [Kubernetes](kubernetes.md). Keep the Compose stack and its backups until a real cluster has served users for a while.
+
 | | One machine (default) | Several machines |
 | --- | --- | --- |
 | Runs on | Docker Compose, `scripts/server.py` | Kubernetes, `deploy/kubernetes` ([Kubernetes](kubernetes.md)) |
