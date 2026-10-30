@@ -42,7 +42,9 @@ class FakeBuild:
         self.terminated = True
 
 
-class FakeStack:
+class FakeStack(server.ComposeStack):
+    """Answers as a Compose stack would, without docker."""
+
     def __init__(self, clock, build_seconds=30, build_code=0, active_jobs=(), up_code=0, stop_code=0,
                  ready_after=0, aof_seconds=0):
         self.clock = clock

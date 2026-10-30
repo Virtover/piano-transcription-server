@@ -75,7 +75,9 @@ def project(tmp_path):
     import shutil
 
     manifests = tmp_path / "deploy" / "kubernetes"
-    shutil.copytree(ROOT / "deploy" / "kubernetes", manifests)
+    # Without the settings.env that kube.py wrote for this machine, which
+    # is not committed.
+    shutil.copytree(ROOT / "deploy" / "kubernetes", manifests, ignore=shutil.ignore_patterns("settings.env"))
     (tmp_path / "redis").mkdir()
     shutil.copyfile(ROOT / "redis" / "users.acl", tmp_path / "redis" / "users.acl")
     shutil.copyfile(ROOT / "server.env.example", tmp_path / "server.env")
@@ -306,3 +308,107 @@ def test_the_command_line(project):
     assert kube.target.local
     with pytest.raises(SystemExit):
         kube_script.main(["nonsense"], kube)
+
+
+# --- server.py's and admin.py's commands -----------------------------------------------------------
+
+DEPLOYMENTS = json.dumps({"items": [
+    {"metadata": {"name": name}, "spec": {"replicas": 1, "template": {"spec": {"containers": [{"image": "x"}]}}}}
+    for name in ("api", "worker", "redis", "postgres")
+]})
+
+
+def serving(cluster):
+    """A running API with nothing planned and no running jobs."""
+    cluster.answers = {
+        "get deployments": (0, DEPLOYMENTS),
+        "app.maintenance schedule": (0, json.dumps({"message": "Restart soon", "seconds_remaining": 0})),
+        "app.maintenance active-jobs": (0, "0"),
+        "app.maintenance status": (0, "null"),
+    }
+
+
+def test_every_server_command_runs_on_a_cluster():
+    assert set(kube_script.SERVER_SCRIPT.actions()) <= set(kube_script.COMMANDS + kube_script.SERVER_COMMANDS)
+
+
+def test_restart_is_server_scripts_with_a_rolling_update(project):
+    kube, cluster, script = make(project, "local", answers=["y"], context="docker-desktop")
+    serving(cluster)
+
+    assert kube_script.main(["local", "restart", "0s", "--no-build"], kube) == 0
+
+    order = [" ".join(command) for command in cluster.commands]
+    announced = next(i for i, c in enumerate(order) if "app.maintenance schedule restart" in c)
+    restarted = next(i for i, c in enumerate(order) if "rollout restart" in c)
+    assert announced < restarted
+    # The server's pods, not the test cluster's Redis and PostgreSQL.
+    assert order[restarted].endswith("rollout restart deploy/api deploy/worker")
+    assert cluster.ran("apply", "-k") and cluster.ran("annotate", "scaledobject", f"{kube_script.KEDA_PAUSED}-")
+    # The cluster's Redis is not the stack's: nothing saved or reloaded.
+    assert not any("redis-cli" in c or "start.sh" in c for c in order)
+    assert any("Restart the server in the test cluster on this PC, context docker-desktop?" in line
+               for line in script.said)
+
+
+def test_nothing_is_announced_without_a_yes(project):
+    kube, cluster, _ = make(project, "local", answers=["n"], context="docker-desktop")
+    serving(cluster)
+
+    assert kube_script.main(["local", "restart", "5m"], kube) == 1
+    assert not cluster.ran("app.maintenance")
+
+
+def test_stop_pauses_keda_and_scales_the_server_to_none(project, capsys):
+    kube, cluster, script = make(project, "cluster", answers=["y"])
+    serving(cluster)
+
+    assert kube_script.main(["stop", "0s"], kube) == 0
+
+    assert cluster.ran("annotate", "scaledobject", f"{kube_script.KEDA_PAUSED}=0")
+    assert cluster.ran("scale", "deploy/api", "deploy/worker", "--replicas=0")
+    assert not cluster.ran("deploy/redis")
+    assert "Start again with: python scripts/kube.py start" in capsys.readouterr().out
+
+
+def test_the_build_runs_in_the_background_with_the_registry(project):
+    kube, cluster, _ = make(project, "cluster", answers=["docker.io/me"])
+    write_cluster_secrets(project)
+    kube.target.settings.write_text("REDIS_URL=rediss://app@redis.example.com:6380/0\n", encoding="utf-8")
+    started = []
+    stack = kube_script.KubeStack(kube, popen=lambda command, **options: started.append(command))
+
+    stack.prepare_files()
+    stack.start_build()
+
+    [command] = started
+    assert command[2:] == ["build", "20261030-120000", "--registry", "docker.io/me"]
+
+
+def test_admin_is_admin_scripts_in_an_api_pod(project):
+    kube, cluster, _ = make(project, "local", context="docker-desktop")
+
+    kube_script.main(["local", "admin", "jobs", "--failed"], kube)
+
+    [command] = [command for command in cluster.commands if "app.admin" in command]
+    # Standard input, as docker compose exec -T, and no terminal without one.
+    assert command[:6] == ["kubectl", "-n", "piano-local", "exec", "-i", "deploy/api"]
+    assert "ADMIN_COMMAND=python scripts/kube.py local admin" in command
+    assert command[-5:] == ["python", "-m", "app.admin", "jobs", "--failed"]
+
+
+def test_restore_refuses_and_changes_nothing(project, capsys):
+    kube, cluster, _ = make(project, "cluster")
+
+    assert kube_script.main(["restore", "latest"], kube) == 1
+    assert "provider" in capsys.readouterr().out
+    assert not cluster.ran("exec")
+
+
+def test_infrastructure_is_the_test_clusters_own_services():
+    import yaml
+
+    documents = yaml.safe_load_all((ROOT / "deploy" / "kubernetes" / "local" / "services.yaml").read_text(encoding="utf-8"))
+    deployments = {document["metadata"]["name"] for document in documents if document and document["kind"] == "Deployment"}
+
+    assert deployments == set(kube_script.INFRASTRUCTURE)

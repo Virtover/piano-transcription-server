@@ -22,10 +22,14 @@ python scripts/kube.py local up       # a test cluster on this PC, everything in
 python scripts/kube.py up             # a real cluster: managed Redis, PostgreSQL, bucket
 python scripts/kube.py status         # pods, KEDA, queue, leader, problems
 python scripts/kube.py update         # new images, rolling update
+python scripts/kube.py restart 5m     # announced to clients, as scripts/server.py
+python scripts/kube.py admin jobs     # the administration commands, as scripts/admin.py
 python scripts/kube.py down
 ```
 
-`local` before a command acts on the test cluster instead of the real one. Also `check` (`check --online` inside the cluster), `admin <command>` (the commands of [Administration](administration.md), in an API pod), and `logs <deployment>`.
+`local` before a command acts on the test cluster instead of the real one. Also `check` (`check --online` inside the cluster), `logs <deployment>`, and `build <tag>` (the images alone).
+
+`restart`, `stop`, `start`, `restore`, and `cancel` are the commands of `scripts/server.py`, with the same options, and `admin` runs those of `scripts/admin.py`: the same code, which reaches the cluster with kubectl instead of Docker Compose. See [Restarts and administration](#-restarts-and-administration).
 
 * **`up` and `update` do every step**: `settings.env` from `server.env`; the Secrets, from the files in `secrets`, created or updated; the images, built and, for a real cluster, pushed under a new tag; `kubectl apply`, waiting for every Deployment; and `check --online` in the cluster. They ask once, naming the kubectl context, before they change the cluster or push an image.
 * **Secrets are never shown.** Each is made from its files with `kubectl --dry-run` and applied from memory. Files only a real cluster uses, such as the managed database's URL, are in `secrets/kubernetes`, so the Compose stack on this machine never reads them; `up` asks for a missing one without showing it, and generates `metrics_token`.
@@ -110,8 +114,8 @@ python scripts/kube.py down
 7. **Check** from inside the cluster:
 
    ```shell
-   kubectl -n piano-transcription exec deploy/api -- python -m app.config check --online
-   kubectl -n piano-transcription exec deploy/api -- python -m app.admin status
+   python scripts/kube.py check
+   python scripts/kube.py admin status
    ```
 
 8. **The tunnel** keeps its public hostnames: the Service `api` answers at `http://api:8000`, as in Compose. While the Compose stack still runs with the same tunnel token, Cloudflare sends requests to both; stop it with `python scripts/server.py stop` once the cluster serves. The two stacks use different databases, so move billing first; see [Moving the billing database](configuration.md#moving-the-billing-database).
@@ -123,16 +127,28 @@ Build and push the new version under a new tag, change the tag in `kustomization
 * An API replica that stops hands the lead to another at once; the new replicas join without recovering anything.
 * A worker that stops takes no new job and gets 15 minutes to finish the ones it runs (`terminationGracePeriodSeconds` in `base/worker.yaml`). A job still running then fails and is refunded.
 
-`scripts/server.py`, which announces a restart to clients and drains the stack, is for Compose; a rolling update interrupts nothing, so it needs no notice. To change settings, edit `settings.env` and apply: the settings' ConfigMap gets a new name, which restarts the pods that use it.
+A rolling update interrupts nothing, so it needs no notice. To change settings, edit `settings.env` and apply: the settings' ConfigMap gets a new name, which restarts the pods that use it.
 
-## 🛠️ Administration
+## 🛠️ Restarts and administration
 
-The administration commands run in an API pod instead of through `scripts/admin.py`:
+`scripts/kube.py` runs the commands of `scripts/server.py` and `scripts/admin.py` on the cluster; `local` first for the test cluster:
 
 ```shell
-kubectl -n piano-transcription exec -it deploy/api -- python -m app.admin status
-kubectl -n piano-transcription exec -it deploy/api -- python -m app.admin jobs --failed
+python scripts/kube.py restart 5m --reason "update"   # announce, build and push, drain, rolling restart
+python scripts/kube.py stop 10m --back-in 2h          # announce, drain, scale the server to none
+python scripts/kube.py start                          # apply again, wait until ready
+python scripts/kube.py cancel
+python scripts/kube.py admin status
+python scripts/kube.py admin jobs --failed --since 1d
 ```
+
+They differ from Compose where a cluster does:
+
+* **`restart`, `stop`, and `start` ask once**, naming the kubectl context, before they announce anything. `restart` builds and pushes the images under a new tag while the countdown runs, then applies the manifests and restarts the server's Deployments one pod at a time.
+* **`stop`** pauses KEDA and scales the server's Deployments to none; `start` applies the manifests, which brings them back, and resumes KEDA. On the test cluster, its Redis, PostgreSQL, and storage keep running.
+* **Redis is not saved or reloaded:** a real cluster's is managed, and the test cluster's keeps nothing past a restart of its own.
+* **`restore` refuses:** the database's provider keeps its backups; restore with the provider's own restore.
+* `--profile` and `--legacy-gpu` are Compose's and change nothing here; `status` is `scripts/kube.py`'s own, which also shows a planned restart or shutdown.
 
 ## 🔐 The admin web page
 

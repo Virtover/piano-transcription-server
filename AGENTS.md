@@ -16,6 +16,7 @@ python scripts/server.py restart 5m                              # announced res
 python scripts/server.py restore 2                               # billing database from a backup: latest, a name, or Nth newest; --from local, --fallback
 python scripts/admin.py status                                  # live picture; also jobs, user, users find, billing, limits, audit
 python scripts/kube.py local up                                 # Kubernetes: a test cluster on this PC; up, update, status, down for a real one
+python scripts/kube.py restart 5m                               # server.py's and admin.py's commands on a cluster: restart, stop, start, cancel, admin
 ```
 
 `check --online` is the way to confirm a setup step worked. Code changes reach the containers only after a rebuild, for example `docker compose build api`.
@@ -43,7 +44,7 @@ python scripts/kube.py local up                                 # Kubernetes: a 
 | `scripts/kube.py` | Kubernetes from the host: up, update, status, down, for a real cluster and, with `local`, the test cluster |
 | `scripts/setup.py` | Guided setup of the optional features on the host, from `features --json` and `requirements --json` |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
-| `scripts/stacks.py` | Where the server runs, for the host scripts: requests built on a few primitives, `ComposeStack` gives them with the docker CLI |
+| `scripts/stacks.py` | Where the server runs, for the host scripts: requests built on a few primitives, `ComposeStack` gives them with the docker CLI and `KubeStack` (in `scripts/kube.py`) with kubectl. A change to server.py or admin.py reaches both |
 
 ## Conventions
 

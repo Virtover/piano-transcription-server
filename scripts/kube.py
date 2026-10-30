@@ -4,12 +4,21 @@
     python scripts/kube.py up             # a real cluster: managed Redis, PostgreSQL, bucket
     python scripts/kube.py status         # pods, KEDA, queue, leader, problems
     python scripts/kube.py update         # new images, rolling update
+    python scripts/kube.py restart 5m     # as scripts/server.py: announce, build, drain, restart
+    python scripts/kube.py admin jobs     # as scripts/admin.py, in an API pod
     python scripts/kube.py down
 
 `local` before a command acts on the test cluster (deploy/kubernetes/local)
 instead of the real one (deploy/kubernetes). Also: check (check --online in
-the cluster), admin <command> (scripts/admin.py's commands, in an API pod),
-and logs <deployment>.
+the cluster), logs <deployment>, and build <tag> (the images alone).
+
+restart, stop, start, restore, and cancel are scripts/server.py's commands,
+and admin runs scripts/admin.py's, both through KubeStack: what they do is
+written once, there. stop pauses KEDA and scales the server's deployments to
+none, start applies the manifests again, and a restart is a rolling one. The
+cluster's Redis is managed, or the test cluster's, which keeps nothing, so a
+restart neither saves nor reloads it. restore refuses: the database's
+provider keeps its backups.
 
 Needs Python 3, kubectl signed in to the cluster, and docker for the images;
 the test cluster is Docker Desktop's Kubernetes, which uses the images built
@@ -29,6 +38,7 @@ import importlib.util
 import json
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -48,6 +58,12 @@ KEDA_VERSION = "2.16.1"
 KEDA_MANIFEST = f"https://github.com/kedacore/keda/releases/download/v{KEDA_VERSION}/keda-{KEDA_VERSION}.yaml"
 IMAGES = {"piano-api": "Dockerfile.api", "piano-worker": "Dockerfile.worker"}
 LOCAL_CONTEXTS = ("docker-desktop",)
+# The test cluster's own services in deploy/kubernetes/local/services.yaml,
+# which stop and restart leave running: its Redis keeps the queue only while
+# it runs. A test keeps the list in step.
+INFRASTRUCTURE = ("redis", "postgres", "seaweed")
+# KEDA keeps a ScaledObject's target at this many replicas while it is set.
+KEDA_PAUSED = "autoscaling.keda.sh/paused-replicas"
 
 # The test cluster's settings over server.env's: its own services, no
 # outsourcing, no billing, and no reports to the real error monitor.
@@ -71,6 +87,9 @@ def load_script(name: str):
 
 SETUP_SCRIPT = load_script("setup")
 Console, Style, EnvFile = SETUP_SCRIPT.Console, SETUP_SCRIPT.Style, SETUP_SCRIPT.EnvFile
+# The scripts whose commands kube.py runs on a cluster.
+SERVER_SCRIPT = SETUP_SCRIPT.SERVER_SCRIPT
+ADMIN_SCRIPT = load_script("admin")
 
 
 @dataclass(frozen=True)
@@ -240,7 +259,9 @@ def seaweed_config(access_key: str, secret_key: str) -> str:
 
 # --- kubectl and docker --------------------------------------------------------------------------
 
-def run(command: list[str], input: str | None = None, capture: bool = True) -> subprocess.CompletedProcess:
+def run(command: list[str], input: str | None = None, capture: bool = True, stdin=None) -> subprocess.CompletedProcess:
+    if stdin is not None:
+        return subprocess.run(command, cwd=ROOT, stdin=stdin, capture_output=capture)
     return subprocess.run(command, cwd=ROOT, input=input, capture_output=capture, text=True)
 
 
@@ -259,8 +280,19 @@ class Kube:
     def path(self, file: SecretFile) -> Path:
         return self.root / "secrets" / file.path
 
-    def kubectl(self, *arguments: str, input: str | None = None, capture: bool = True) -> subprocess.CompletedProcess:
-        return self.run(["kubectl", "-n", self.target.namespace(), *arguments], input=input, capture=capture)
+    def kubectl(self, *arguments: str, input: str | None = None, capture: bool = True, stdin=None
+                ) -> subprocess.CompletedProcess:
+        options = {"stdin": stdin} if stdin is not None else {}
+        return self.run(["kubectl", "-n", self.target.namespace(), *arguments], input=input, capture=capture, **options)
+
+    @property
+    def stack(self) -> "KubeStack":
+        """This target as server.py's and admin.py's commands see it."""
+        return KubeStack(self)
+
+    @property
+    def script(self) -> str:
+        return f"python scripts/kube.py{' local' if self.target.local else ''}"
 
     def context(self) -> str | None:
         result = self.run(["kubectl", "config", "current-context"])
@@ -390,12 +422,22 @@ class Kube:
             self.console.say(f"  {self.style('Secret', 'dim')} {name}: {', '.join(file.key for file in present)}")
         return True
 
-    def build_images(self, tag: str) -> bool:
+    def image_registry(self) -> str | None:
+        """Where the images go: None for the test cluster, which uses this
+        machine's; asked for when the kustomization names none."""
         registry = self.target.registry()
         if not self.target.local and (registry is None or "example.com" in registry):
             registry = self.console.ask("Registry to push the images to, such as docker.io/<user>: ").strip().rstrip("/")
             if not registry:
-                return not self.fail("No registry: the cluster cannot pull the images.")
+                raise RuntimeError("No registry: the cluster cannot pull the images.")
+        return registry
+
+    def build_images(self, tag: str, registry: str | None = None) -> bool:
+        if registry is None:
+            try:
+                registry = self.image_registry()
+            except RuntimeError as error:
+                return not self.fail(str(error))
         names = {name: f"{registry + '/' if registry else ''}{repository.rsplit('/', 1)[-1]}:{tag}"
                  for name, (repository, _) in self.target.images().items()}
         for name, image in names.items():
@@ -409,9 +451,18 @@ class Kube:
         self.target.kustomization.write_text(set_images(self.target.text(), registry, tag), encoding="utf-8")
         return True
 
-    def roll_out(self) -> bool:
+    def roll_out(self, restart: bool = False) -> bool:
+        """Apply the manifests, which also brings back what stop scaled
+        down, and wait for every deployment; with restart, replace the
+        server's pods even where nothing changed."""
         if self.run(["kubectl", "apply", "-k", str(self.target.manifests)], capture=False).returncode != 0:
             return not self.fail("kubectl apply failed.")
+        # Fails harmlessly where KEDA or the annotation is missing.
+        self.kubectl("annotate", "scaledobject", "--all", f"{KEDA_PAUSED}-")
+        if restart:
+            server = [f"deploy/{name}" for name in self.server_deployments()]
+            if server and self.kubectl("rollout", "restart", *server, capture=False).returncode != 0:
+                return not self.fail("kubectl rollout restart failed.")
         deployments = self.get_json("deployments") or {"items": []}
         for item in deployments["items"]:
             name = item["metadata"]["name"]
@@ -419,6 +470,20 @@ class Kube:
                 return not self.fail(f"{name} did not become ready: python scripts/kube.py "
                                      f"{'local ' if self.target.local else ''}logs {name}")
         return True
+
+    def server_deployments(self) -> list[str]:
+        """The server's deployments, without the test cluster's own services."""
+        items = (self.get_json("deployments") or {"items": []})["items"]
+        return [item["metadata"]["name"] for item in items if item["metadata"]["name"] not in INFRASTRUCTURE]
+
+    def scale_down(self) -> int:
+        """Pause KEDA at none, then scale the server's deployments to none.
+        roll_out brings both back."""
+        self.kubectl("annotate", "scaledobject", "--all", f"{KEDA_PAUSED}=0", "--overwrite")
+        server = [f"deploy/{name}" for name in self.server_deployments()]
+        if not server:
+            return 0
+        return self.kubectl("scale", *server, "--replicas=0", capture=False).returncode
 
     def keda_installed(self) -> bool:
         return self.run(["kubectl", "get", "crd", "scaledobjects.keda.sh"]).returncode == 0
@@ -436,7 +501,7 @@ class Kube:
         code = ("from app.config import settings; from app.outsource.storage import s3_client; "
                 "c = s3_client(settings); b = settings.storage.bucket; "
                 "b in [x['Name'] for x in c.list_buckets().get('Buckets', [])] or c.create_bucket(Bucket=b)")
-        self.kubectl("exec", "deploy/api", "--", "python", "-c", code)
+        self.stack.exec("api", "python", "-c", code)
 
     def deploy(self, first: bool) -> int:
         """up and update: settings, secret files, images, Secrets, rollout,
@@ -520,7 +585,7 @@ class Kube:
             say(f"{style('Scaling', 'bold')}  KEDA: {current} workers, wants {desired}, "
                 f"{scaled['spec'].get('minReplicas', 1)} to {scaled['spec'].get('maxReplicas')}")
 
-        server = self.kubectl("exec", "deploy/api", "--", "python", "-m", "app.admin", "status", "--json")
+        server = self.stack.exec("api", "python", "-m", "app.admin", "status", "--json")
         if server.returncode == 0:
             state = json.loads(server.stdout)
             say("")
@@ -535,6 +600,10 @@ class Kube:
                     text += f", the oldest {queue['oldest_wait_seconds']:.0f} s"
                 waits.append(text)
             say(f"{style('Queue', 'bold')}    {'; '.join(waits)}")
+            notice = self.stack.exec("api", "python", "-m", "app.maintenance", "status")
+            planned = json.loads(notice.stdout or "null") if notice.returncode == 0 else None
+            if planned:
+                say(f"{style('Notice', 'bold')}   {planned['message']} (at {planned['at']})")
 
         self.secrets_status()
         self.problems()
@@ -560,14 +629,14 @@ class Kube:
         """What the API in the cluster says is wrong, and the features
         Kubernetes needs or cannot run."""
         say, style = self.console.say, self.style
-        result = self.kubectl("exec", "deploy/api", "--", "python", "-m", "app.config", "features", "--json")
+        result = self.stack.config("features", "--json")
         say("")
         say(style("Problems", "bold"))
         if result.returncode != 0:
             say(style("  the API does not answer", "yellow"))
             return
         found = [problem for feature in json.loads(result.stdout) for problem in feature["problems"]]
-        check = self.kubectl("exec", "deploy/api", "--", "python", "-m", "app.config", "check")
+        check = self.stack.config("check")
         found += [line.strip()[2:] for line in check.stderr.splitlines() if line.strip().startswith("- ")]
         for problem in dict.fromkeys(found):
             self.console.wrap(f"! {problem}", "  ", "red")
@@ -577,34 +646,96 @@ class Kube:
     # --- In the cluster --------------------------------------------------------------------------------
 
     def check(self) -> int:
-        return self.kubectl("exec", "deploy/api", "--", "python", "-m", "app.config", "check", "--online",
-                            capture=False).returncode
-
-    def admin(self, arguments: list[str]) -> int:
-        terminal = ["-it"] if sys.stdin.isatty() else ["-i"]
-        return self.kubectl("exec", *terminal, "deploy/api", "--", "python", "-m", "app.admin", *arguments,
-                            capture=False).returncode
+        return self.stack.config("check", "--online", capture=False).returncode
 
     def logs(self, deployment: str, follow: bool) -> int:
         return self.kubectl("logs", f"deploy/{deployment}", "--tail=200", *(["-f"] if follow else []),
                             capture=False).returncode
 
 
-COMMANDS = ("up", "update", "down", "status", "check", "admin", "logs")
+class KubeStack(SERVER_SCRIPT.Stack):
+    """A cluster's namespace as server.py's and admin.py's commands see it,
+    through kubectl. A cluster has no one-off containers: those commands run
+    in a running pod."""
+
+    cli = "kubectl"
+    cannot_restore = ("the cluster's database belongs to its provider, which keeps its backups: restore "
+                      "with the provider's own restore; see docs/kubernetes.md")
+
+    def __init__(self, kube: Kube, popen=subprocess.Popen):
+        self.kube = kube
+        self.root = kube.root
+        self.script = kube.script
+        self._popen = popen
+        self.registry: str | None = None
+
+    def exec(self, service, *command, input=None, stdin=None, capture=True, terminal=False, env=None):
+        # Standard input only where it is used, as docker compose exec -T.
+        interactive = ["-i"] if terminal or input is not None or stdin is not None or not capture else []
+        variables = ["env", *(f"{name}={value}" for name, value in env.items())] if env else []
+        return self.kube.kubectl("exec", *interactive, *(["-t"] if terminal else []), f"deploy/{service}", "--",
+                                 *variables, *command, input=input, stdin=stdin, capture=capture)
+
+    def one_off(self, service, *command, input=None, capture=True, terminal=False):
+        return self.exec(service, *command, input=input, capture=capture, terminal=terminal)
+
+    def prepare_files(self) -> list[str]:
+        """The settings and secret files a rollout copies, asked for when
+        missing, and where the images go, before anything is announced."""
+        if not self.kube.right_context():
+            raise RuntimeError("nothing was changed")
+        if not self.kube.write_settings() or not self.kube.ensure_secret_files():
+            raise RuntimeError("nothing was changed")
+        self.registry = self.kube.image_registry()
+        return []
+
+    def start_build(self):
+        """The images, built and pushed by `kube.py build` while the
+        countdown runs; the rollout then uses them."""
+        target = ["local"] if self.kube.target.local else []
+        registry = ["--registry", self.registry] if self.registry else []
+        return self._popen([sys.executable, str(Path(__file__).resolve()), *target, "build", self.kube.clock(),
+                            *registry], cwd=self.root)
+
+    def up(self, command: str | None = None, build: bool = True) -> int:
+        if command:
+            return self.kube.run(shlex.split(command, posix=(sys.platform != "win32")), capture=False).returncode
+        return 0 if self.kube.apply_secrets() and self.kube.roll_out(restart=True) else 1
+
+    def stop(self, down: bool) -> int:
+        return self.kube.scale_down()
+
+    def logs_command(self, service: str) -> str:
+        return f"{self.script} logs {service}"
+
+
+COMMANDS = ("up", "update", "down", "status", "check", "logs", "build", "admin")
+# scripts/server.py's commands, run on the cluster; kube.py's status also
+# shows the notice that server.py's status prints.
+SERVER_COMMANDS = tuple(action for action in SERVER_SCRIPT.actions() if action not in COMMANDS)
+# What changes the cluster, so it asks first, naming the kubectl context.
+ASKS_FIRST = ("restart", "stop", "start")
 
 
 def main(arguments: list[str], kube: Kube | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python scripts/kube.py", description=__doc__.split("\n\n")[0])
     parser.add_argument("words", nargs="+", metavar="[local] command",
-                        help=f"one of {', '.join(COMMANDS)}; local first for the test cluster on this PC")
+                        help=f"one of {', '.join(COMMANDS + SERVER_COMMANDS)}; local first for the test cluster "
+                             "on this PC")
     parser.add_argument("-f", "--follow", action="store_true", help="with logs: keep following")
-    args, rest = parser.parse_known_args(arguments)
-    words = args.words + rest
-    local = words[0] == "local"
-    words = words[1:] if local else words
-    if not words or words[0] not in COMMANDS:
-        parser.error(f"choose one of {', '.join(COMMANDS)}")
-    command, extra = words[0], words[1:]
+    parser.add_argument("--registry", help="with build: where to push the images")
+    # admin's and server.py's options are theirs: everything after the
+    # command goes to them unparsed.
+    local = arguments[:1] == ["local"]
+    words = arguments[1:] if local else arguments
+    if words and words[0] in SERVER_COMMANDS + ("admin",):
+        command, extra = words[0], words[1:]
+    else:
+        args, rest = parser.parse_known_args(words)
+        words = args.words + rest
+        if not words or words[0] not in COMMANDS:
+            parser.error(f"choose one of {', '.join(COMMANDS + SERVER_COMMANDS)}")
+        command, extra = words[0], words[1:]
 
     if kube is None:
         if shutil.which("kubectl") is None:
@@ -612,6 +743,19 @@ def main(arguments: list[str], kube: Kube | None = None) -> int:
             return 1
         kube = Kube(console=Console(style=Style.for_terminal()))
     kube.target = LOCAL if local else CLUSTER
+    if command == "admin":
+        return ADMIN_SCRIPT.main(extra, kube.stack, command=f"{kube.script} admin")
+    if command in SERVER_COMMANDS:
+        if command in ASKS_FIRST and "-h" not in extra and "--help" not in extra:
+            context = kube.right_context()
+            if context is None or not kube.console.yes(
+                    f"{command.capitalize()} the server in {kube.target.name}, context {context}?", default=False):
+                return 1
+        return SERVER_SCRIPT.main([command, *extra], kube.stack)
+    if command == "build":
+        if not extra:
+            parser.error("build needs a tag for the images")
+        return 0 if kube.build_images(extra[0], args.registry) else 1
     if command in ("up", "update"):
         return kube.deploy(first=command == "up")
     if command == "down":
@@ -620,8 +764,6 @@ def main(arguments: list[str], kube: Kube | None = None) -> int:
         return kube.status()
     if command == "check":
         return kube.check()
-    if command == "admin":
-        return kube.admin(extra)
     if not extra:
         parser.error("logs needs a deployment: api, worker, remote-worker, cleanup, cloudflared, or admin")
     return kube.logs(extra[0], args.follow)

@@ -491,7 +491,10 @@ def persist_redis(stack: Stack, clock: Clock) -> None:
     """Turn on Redis's append-only file in the running Redis and wait until
     it is written. Redis started with it on over a volume that only has a
     snapshot starts empty, so this keeps queued jobs through the first
-    restart with the setting. Nothing changes when it is already on."""
+    restart with the setting. Nothing changes when it is already on, or
+    when the Redis is not the stack's own."""
+    if not stack.owns_redis:
+        return
     try:
         stack.redis("config", "set", "appendonly", "yes")
         deadline = clock.now() + AOF_TIMEOUT
@@ -556,10 +559,12 @@ def prepare(stack: Stack) -> bool:
 def reload_redis_users(stack: Stack) -> None:
     """Redis builds its users only when its container starts, and an update
     that adds a user or password may not recreate it."""
+    if not stack.owns_redis:
+        return
     problem = stack.reload_redis_users()
     if problem:
         say(f"Redis did not reload its users ({problem}); a new Redis user cannot sign in until: "
-            "docker compose restart redis")
+            f"{stack.restart_command('redis')}")
 
 
 def restart(args, stack: Stack, clock: Clock) -> int:
@@ -583,7 +588,7 @@ def restart(args, stack: Stack, clock: Clock) -> int:
         return code
     reload_redis_users(stack)
     if not wait_ready(stack, clock):
-        say(f"the API is not ready after {READY_TIMEOUT} s; check `docker compose logs api`. "
+        say(f"the API is not ready after {READY_TIMEOUT} s; check `{stack.logs_command('api')}`. "
             "The notice expires on its own.")
         return 1
     stack.maintenance("cancel")
@@ -600,10 +605,10 @@ def stop(args, stack: Stack, clock: Clock) -> int:
     say("stopping every service" + (" and removing the containers" if args.down else ""))
     code = stack.stop(args.down)
     if code != 0:
-        say(f"docker compose failed with exit code {code}")
+        say(f"{stack.cli} failed with exit code {code}")
         return code
     # The notice stays in Redis; the API removes it when it starts again.
-    say("stopped. Start again with: python scripts/server.py start")
+    say(f"stopped. Start again with: {stack.script} start")
     return 0
 
 
@@ -615,11 +620,11 @@ def start(args, stack: Stack, clock: Clock) -> int:
     # unchanged image is a quick cache hit.
     code = stack.up()
     if code != 0:
-        say(f"docker compose failed with exit code {code}")
+        say(f"{stack.cli} failed with exit code {code}")
         return code
     reload_redis_users(stack)
     if not wait_ready(stack, clock):
-        say(f"the API is not ready after {READY_TIMEOUT} s; check `docker compose logs api`")
+        say(f"the API is not ready after {READY_TIMEOUT} s; check `{stack.logs_command('api')}`")
         return 1
     say("done: the API is ready")
     return 0
@@ -687,6 +692,9 @@ BACKUP_SOURCES = {"remote": remote_backup, "local": local_backup}
 
 
 def restore(args, stack: Stack, clock: Clock) -> int:
+    if stack.cannot_restore:
+        say(f"{stack.cannot_restore}: nothing was changed")
+        return 1
     sources = [args.source]
     if args.fallback:
         sources += [source for source in BACKUP_SOURCES if source != args.source]
@@ -718,7 +726,7 @@ def restore(args, stack: Stack, clock: Clock) -> int:
         return 1
     say("taking a safety backup of the current database")
     if stack.backup_now() != 0:
-        say("the safety backup failed, so nothing was restored. Start again with: python scripts/server.py start")
+        say(f"the safety backup failed, so nothing was restored. Start again with: {stack.script} start")
         return 1
     say(f"restoring {dump.name}")
     code = stack.restore_dump(dump)
@@ -731,9 +739,21 @@ def restore(args, stack: Stack, clock: Clock) -> int:
     return code or started
 
 
-def parse_arguments(arguments: list[str]) -> argparse.Namespace:
+def actions() -> list[str]:
+    """The commands, which scripts/kube.py also runs on a cluster."""
+    commands = next(action for action in build_parser()._actions if isinstance(action, argparse._SubParsersAction))
+    return list(commands.choices)
+
+
+def parse_arguments(arguments: list[str], prog: str = "python scripts/server.py") -> argparse.Namespace:
+    args = build_parser(prog).parse_args(arguments)
+    args.profile = list(getattr(args, "profile", []))
+    return args
+
+
+def build_parser(prog: str = "python scripts/server.py") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python scripts/server.py",
+        prog=prog,
         description="Planned restarts and shutdowns, announced to clients first.",
     )
     commands = parser.add_subparsers(dest="action", required=True)
@@ -778,14 +798,11 @@ def parse_arguments(arguments: list[str]) -> argparse.Namespace:
 
     commands.add_parser("status", help="print the pending restart or shutdown")
     commands.add_parser("cancel", help="cancel the pending restart or shutdown")
-
-    args = parser.parse_args(arguments)
-    args.profile = list(getattr(args, "profile", []))
-    return args
+    return parser
 
 
 def main(arguments: list[str], stack: Stack | None = None, clock: Clock | None = None) -> int:
-    args = parse_arguments(arguments)
+    args = parse_arguments(arguments, stack.script if stack else "python scripts/server.py")
     if getattr(args, "outsource", False):
         say(OUTSOURCE_NOTE)
     if stack is None:

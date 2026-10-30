@@ -3,8 +3,9 @@
 Stack says what the scripts ask of a running server, such as a maintenance
 notice, a Redis command, or a restore, once, in terms of a few primitives:
 run a command in a service, run a one-off container, and start or stop the
-services. ComposeStack gives those primitives with the docker CLI. The
-scripts never build a docker command themselves; a test keeps it so.
+services. ComposeStack gives those primitives with the docker CLI, and
+KubeStack in scripts/kube.py with kubectl. The scripts never build a docker
+command themselves; a test keeps it so.
 
 Runs on the host with only the Python standard library.
 """
@@ -57,8 +58,15 @@ class Stack:
     primitives; what the scripts ask for is built on them here."""
 
     root: Path = ROOT
-    # The program the primitives run, for "not found" messages.
+    # The program the primitives run, for messages.
     cli: str = ""
+    # How to run the scripts' commands again on this stack, for messages.
+    script: str = ""
+    # Whether its Redis is the stack's own and keeps queued jobs: then a
+    # restart saves them first and reloads Redis's users after.
+    owns_redis: bool = False
+    # Why restore cannot replace this stack's database, if it cannot.
+    cannot_restore: str = ""
 
     # --- Primitives --------------------------------------------------------------
 
@@ -95,6 +103,14 @@ class Stack:
 
     def host_path(self, container_path: str) -> Path:
         """Where a file a one-off container saved is on this machine."""
+        raise NotImplementedError
+
+    def logs_command(self, service: str) -> str:
+        """The command that shows the service's log, for messages."""
+        raise NotImplementedError
+
+    def restart_command(self, service: str) -> str:
+        """The command that restarts one service, for messages."""
         raise NotImplementedError
 
     # --- What the scripts ask for ------------------------------------------------
@@ -152,6 +168,8 @@ class ComposeStack(Stack):
     checkout, wherever the script was started."""
 
     cli = "docker"
+    script = "python scripts/server.py"
+    owns_redis = True
 
     def __init__(self, profiles: list[str], run=subprocess.run, popen=subprocess.Popen, root: Path = ROOT,
                  prepare: Callable[[Path], list[str]] | None = None):
@@ -205,3 +223,9 @@ class ComposeStack(Stack):
     def host_path(self, container_path: str) -> Path:
         # billing-data is mounted at /billing in docker-compose.yml.
         return self.root / "billing-data" / Path(container_path).relative_to("/billing")
+
+    def logs_command(self, service: str) -> str:
+        return f"docker compose logs {service}"
+
+    def restart_command(self, service: str) -> str:
+        return f"docker compose restart {service}"
