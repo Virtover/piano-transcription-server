@@ -50,7 +50,20 @@ Optional features, such as HTTPS, Google Play billing, or outsourcing to RunPod,
 
 ## 🎼 Piano Weave
 
-The server is independent of any client that can make HTTP requests and download MIDI files. One client is [Piano Weave](https://github.com/Virtover/pianoweave), an Android application for learning piano songs from online videos.
+The server works with any client that can make HTTP requests and download MIDI files. One of them is Piano Weave:
+
+<table>
+  <tr>
+    <td width="112" align="center">
+      <a href="https://github.com/Virtover/pianoweave"><img src="docs/images/pianoweave-icon.png" width="96" alt="Piano Weave icon" /></a>
+    </td>
+    <td>
+      <strong><a href="https://github.com/Virtover/pianoweave">Piano Weave</a></strong> - an Android app for learning piano from the songs you love. It sends a video link to this server and lets you practice the MIDI on an interactive falling-notes piano roll, with looping, speed control, and a wait mode that listens to your piano.
+      <br /><br />
+      <a href="https://github.com/Virtover/pianoweave"><strong>See Piano Weave on GitHub →</strong></a>
+    </td>
+  </tr>
+</table>
 
 ## 💬 Community & Support
 
