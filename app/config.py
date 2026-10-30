@@ -22,6 +22,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Annotated, Any, Callable, Literal
 from urllib.parse import urlsplit
 
@@ -38,6 +39,14 @@ CHECKED_PREFIXES = ("WORKER_", "BILLING_", "DATABASE_", "JOB_", "OUTSOURCE_", "S
 MIN_SERVER_PASSWORD_LENGTH = 12
 # Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
 COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD"}
+# The two files: .env holds what Docker Compose reads, server.env the
+# server's settings, the same on every deployment. COMPOSE_PROFILES is both:
+# Compose starts services by it, and the server learns from it whether the
+# tunnel and the admin web page run. Later files win, as in docker-compose.yml.
+COMPOSE_ENV_FILE = ".env"
+SERVER_ENV_FILE = "server.env"
+ENV_FILES = (COMPOSE_ENV_FILE, SERVER_ENV_FILE)
+COMPOSE_ONLY_VARIABLES = COMPOSE_VARIABLES | {"COMPOSE_PROFILES"}
 # The Compose profile that starts the cloudflared service.
 TUNNEL_PROFILE = "cloudflare"
 # The admin web page: its Compose profile, and its modes from least to most access.
@@ -158,7 +167,7 @@ UnlimitedInt = Annotated[int | None, BeforeValidator(_unlimited_or_positive_int)
 def _group_config(prefix: str = "") -> SettingsConfigDict:
     return SettingsConfigDict(
         env_prefix=prefix,
-        env_file=".env",
+        env_file=ENV_FILES,
         env_ignore_empty=True,
         extra="ignore",
         populate_by_name=True,
@@ -179,6 +188,10 @@ class ServiceSettings(BaseSettings):
     # CA rather than a public one, as many managed Redis services do.
     redis_ca_file: str = ""
     data_dir: str = "/data"
+    # Where the services run: local (outside containers), compose, or
+    # kubernetes. Set as wiring; it turns the checks of one on or off, such
+    # as Compose's profiles, which Kubernetes does not have.
+    deployment: Literal["local", "compose", "kubernetes"] = "local"
 
     def redis_tls_options(self) -> dict[str, str]:
         """Keyword arguments that verify a rediss:// server's certificate
@@ -639,13 +652,41 @@ DEPRECATED: dict[str, str] = {
 }
 
 
-def read_environment(env_file: str | None) -> dict[str, str]:
-    """Variables from the env file, overridden by the process environment."""
+def env_file_paths(env_file: "str | Sequence[str] | None") -> list[str]:
+    if env_file is None:
+        return []
+    return [env_file] if isinstance(env_file, str) else list(env_file)
+
+
+def read_environment(env_file: "str | Sequence[str] | None") -> dict[str, str]:
+    """Variables from the env files, later ones winning, overridden by the
+    process environment."""
     values: dict[str, str] = {}
-    if env_file and Path(env_file).is_file():
-        values.update({key.upper(): value for key, value in dotenv_values(env_file).items() if value})
+    for path in env_file_paths(env_file):
+        if Path(path).is_file():
+            values.update({key.upper(): value for key, value in dotenv_values(path).items() if value})
     values.update({key.upper(): value for key, value in os.environ.items() if value})
     return values
+
+
+def misplaced_settings(env_file: "str | Sequence[str] | None") -> list[str]:
+    """Lines in the wrong one of the two files, which scripts/server.py and
+    scripts/setup.py move. Only the host has the files; in a container there
+    is nothing to check."""
+    warnings = []
+    for path in env_file_paths(env_file):
+        name = Path(path).name
+        if not Path(path).is_file() or name not in ENV_FILES:
+            continue
+        keys = {key.upper() for key, value in dotenv_values(path).items() if value}
+        wrong = sorted(keys - COMPOSE_ONLY_VARIABLES if name == COMPOSE_ENV_FILE else keys & COMPOSE_ONLY_VARIABLES)
+        if wrong:
+            other = SERVER_ENV_FILE if name == COMPOSE_ENV_FILE else COMPOSE_ENV_FILE
+            warnings.append(
+                f"{', '.join(wrong)} belong{'s' if len(wrong) == 1 else ''} in {other}, not {name}; "
+                "python scripts/server.py start or python scripts/setup.py moves them"
+            )
+    return warnings
 
 
 def resolve_aliases(environment: dict[str, str]) -> dict[str, dict[str, str]]:
@@ -692,7 +733,8 @@ def resolve_secret_aliases(secrets_dir: str | None) -> dict[str, str]:
 
 
 def unknown_variable_warnings(environment: dict[str, str]) -> list[str]:
-    known = set(known_variables()) | set(ALIASES)
+    # Docker Compose's own, such as WORKER_GPU_BUILD, are known too.
+    known = set(known_variables()) | set(ALIASES) | COMPOSE_ONLY_VARIABLES
     messages = []
     for name in sorted(environment):
         if not name.startswith(CHECKED_PREFIXES) or name in known:
@@ -718,7 +760,7 @@ def _format_errors(group: type[BaseSettings], error: ValidationError, overrides:
     return problems
 
 
-def load_settings(env_file: str | None = ".env", secrets_dir: str | None = SECRETS_DIR) -> Settings:
+def load_settings(env_file: "str | Sequence[str] | None" = ENV_FILES, secrets_dir: str | None = SECRETS_DIR) -> Settings:
     environment = read_environment(env_file)
     overrides = resolve_aliases(environment)
     for message in unknown_variable_warnings(environment):
@@ -733,7 +775,7 @@ def load_settings(env_file: str | None = ".env", secrets_dir: str | None = SECRE
     for group_name, group in GROUPS.items():
         values = overrides.get(group_name, {})
         try:
-            groups[group_name] = group(_env_file=env_file, _secrets_dir=secrets, **values)
+            groups[group_name] = group(_env_file=tuple(env_file_paths(env_file)) or None, _secrets_dir=secrets, **values)
         except ValidationError as error:
             problems.extend(_format_errors(group, error, values))
     if problems:
@@ -765,6 +807,18 @@ def google_play_service_account_json(config: "Settings | None" = None) -> str | 
 LOCAL_HOSTS = {"redis", "postgres", "localhost", "127.0.0.1", "::1"}
 # libpq's sslmode values that encrypt the connection.
 ENCRYPTED_SSLMODES = {"require", "verify-ca", "verify-full"}
+
+
+def tunnel_enabled(config: "Settings | None" = None) -> bool:
+    """Whether cloudflared runs: with Compose when its profile is listed;
+    with Kubernetes always, as its own Deployment."""
+    config = config or settings
+    return config.service.deployment == "kubernetes" or config.tunnel.enabled
+
+
+def uses_compose_profiles(config: "Settings | None" = None) -> bool:
+    config = config or settings
+    return config.service.deployment != "kubernetes"
 
 
 def runs_elsewhere(url: str | None) -> bool:
@@ -815,6 +869,8 @@ def admin_web_problems(config: "Settings", check_profile: bool = True) -> list[s
     keeps it from starting; it never runs half protected."""
     admin = config.admin_web
     profiles = {profile.strip() for profile in config.tunnel.compose_profiles.split(",")}
+    # Kubernetes deploys it as a component instead.
+    check_profile = check_profile and uses_compose_profiles(config)
     if not admin.enabled:
         if check_profile and ADMIN_WEB_PROFILE in profiles:
             return [f"COMPOSE_PROFILES lists {ADMIN_WEB_PROFILE}, but ADMIN_WEB_MODE=disabled; remove it from COMPOSE_PROFILES"]
@@ -884,14 +940,15 @@ def configuration_warnings(config: "Settings", environment: dict[str, str]) -> l
             f"The billing database at {urlsplit(database_url).hostname} is reached without required TLS. Add "
             "sslmode=verify-full and sslrootcert=<the provider's CA file> to the URL in secrets/database_url."
         )
-    if config.tunnel.enabled:
+    if tunnel_enabled(config):
         if config.secrets.server_password is None and config.billing.provider == "none":
             warnings.append(
                 "The Cloudflare Tunnel makes the server reachable from the internet, and it has neither a "
                 "password nor sign-in: anyone who finds the address can use it. See \"Password protection\" "
                 "in docs/setup.md."
             )
-        if environment.get("API_BIND_ADDRESS", "0.0.0.0") != "127.0.0.1":
+        # Unset, docker-compose.yml publishes on 127.0.0.1.
+        if uses_compose_profiles(config) and environment.get("API_BIND_ADDRESS", "127.0.0.1") != "127.0.0.1":
             warnings.append(
                 "Port 8000 is published on every network interface, so the server is also reachable without the "
                 "tunnel's HTTPS. Set API_BIND_ADDRESS=127.0.0.1 unless devices on your network connect directly."
@@ -995,7 +1052,7 @@ def main(arguments: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.config")
     subcommands = parser.add_subparsers(dest="command", required=True)
     check = subcommands.add_parser("check", help="validate the configuration and print it")
-    check.add_argument("--env-file", default=".env", help="env file to read (default: .env)")
+    check.add_argument("--env-file", action="append", help="an env file to read; repeatable (default: .env and server.env)")
     check.add_argument("--secrets-dir", default=SECRETS_DIR)
     check.add_argument(
         "--online",
@@ -1006,14 +1063,14 @@ def main(arguments: list[str]) -> int:
         "requirements",
         help="print what the external services must provide, derived from the configuration",
     )
-    requirements.add_argument("--env-file", default=".env", help="env file to read (default: .env)")
+    requirements.add_argument("--env-file", action="append", help="an env file to read; repeatable (default: .env and server.env)")
     requirements.add_argument("--secrets-dir", default=SECRETS_DIR)
     requirements.add_argument("--json", action="store_true", help="print JSON, for scripts and AI agents")
     features = subcommands.add_parser(
         "features",
         help="list the optional features: how each is turned on, what it needs, and what is missing",
     )
-    features.add_argument("--env-file", default=".env", help="env file to read (default: .env)")
+    features.add_argument("--env-file", action="append", help="an env file to read; repeatable (default: .env and server.env)")
     features.add_argument("--secrets-dir", default=SECRETS_DIR)
     features.add_argument("--json", action="store_true", help="print JSON, for scripts/setup.py and AI agents")
     args = parser.parse_args(arguments)
@@ -1024,7 +1081,7 @@ def main(arguments: list[str]) -> int:
     if args.command == "features":
         return print_features(args)
     try:
-        config = load_settings(args.env_file, args.secrets_dir)
+        config = load_settings(args.env_file or ENV_FILES, args.secrets_dir)
         problems = validate_settings(config, "all")
     except ConfigError as error:
         problems = error.problems
@@ -1034,7 +1091,8 @@ def main(arguments: list[str]) -> int:
 
         print("\n".join(summary_lines(config)) + "\n")
         print("\n".join(describe(config)))
-        warnings = configuration_warnings(config, read_environment(args.env_file))
+        warnings = configuration_warnings(config, read_environment(args.env_file or ENV_FILES))
+        warnings += misplaced_settings(args.env_file or ENV_FILES)
         if warnings:
             print("\nWarnings:")
             for warning in warnings:
@@ -1060,7 +1118,7 @@ def print_features(args) -> int:
     from app.features import describe_features, summary_lines
 
     try:
-        config = load_settings(args.env_file, args.secrets_dir)
+        config = load_settings(args.env_file or ENV_FILES, args.secrets_dir)
     except ConfigError as error:
         print("\n".join(f"  - {problem}" for problem in error.problems), file=sys.stderr)
         return 1
@@ -1075,7 +1133,7 @@ def print_requirements(args) -> int:
     from app.requirements import build_requirements, format_requirements, requirements_json
 
     try:
-        config = load_settings(args.env_file, args.secrets_dir)
+        config = load_settings(args.env_file or ENV_FILES, args.secrets_dir)
     except ConfigError as error:
         print("Configuration errors:", file=sys.stderr)
         for problem in error.problems:

@@ -19,7 +19,7 @@ It lists the storage bucket, the image registry, the GPU endpoint, and the API k
 > With an AI coding agent such as Claude Code, run `/setup-runpod`. It turns each requirement into the providers' current settings, guides you through them, and verifies the result.
 
 1. **Create what `requirements` lists**, using each provider's documentation: [Cloudflare R2](https://developers.cloudflare.com/r2/), [Docker Hub](https://docs.docker.com/docker-hub/), [RunPod Serverless](https://docs.runpod.io/serverless/overview).
-2. **Save the secrets and configure `.env`**, as in [Configuration](#-configuration).
+2. **Save the secrets and configure `server.env`**, as in [Configuration](#-configuration).
 3. **Build and push the image**, as in [Building the image](#-building-the-image).
 4. **Verify everything** against the real services:
 
@@ -28,7 +28,7 @@ It lists the storage bucket, the image registry, the GPU endpoint, and the API k
    ```
 
    It uploads a small object to the bucket, downloads it through a signed link the way the GPU endpoint does, and deletes it. It checks the endpoint's health, and compares the endpoint's settings with the requirements. Every warning and failure names the likely fix. Repeat until nothing fails.
-5. **Restart the stack** so the remote worker reads the new `.env`. It is always part of the stack and idles while `OUTSOURCE_PROVIDER=none`; `.env` is the only switch:
+5. **Restart the stack** so the remote worker reads the new `server.env`. It is always part of the stack and idles while `OUTSOURCE_PROVIDER=none`; `server.env` is the only switch:
 
    ```shell
    docker compose up -d --build
@@ -79,7 +79,7 @@ printf '%s' '<RunPod read-only API key>' > secrets/runpod_read_api_key
 > [!WARNING]
 > In PowerShell, always name the parameters as above. The short form `Set-Content -NoNewline <file> <value>` swaps them in Windows PowerShell 5.1 and creates a file **named after your secret** in the current folder. If that happens, delete the file; if it was ever committed, replace the key.
 
-Add to `.env` the bucket, in its own [object storage](configuration.md#object-storage) settings, which `JOB_STORAGE=s3` also uses:
+Add to `server.env` the bucket, in its own [object storage](configuration.md#object-storage) settings, which `JOB_STORAGE=s3` also uses:
 
 ```env
 STORAGE_ENDPOINT=<the bucket's S3 endpoint URL>
@@ -124,7 +124,7 @@ Run `check --online` first: it identifies most configuration problems directly, 
 | --- | --- | --- |
 | Jobs with `"backend": "remote"` stay queued | `remote-worker` is not running, or still idles from before `OUTSOURCE_PROVIDER` was set | Run `docker compose up -d`, then check `docker compose logs remote-worker`. |
 | Remote jobs fail and run locally instead | A remote failure with `OUTSOURCE_FALLBACK_LOCAL=true` | `docker compose logs remote-worker` shows the RunPod error. |
-| A remote job fails with an error about the audio URL or host | `STORAGE_ENDPOINT` differs between `.env` and the endpoint | `check --online` reports it; use the exact same value in both. |
+| A remote job fails with an error about the audio URL or host | `STORAGE_ENDPOINT` differs between `server.env` and the endpoint | `check --online` reports it; use the exact same value in both. |
 
 Logs: `docker compose logs remote-worker` on this server, and the worker logs in the RunPod console. A healthy RunPod worker logs a line like `cuda:0: up to 12 requests at once` at startup; the number depends on the GPU.
 
@@ -201,7 +201,7 @@ docker run -d --name runpod-local --network piano-test \
   python3 -u handler.py --rp_serve_api --rp_api_host 0.0.0.0 --rp_api_port 8010
 ```
 
-3. Put `test` in `secrets/runpod_api_key`, `test-access` in `secrets/storage_access_key`, and `test-secret` in `secrets/storage_secret_key`, and add to `.env`:
+3. Put `test` in `secrets/runpod_api_key`, `test-access` in `secrets/storage_access_key`, and `test-secret` in `secrets/storage_secret_key`, and add to `server.env`:
 
 ```env
 OUTSOURCE_PROVIDER=runpod
@@ -228,7 +228,7 @@ The local test server differs from RunPod in two ways:
 * It runs one job at a time and blocks all other requests meanwhile, so keep `OUTSOURCE_MAX_CONCURRENCY=1`. With more, the next submission times out and that job falls back to the local queue. Batching across requests only happens on RunPod; `tests/test_runpod_handler.py` checks it locally.
 * It runs the handler while the job's status is first requested. Progress therefore jumps from 10% to 96%, and a cancellation takes effect only when the handler returns.
 
-Afterwards, remove the test setup and the outsourcing lines from `.env`:
+Afterwards, remove the test setup and the outsourcing lines from `server.env`:
 
 ```shell
 docker rm -f seaweed runpod-local

@@ -37,16 +37,21 @@ docker compose run --rm api python -m app.config requirements
    ```
 
    The token is in a folder of its own so the workers, which process untrusted media, cannot see it. On Linux, `cloudflared` runs as user ID `65532`, so the file must be readable by it: files created this way are, unless your `umask` is strict.
-3. **Turn it on in `.env`:**
+3. **Turn it on.** In `.env`, which Docker Compose reads:
 
    ```env
    COMPOSE_PROFILES=cloudflare
-   CLOUDFLARE_TUNNEL_HOSTNAME=piano.example.com
    # Optional: only the tunnel can reach the API, not devices on your network.
    API_BIND_ADDRESS=127.0.0.1
    ```
 
-   `COMPOSE_PROFILES` is read by Docker Compose and starts `cloudflared`; `.env` is the only switch. `CLOUDFLARE_TUNNEL_HOSTNAME` is only used to check the setup.
+   and in `server.env`, the server's settings:
+
+   ```env
+   CLOUDFLARE_TUNNEL_HOSTNAME=piano.example.com
+   ```
+
+   `COMPOSE_PROFILES` starts `cloudflared` and is the only switch. `CLOUDFLARE_TUNNEL_HOSTNAME` is only used to check the setup. `python scripts/setup.py tunnel` writes both. On Kubernetes, `cloudflared` always runs; see [Kubernetes](kubernetes.md).
 4. **Start it and verify:**
 
    ```shell

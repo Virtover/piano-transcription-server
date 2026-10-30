@@ -21,6 +21,6 @@ The server states what it needs; you translate that into Google's current settin
 
 1. **Requirements.** Run `requirements --json`. Ask how the app is installed (from Android Studio, as a directly installed release build, from Google Play): each signing certificate needs its own Android client. If the app is or will be on Google Play, the Play app signing client is required.
 2. **Sign-in.** Guide the user through each Google sign-in requirement. Put every client ID in `GOOGLE_OAUTH_CLIENT_IDS`, as in `docs/google-sign-in.md`.
-3. **Billing.** Guide the user through each Google Play requirement, then the key and `.env`, as in `docs/google-play-billing.md`.
+3. **Billing.** Guide the user through each Google Play requirement, then the key and `server.env`, as in `docs/google-play-billing.md`.
 4. **Verify.** Rebuild the API image if the code changed (`docker compose build api`), then run `docker compose run --rm api python -m app.config check --online`. Resolve every `FAIL` and `WARN` with its hint. A 401 or 403 from Google Play shortly after giving the service account access is usually Google's delay in applying permissions, up to a day: say so, and offer to check again later instead of changing settings. Requirements not marked `checked` cannot be verified by the server: confirm each with the user.
 5. **Restart and test.** `docker compose restart api`, then have the user sign in from the app and call the balance endpoint, as in `docs/google-sign-in.md`. Test purchases need a license tester account and an install from a testing track.

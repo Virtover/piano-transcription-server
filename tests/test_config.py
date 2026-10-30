@@ -309,7 +309,7 @@ def run_check(*arguments):
 
 
 def test_check_passes_on_env_example(tmp_path):
-    result = run_check("--env-file", ".env.example", "--secrets-dir", str(tmp_path))
+    result = run_check("--env-file", ".env.example", "--env-file", "server.env.example", "--secrets-dir", str(tmp_path))
 
     assert result.returncode == 0, result.stderr
     assert "Configuration OK" in result.stdout
@@ -345,12 +345,16 @@ def test_check_reports_invalid_values(tmp_path):
 
 # --- Drift guards ---------------------------------------------------------
 
-def example_keys() -> set[str]:
+EXAMPLES = (".env.example", "server.env.example")
+
+
+def example_keys(*names: str) -> set[str]:
     keys = set()
-    for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
-        match = re.match(r"^#?\s?([A-Z][A-Z0-9_]+)=", line)
-        if match:
-            keys.add(match.group(1))
+    for name in names or EXAMPLES:
+        for line in (ROOT / name).read_text(encoding="utf-8").splitlines():
+            match = re.match(r"^#?\s?([A-Z][A-Z0-9_]+)=", line)
+            if match:
+                keys.add(match.group(1))
     return keys
 
 
@@ -358,6 +362,52 @@ def test_every_env_example_key_is_a_known_setting():
     unknown = example_keys() - set(config.known_variables()) - config.COMPOSE_VARIABLES
 
     assert unknown == set()
+
+
+def test_compose_variables_are_not_reported_as_unknown():
+    assert config.unknown_variable_warnings({"WORKER_GPU_BUILD": "legacy", "WORKER_BATCHSIZE": "2"}) == [
+        "Unknown setting WORKER_BATCHSIZE; did you mean WORKER_BATCH_SIZE?"
+    ]
+
+
+def test_each_template_holds_only_its_own():
+    # .env: what Docker Compose reads. server.env: the server's settings.
+    assert example_keys(".env.example") <= config.COMPOSE_ONLY_VARIABLES
+    assert not example_keys("server.env.example") & config.COMPOSE_ONLY_VARIABLES
+
+
+def test_settings_are_read_from_both_files_server_env_winning(tmp_path):
+    (tmp_path / ".env").write_text("COMPOSE_PROFILES=cloudflare\nMAX_ACTIVE_JOBS=3\n", encoding="utf-8")
+    (tmp_path / "server.env").write_text("MAX_ACTIVE_JOBS=7\n", encoding="utf-8")
+
+    settings = config.load_settings([str(tmp_path / ".env"), str(tmp_path / "server.env")], str(tmp_path))
+
+    assert settings.limits.max_active_jobs == 7
+    assert settings.tunnel.enabled
+
+
+def test_check_says_which_lines_are_in_the_wrong_file(tmp_path):
+    (tmp_path / ".env").write_text("MAX_ACTIVE_JOBS=3\n", encoding="utf-8")
+    (tmp_path / "server.env").write_text("API_BIND_ADDRESS=0.0.0.0\n", encoding="utf-8")
+
+    warnings = config.misplaced_settings([str(tmp_path / ".env"), str(tmp_path / "server.env")])
+
+    assert warnings == [
+        "MAX_ACTIVE_JOBS belongs in server.env, not .env; python scripts/server.py start or python scripts/setup.py moves them",
+        "API_BIND_ADDRESS belongs in .env, not server.env; python scripts/server.py start or python scripts/setup.py moves them",
+    ]
+
+
+def test_compose_gives_every_service_with_settings_both_files():
+    import yaml
+
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    files = [entry["path"] for entry in compose["x-settings"]]
+
+    assert files == list(config.ENV_FILES)
+    for name, service in compose["services"].items():
+        if "env_file" in service:
+            assert [entry["path"] for entry in service["env_file"]] == files, name
 
 
 def test_compose_variables_are_used_and_documented():
@@ -370,9 +420,10 @@ def test_compose_variables_are_used_and_documented():
 
 
 def test_env_example_has_no_inline_comments_or_wiring():
-    for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
-        if re.match(r"^#?\s?[A-Z][A-Z0-9_]+=", line):
-            assert " #" not in line, line
+    for name in EXAMPLES:
+        for line in (ROOT / name).read_text(encoding="utf-8").splitlines():
+            if re.match(r"^#?\s?[A-Z][A-Z0-9_]+=", line):
+                assert " #" not in line, line
     assert not example_keys() & {"REDIS_URL", "DATA_DIR", "DATABASE_PATH", "DATABASE_BACKUP_DIR"}
 
 

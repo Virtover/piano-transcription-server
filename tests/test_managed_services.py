@@ -88,6 +88,49 @@ def test_the_database_url_secret_is_the_one_checked(default_settings):
     assert not any("TLS" in warning for warning in configuration_warnings(default_settings, {}))
 
 
+# --- Deployments ---------------------------------------------------------------------------
+
+def test_on_kubernetes_the_tunnel_runs_and_profiles_are_not_needed(default_settings):
+    default_settings.service.deployment = "kubernetes"
+    default_settings.admin_web.mode = "read-only"
+    default_settings.admin_web.hostname = "admin.example.com"
+    default_settings.admin_web.emails = ["me@example.com"]
+    default_settings.admin_web.access_team_domain = "team.cloudflareaccess.com"
+    default_settings.admin_web.access_aud = "aud"
+
+    assert app_config.tunnel_enabled(default_settings)
+    problems = validate_settings(default_settings, "admin")
+    assert not any("COMPOSE_PROFILES" in problem for problem in problems), problems
+
+
+def test_with_compose_the_admin_page_needs_its_profile(default_settings):
+    default_settings.service.deployment = "compose"
+    default_settings.admin_web.mode = "read-only"
+
+    assert any("needs admin in COMPOSE_PROFILES" in problem for problem in validate_settings(default_settings, "all"))
+
+
+def test_the_bind_address_warning_is_compose_s(default_settings):
+    default_settings.tunnel.compose_profiles = "cloudflare"
+    default_settings.secrets.server_password = "a-long-server-password"
+
+    every_interface = {"API_BIND_ADDRESS": "0.0.0.0"}
+
+    assert any("Port 8000" in warning for warning in configuration_warnings(default_settings, every_interface))
+    default_settings.service.deployment = "kubernetes"
+    assert not any("Port 8000" in warning for warning in configuration_warnings(default_settings, every_interface))
+
+
+def test_each_deployment_names_itself_in_its_wiring():
+    import yaml
+
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    [wiring] = yaml.safe_load_all((ROOT / "deploy" / "kubernetes" / "wiring.yaml").read_text(encoding="utf-8"))
+
+    assert compose["x-wiring"]["DEPLOYMENT"] == "compose"
+    assert wiring["data"]["DEPLOYMENT"] == "kubernetes"
+
+
 # --- The online check on managed Redis ----------------------------------------------------
 
 class FakeClient:

@@ -10,7 +10,7 @@ The app signs the user in with Google and gets an access token with the `openid`
 * it has not expired,
 * it has a Google account ID (`sub`, from the `openid` scope) and a verified email.
 
-The Google account ID becomes the user's billing identity. Client IDs are public, so they go in `.env`; no OAuth client secret is needed. Results are cached for up to 5 minutes.
+The Google account ID becomes the user's billing identity. Client IDs are public, so they go in `server.env`; no OAuth client secret is needed. Results are cached for up to 5 minutes.
 
 ## 🧭 Setting it up
 
@@ -26,7 +26,7 @@ See the **Google sign-in** section of its output: the consent screen, one Androi
 > With an AI coding agent such as Claude Code, run `/setup-google`. It turns each requirement into Google's current settings, guides you through them, and verifies the result.
 
 1. **Create what `requirements` lists**, using Google's documentation: [Google Auth Platform](https://support.google.com/cloud/answer/15544987) and [Android sign-in](https://developer.android.com/identity/sign-in/credential-manager-siwg).
-2. **Put every client ID in `.env`**, as one JSON list on one line, and restart the API:
+2. **Put every client ID in `server.env`**, as one JSON list on one line, and restart the API:
 
    ```env
    GOOGLE_OAUTH_CLIENT_IDS=["111-debug.apps.googleusercontent.com","111-play.apps.googleusercontent.com","111-web.apps.googleusercontent.com"]
@@ -70,5 +70,5 @@ Each Android client needs the SHA-1 fingerprint of one signing certificate:
 | `401 Google authentication token has no subject` | The app did not request the `openid` scope | Request `openid` and `email` in the app. |
 | `401 Google authentication email is not verified` | The Google account's email is unverified | Use another account, or verify the email at Google. |
 | `401 Google authentication token has expired` | Access tokens last about an hour | The app must request a fresh token. |
-| `503 Google authentication is not configured` | `GOOGLE_OAUTH_CLIENT_IDS` is empty | Set it in `.env`. |
+| `503 Google authentication is not configured` | `GOOGLE_OAUTH_CLIENT_IDS` is empty | Set it in `server.env`. |
 | Error 10 or `DEVELOPER_ERROR` in the app | No Android client matches the package name and certificate | Create the client for that certificate. Sign-in that works from Android Studio but not from Google Play is missing the Play app signing client. |

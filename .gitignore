@@ -5,3 +5,5 @@
 /billing-data/
 __pycache__/
 /deploy/kubernetes/settings.env
+/server.env
+/.env.before-split

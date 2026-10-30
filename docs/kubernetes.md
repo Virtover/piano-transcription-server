@@ -37,7 +37,7 @@ The commands run from the repository's folder, with `kubectl` signed in to the c
 
    Then put the names and tag under `images` in `deploy/kubernetes/kustomization.yaml`.
 
-2. **Settings.** Copy `.env` to `deploy/kubernetes/settings.env`, which git ignores. Remove `COMPOSE_PROFILES`, and add the managed Redis's address, with the services' user:
+2. **Settings.** Copy `server.env` to `deploy/kubernetes/settings.env`, which git ignores; it holds the server's settings and nothing of Docker Compose's. Add the managed Redis's address, with the services' user:
 
    ```env
    REDIS_URL=rediss://app@<host>:<port>/0

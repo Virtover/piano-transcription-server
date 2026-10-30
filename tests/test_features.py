@@ -191,10 +191,10 @@ def test_features_command(tmp_path):
     assert listed["job_storage"]["enabled"] is True
 
 
-# --- .env.example and the docs follow the table ------------------------------------------------
+# --- server.env.example and the docs follow the table -----------------------------------------
 
 def test_env_example_has_a_block_for_every_feature():
-    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    example = (ROOT / "server.env.example").read_text(encoding="utf-8")
     for feature in FEATURES:
         if feature.key == "provider_backups":
             # A choice of the billing database's block.
@@ -206,6 +206,9 @@ def test_env_example_has_a_block_for_every_feature():
         assert text.startswith("# On with:"), feature.title
         for name in feature.settings:
             assert re.search(rf"^#? ?{name}=", text, re.M), (feature.title, name)
+        # A Compose profile is in .env, which says what it starts.
+        for profile in feature.profiles:
+            assert profile in (ROOT / ".env.example").read_text(encoding="utf-8"), (feature.title, profile)
         for item in feature.secrets:
             assert item.name in text, (feature.title, item.name)
 

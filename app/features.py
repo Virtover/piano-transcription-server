@@ -174,7 +174,7 @@ FEATURES: tuple[Feature, ...] = (
         title="HTTPS through a Cloudflare Tunnel",
         summary="An HTTPS address for the server on the internet, without opening a port.",
         switch=f"COMPOSE_PROFILES={app_config.TUNNEL_PROFILE}",
-        enabled=lambda config: config.tunnel.enabled,
+        enabled=app_config.tunnel_enabled,
         docs="docs/cloudflare-tunnel.md",
         profiles=(app_config.TUNNEL_PROFILE,),
         settings=("CLOUDFLARE_TUNNEL_HOSTNAME",),

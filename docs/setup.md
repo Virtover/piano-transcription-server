@@ -34,7 +34,7 @@ docker compose run --rm api python -m app.config check
 
 On a new installation, `start` creates `.env` from `.env.example`, a random PostgreSQL password in `secrets/postgres_password`, and random [Redis passwords](architecture.md#-redis-users) in `secrets/redis`; it never prints a password. It does not change these files once they exist, and `start` and `restart` create one that an update adds. It then builds the images and waits until the API is ready. For an older NVIDIA GPU, such as a GTX 1050 Ti or another GTX 10 series card, add `--legacy-gpu`, or set `WORKER_GPU_BUILD=legacy` in `.env`; see [`WORKER_GPU_BUILD`](configuration.md). After changing `.env`, run `docker compose up -d` to apply it.
 
-The `check` command validates `.env` and the secrets and prints the resolved configuration with secrets masked. With `--online`, it also tests the configured services with the real credentials; see [Checking the configuration](configuration.md#-checking-the-configuration). Container paths and service addresses are set in `docker-compose.yml`, so `.env` only holds your choices. See [Configuration](configuration.md).
+The `check` command validates `.env`, `server.env`, and the secrets and prints the resolved configuration with secrets masked. With `--online`, it also tests the configured services with the real credentials; see [Checking the configuration](configuration.md#-checking-the-configuration). Container paths and service addresses are set in `docker-compose.yml`, so `.env` only holds your choices. See [Configuration](configuration.md).
 
 The API is available at `http://localhost:8000` and its interactive OpenAPI documentation is at `http://localhost:8000/docs`.
 
@@ -49,13 +49,13 @@ In Windows PowerShell 5.1, type `curl.exe`: plain `curl` there is a different co
 
 `/health` answers while the API process runs. `/ready` also checks that Redis and the billing database can be reached, and answers `503` with the one that cannot.
 
-Do not commit `.env`, the `secrets` folder, or any machine-specific values.
+Do not commit `.env`, `server.env`, the `secrets` folder, or any machine-specific values.
 
 To update a running server, use `python scripts/server.py restart 5m`: it announces the restart to clients, builds while the current version keeps serving, and lets running jobs finish. `python scripts/server.py stop 10m` shuts the server down the same way. See [Planned restarts and shutdowns](architecture.md#-planned-restarts-and-shutdowns).
 
 ## 🧩 Setting up optional features
 
-The stack runs as above with every optional feature off: no sign-in, no billing, job files on this machine. Features such as HTTPS through a Cloudflare Tunnel, Google Play billing, or outsourcing to RunPod are turned on in `.env` and `secrets`; [Optional features](configuration.md#-optional-features) lists them, with what each needs. A guided setup does it step by step:
+The stack runs as above with every optional feature off: no sign-in, no billing, job files on this machine. Features such as HTTPS through a Cloudflare Tunnel, Google Play billing, or outsourcing to RunPod are turned on in `server.env` and `secrets`, and the tunnel and admin page also in `.env`; [Optional features](configuration.md#-optional-features) lists them, with what each needs. A guided setup does it step by step:
 
 ```shell
 python scripts/setup.py                   # what is on, then a menu
@@ -72,9 +72,9 @@ For a feature, it:
 4. **asks for the secrets** without showing them, or generates a random one where any value works, and writes them to `secrets`;
 5. **checks the result** with the server's own validation, and offers `check --online` for the external services.
 
-A setup that does not finish, because something is still missing or because you stop it with Ctrl+C, puts `.env` back as it was: a feature that was off is off again, and one you were changing keeps its previous settings. The secret files you gave stay for the next try, except one whose presence alone turns the feature on, such as `server_password`. What it set up first because the feature needs it, such as object storage for outsourcing, stays set up.
+A setup that does not finish, because something is still missing or because you stop it with Ctrl+C, puts `server.env` and `.env` back as they were: a feature that was off is off again, and one you were changing keeps its previous settings. The secret files you gave stay for the next try, except one whose presence alone turns the feature on, such as `server_password`. What it set up first because the feature needs it, such as object storage for outsourcing, stays set up.
 
-Apply the changes with `python scripts/server.py restart 1m`, or `start` when the stack is stopped: settings and secrets are read when the services start. The script needs only Python 3 and the docker CLI. It asks the server itself what the features are, after bringing the API image up to the code, which takes seconds when nothing changed, so it changes with the code. `status` names what each feature that is on still misses: a secret file by its place in `secrets`, a setting by its name in `.env`, or another problem. In a terminal it shows them in color; `NO_COLOR=1` turns colors off.
+Apply the changes with `python scripts/server.py restart 1m`, or `start` when the stack is stopped: settings and secrets are read when the services start. The script needs only Python 3 and the docker CLI. It asks the server itself what the features are, after bringing the API image up to the code, which takes seconds when nothing changed, so it changes with the code. `status` names what each feature that is on still misses: a secret file by its place in `secrets`, a setting by its name in `server.env`, or another problem. In a terminal it shows them in color; `NO_COLOR=1` turns colors off.
 
 ## 🔒 Password protection
 

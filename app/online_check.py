@@ -713,7 +713,9 @@ def run_checks(config) -> list[Result]:
         results.append(check_google_play(config))
     else:
         results.append(Result("Google", "skip", "BILLING_PROVIDER=none"))
-    if config.tunnel.enabled:
+    from app.config import tunnel_enabled
+
+    if tunnel_enabled(config):
         results.extend(check_tunnel(config))
     else:
         results.append(Result("Cloudflare Tunnel", "skip", "COMPOSE_PROFILES does not list cloudflare"))

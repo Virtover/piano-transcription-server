@@ -34,7 +34,7 @@ Each part works on one machine too, so each can be turned on and checked before 
 Move during a quiet hour; users cannot submit jobs from step 4 until step 8. The order keeps every balance and purchase:
 
 1. **Create the services**: a bucket for this server alone, a managed Redis, and a managed PostgreSQL. Check them against `requirements` as above.
-2. **Try job storage on one machine.** Set `JOB_STORAGE=s3` with the bucket's settings in `.env`, apply them during a quiet moment (`python scripts/server.py restart 5m`), and transcribe a link and an upload. The MIDI download now redirects to the bucket. Change it back later only when no job is queued.
+2. **Try job storage on one machine.** Set `JOB_STORAGE=s3` with the bucket's settings in `server.env`, apply them during a quiet moment (`python scripts/server.py restart 5m`), and transcribe a link and an upload. The MIDI download now redirects to the bucket. Change it back later only when no job is queued.
 3. **Prepare the cluster** as in [Kubernetes](kubernetes.md), steps 1 to 5, without applying yet. The database URL that goes into `secrets/database_url` there is the managed one; keep a copy of it in `secrets/managed_database_url` for step 6. That name is read by nothing else, so the Compose stack keeps its own database meanwhile.
 4. **Stop new jobs**, and let the running ones finish:
 

@@ -26,8 +26,8 @@ resources:
 # components:
 #   - components/admin-web
 
-# Operator choices, as in .env. Not committed: copy .env here, without
-# COMPOSE_PROFILES, and add REDIS_URL. A change rolls the pods out again.
+# The server's settings: a copy of server.env, which holds nothing of Docker
+# Compose's, with REDIS_URL added. Not committed. A change rolls the pods out.
 configMapGenerator:
   - name: settings
     envs:

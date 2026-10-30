@@ -1,6 +1,16 @@
 # Container wiring (fixed paths and service addresses) is set here.
-# Operator choices (limits, worker tuning, billing) go in .env.
+# The server's settings (limits, workers, features) go in server.env, the
+# same on every deployment; what Docker Compose itself reads (profiles, the
+# bind address, the database folder) goes in .env. Services get both, later
+# winning; scripts/server.py moves a line that is in the wrong one.
+x-settings: &settings
+  - path: .env
+    required: false
+  - path: server.env
+    required: false
+
 x-wiring: &wiring
+  DEPLOYMENT: compose
   # Each service signs in to Redis as the user `app`; see redis/users.acl.
   REDIS_URL: redis://app@redis:6379/0
   REDIS_PASSWORD_FILE: /run/redis/password
@@ -62,8 +72,7 @@ services:
       # API_BIND_ADDRESS=127.0.0.1 in .env when an HTTPS proxy on this machine
       # forwards to the API, so only the proxy can reach it.
       - "${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"
-    env_file:
-      - .env
+    env_file: *settings
     environment: *wiring
     volumes:
       - data:/data
@@ -96,8 +105,7 @@ services:
         # legacy builds for older GPUs such as the GTX 10 series; see
         # WORKER_GPU_BUILD in docs/configuration.md.
         GPU_BUILD: ${WORKER_GPU_BUILD:-current}
-    env_file:
-      - .env
+    env_file: *settings
     environment: *wiring
     volumes:
       - data:/data
@@ -132,8 +140,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    env_file:
-      - .env
+    env_file: *settings
     environment: *wiring
     volumes:
       - data:/data
@@ -163,8 +170,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    env_file:
-      - .env
+    env_file: *settings
     environment: *wiring
     volumes:
       - data:/data
@@ -194,8 +200,7 @@ services:
       context: .
       dockerfile: Dockerfile.api
     profiles: [admin]
-    env_file:
-      - .env
+    env_file: *settings
     environment:
       <<: *wiring
       REDIS_URL: redis://admin-${ADMIN_WEB_MODE:-disabled}@redis:6379/0

@@ -13,8 +13,9 @@ server itself (python -m app.config features --json), and what external
 services must provide from python -m app.config requirements, which states
 what is needed and why, never where a provider's console puts it: that
 changes, so this script needs no update when a provider does. Settings go to
-.env, keeping its comments; secrets are asked without showing them and
-written to ./secrets, and never printed.
+server.env, and the services Compose starts to COMPOSE_PROFILES in .env,
+keeping their comments; secrets are asked without showing them and written
+to ./secrets, and never printed.
 """
 
 import argparse
@@ -34,87 +35,22 @@ from typing import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs" / "configuration.md"
-ADDED_HEADER = "# --- Added by scripts/setup.py"
 WIDTH = 78
 
 
 def load_server_script():
-    """scripts/server.py, for the files a start creates."""
+    """scripts/server.py, for the files a start creates and how env files
+    are edited."""
     spec = importlib.util.spec_from_file_location("server_script", Path(__file__).with_name("server.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-# --- .env, edited in place ---------------------------------------------------------
-
-class EnvFile:
-    """.env as lines, so comments and order survive. A setting is changed on
-    its own line, or on its commented example line from .env.example, which
-    stays in its block; a new one goes at the end."""
-
-    def __init__(self, path: Path):
-        self.path = path
-        self.lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-
-    def _find(self, name: str, commented: bool) -> int | None:
-        pattern = re.compile(rf"^#\s?{re.escape(name)}=" if commented else rf"^{re.escape(name)}=")
-        return next((index for index, line in enumerate(self.lines) if pattern.match(line)), None)
-
-    def get(self, name: str) -> str | None:
-        index = self._find(name, commented=False)
-        if index is None:
-            return None
-        return _unquote(self.lines[index].split("=", 1)[1].strip())
-
-    def set(self, name: str, value: str) -> None:
-        line = f"{name}={_quote(value)}"
-        index = self._find(name, commented=False)
-        if index is None:
-            index = self._find(name, commented=True)
-        if index is not None:
-            self.lines[index] = line
-            return
-        if ADDED_HEADER not in self.lines:
-            self.lines += ["", ADDED_HEADER]
-        self.lines.append(line)
-
-    def unset(self, name: str) -> None:
-        """Comment the setting out, so its default applies again."""
-        index = self._find(name, commented=False)
-        if index is not None:
-            self.lines[index] = f"# {self.lines[index]}"
-
-    def profiles(self) -> list[str]:
-        return [profile.strip() for profile in (self.get("COMPOSE_PROFILES") or "").split(",") if profile.strip()]
-
-    def add_profile(self, profile: str) -> None:
-        profiles = self.profiles()
-        if profile not in profiles:
-            self.set("COMPOSE_PROFILES", ",".join([*profiles, profile]))
-
-    def remove_profile(self, profile: str) -> None:
-        profiles = [item for item in self.profiles() if item != profile]
-        if profiles:
-            self.set("COMPOSE_PROFILES", ",".join(profiles))
-        else:
-            self.unset("COMPOSE_PROFILES")
-
-    def save(self) -> None:
-        self.path.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
-
-
-def _quote(value: str) -> str:
-    # Compose and python-dotenv end a value at " #", and trim spaces.
-    if " #" in value or value != value.strip():
-        return "'" + value.replace("'", "\\'") + "'"
-    return value
-
-
-def _unquote(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-        return value[1:-1]
-    return value
+SERVER_SCRIPT = load_server_script()
+EnvFile = SERVER_SCRIPT.EnvFile
+ADDED_HEADER = SERVER_SCRIPT.ADDED_HEADER
+COMPOSE_ENV, SERVER_ENV = SERVER_SCRIPT.COMPOSE_ENV, SERVER_SCRIPT.SERVER_ENV
 
 
 # --- Descriptions, from docs/configuration.md --------------------------------------------
@@ -139,7 +75,7 @@ def _plain(markdown: str) -> str:
 # --- The server, asked through Docker ----------------------------------------------------
 
 def run_config(*arguments: str, capture: bool = True) -> subprocess.CompletedProcess:
-    """python -m app.config in a one-off API container, which reads .env and
+    """python -m app.config in a one-off API container, which reads .env, server.env, and
     ./secrets as the services do. The first run builds the API image."""
     command = ["docker", "compose", "run", "--rm", "--no-deps", "-T", "api", "python", "-m", "app.config", *arguments]
     return subprocess.run(command, cwd=ROOT, capture_output=capture, text=True)
@@ -260,7 +196,7 @@ class Missing:
                         f"  {style(secret['description'], 'dim')}")
         for name in self.settings:
             console.say(f"{indent}{style('missing setting', 'yellow')}      {style(name, 'bold')}"
-                        f"  {style('in .env', 'dim')}")
+                        f"  {style('in server.env', 'dim')}")
         for problem in self.problems:
             console.wrap(f"! {problem}", indent, "red")
 
@@ -353,7 +289,7 @@ class Setup:
         steps = [
             step for step, wanted in (
                 ("External services", bool(feature["requirement_sections"])),
-                ("Settings in .env", bool(feature["settings"])),
+                ("Settings in server.env", bool(feature["settings"])),
                 ("Secret files in ./secrets", bool(feature["secrets"])),
             ) if wanted
         ] + ["Check"]
@@ -361,22 +297,23 @@ class Setup:
 
         if "External services" in numbered and not self.external_services(feature, numbered["External services"]):
             return False
-        # From here on .env changes. A setup that does not finish puts it back,
-        # so the feature is not left half on.
-        env_path = self.root / ".env"
-        before = env_path.read_text(encoding="utf-8") if env_path.exists() else None
+        # From here on the env files change. A setup that does not finish puts
+        # them back, so the feature is not left half on.
+        before = self.env_files()
         switch_secret = feature["off"]["delete_secret"]
         switch_secret_existed = bool(switch_secret) and (self.secrets_dir / switch_secret).exists()
         try:
-            env = EnvFile(env_path)
-            if "Settings in .env" in numbered:
-                self.ask_settings(feature, env, numbered["Settings in .env"])
+            env = EnvFile(self.root / SERVER_ENV)
+            compose = EnvFile(self.root / COMPOSE_ENV)
+            if "Settings in server.env" in numbered:
+                self.ask_settings(feature, env, numbered["Settings in server.env"])
             for name, value in feature["turn_on"].items():
                 if name not in {setting["name"] for setting in feature["settings"]}:
                     env.set(name, value)
             for profile in feature["profiles"]:
-                env.add_profile(profile)
+                compose.add_profile(profile)
             env.save()
+            compose.save()
             if "Secret files in ./secrets" in numbered:
                 self.ask_secrets(feature, numbered["Secret files in ./secrets"])
             ready = self.verify(key, numbered["Check"])
@@ -387,21 +324,26 @@ class Setup:
             self.roll_back(feature, before, switch_secret if not switch_secret_existed else None)
         return ready
 
-    def roll_back(self, feature: dict, env_before: str | None, created_switch_secret: str | None) -> None:
-        """Put .env back as it was, and remove a secret file whose presence
-        alone would turn the feature on. Other secret files stay for the next
-        try: a key file by itself turns nothing on."""
-        env_path = self.root / ".env"
-        if env_before is None:
-            env_path.unlink(missing_ok=True)
-        else:
-            env_path.write_text(env_before, encoding="utf-8")
+    def env_files(self) -> dict[Path, str | None]:
+        """Both env files' text, to put back."""
+        paths = (self.root / SERVER_ENV, self.root / COMPOSE_ENV)
+        return {path: path.read_text(encoding="utf-8") if path.exists() else None for path in paths}
+
+    def roll_back(self, feature: dict, env_before: dict, created_switch_secret: str | None) -> None:
+        """Put the env files back as they were, and remove a secret file whose
+        presence alone would turn the feature on. Other secret files stay for
+        the next try: a key file by itself turns nothing on."""
+        for path, text in env_before.items():
+            if text is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(text, encoding="utf-8")
         if created_switch_secret:
             (self.secrets_dir / created_switch_secret).unlink(missing_ok=True)
         if feature["enabled"]:
-            message = f"{feature['title']} keeps its previous settings: .env is back as it was."
+            message = f"{feature['title']} keeps its previous settings: server.env and .env are back as they were."
         else:
-            message = f"{feature['title']} is off again: .env is back as it was."
+            message = f"{feature['title']} is off again: server.env and .env are back as they were."
         if created_switch_secret:
             message += f" secrets/{created_switch_secret} is removed: by itself it would turn the feature on."
         if any(secret["name"] != created_switch_secret for secret in feature["secrets"]):
@@ -491,7 +433,7 @@ class Setup:
     def ask_secrets(self, feature: dict, heading: str) -> None:
         say, wrap, style = self.console.say, self.console.wrap, self.style
         self.console.heading(heading)
-        wrap("Each is a file of its own, never shown on screen and never in .env.", "  ", "dim")
+        wrap("Each is a file of its own, never shown on screen and never in an env file.", "  ", "dim")
         self.secret_list(feature)
         for secret in feature["secrets"]:
             path = self.secrets_dir / secret["name"]
@@ -572,21 +514,22 @@ class Setup:
             return False
         if confirm and not self.console.yes(f"Turn {feature['title']} off?", default=False):
             return False
-        env = EnvFile(self.root / ".env")
+        env, compose = EnvFile(self.root / SERVER_ENV), EnvFile(self.root / COMPOSE_ENV)
         actions = feature["off"]
         for name, value in actions["set"].items():
             env.set(name, value)
         for name in actions["unset"]:
             env.unset(name)
         for profile in actions["remove_profiles"]:
-            env.remove_profile(profile)
+            compose.remove_profile(profile)
         env.save()
+        compose.save()
         secret = actions["delete_secret"]
         if secret and self.console.yes(f"Delete secrets/{secret}? It cannot be undone.", default=False):
             (self.secrets_dir / secret).unlink(missing_ok=True)
         elif secret:
             wrap(f"It stays on while secrets/{secret} exists; move the file away to turn it off.", "", "yellow")
-        self.console.say(style(f"{feature['title']} is off in .env.", "green")
+        self.console.say(style(f"{feature['title']} is off.", "green")
                          + " Apply it: python scripts/server.py restart 1m.")
         return True
 
@@ -613,9 +556,10 @@ class Setup:
 
 
 def prepare(console: Console, root: Path = ROOT) -> None:
-    """.env and the generated passwords, as a start creates them: the API
-    container that answers needs them."""
-    for message in load_server_script().prepare_files(root):
+    """.env, server.env, and the generated passwords, as a start creates
+    them, with every line in its file: the API container that answers needs
+    them."""
+    for message in SERVER_SCRIPT.prepare_files(root):
         console.say(message)
 
 
@@ -649,7 +593,7 @@ def main(arguments: list[str], setup: Setup | None = None) -> int:
 
 
 def _shown(value) -> str:
-    """A value as .env writes it."""
+    """A value as an env file writes it."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (list, dict)):
@@ -661,5 +605,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
     except KeyboardInterrupt:
-        print("\nStopped; .env keeps what was saved.")
+        print("\nStopped.")
         sys.exit(130)

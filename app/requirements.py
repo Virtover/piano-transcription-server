@@ -502,7 +502,9 @@ def google_sections(config) -> list[Section]:
 
 
 def tunnel_sections(config) -> list[Section]:
-    enabled = config.tunnel.enabled
+    from app.config import tunnel_enabled
+
+    enabled = tunnel_enabled(config)
     note = (
         "enabled (COMPOSE_PROFILES=cloudflare)"
         if enabled

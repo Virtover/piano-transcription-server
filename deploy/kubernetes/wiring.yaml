@@ -7,6 +7,7 @@ kind: ConfigMap
 metadata:
   name: wiring
 data:
+  DEPLOYMENT: kubernetes
   REDIS_PASSWORD_FILE: /run/redis/password
   DATA_DIR: /data
   # Several machines share no data volume, and no folder outlives a pod.

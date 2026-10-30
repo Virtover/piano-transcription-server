@@ -32,7 +32,7 @@ See the **Google Play** section of its output: the API, the service account and 
 
    The key gives access to your app's orders: never commit, email, or paste it. Compose mounts `./secrets` at `/run/secrets`, so the containers read `/run/secrets/google_play_service_account.json`. Older setups that use `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` keep working, with a deprecation warning.
 
-3. **Configure `.env`.** Map every product ID to the transcription minutes it buys:
+3. **Configure `server.env`.** Map every product ID to the transcription minutes it buys:
 
    ```env
    GOOGLE_PLAY_PACKAGE_NAME=com.example.pianoweave

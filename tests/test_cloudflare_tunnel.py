@@ -81,11 +81,13 @@ def test_misspelled_tunnel_setting_is_reported(tmp_path, caplog):
 def test_open_server_behind_the_tunnel_is_warned_about(tmp_path):
     settings = load(tmp_path, "COMPOSE_PROFILES=cloudflare\n", token="eyJ")
 
-    warnings = configuration_warnings(settings, {})
+    warnings = configuration_warnings(settings, {"API_BIND_ADDRESS": "0.0.0.0"})
 
     assert len(warnings) == 2
     assert "neither a password nor sign-in" in warnings[0]
     assert "API_BIND_ADDRESS=127.0.0.1" in warnings[1]
+    # Unset, Compose publishes on 127.0.0.1.
+    assert not any("Port 8000" in warning for warning in configuration_warnings(settings, {}))
 
 
 def test_protected_server_behind_the_tunnel_has_no_warnings(tmp_path):

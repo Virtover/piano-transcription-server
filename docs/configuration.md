@@ -2,10 +2,18 @@
 
 ## 🧭 How configuration works
 
-* **Choices go in `.env`.** Start from [.env.example](../.env.example), which lists the values operators usually change. Every setting is described below.
-* **Wiring goes in `docker-compose.yml`.** Container paths and service addresses (`REDIS_URL`, `DATA_DIR`, `DATABASE_PATH`, `DATABASE_BACKUP_DIR`) are fixed in the Compose `environment:` sections. The code defaults suit local development outside Docker.
-* **Secrets are files in `./secrets`.** Compose mounts the folder read-only at `/run/secrets`. The file name is the setting name. Secrets are never read from `.env` or the environment, and never appear in logs or error messages. See [Secrets](#-secrets).
-* **The process environment overrides `.env`.** Empty values count as unset.
+Each place holds one kind of thing, so the server's settings are the same on every deployment, and what belongs to Docker Compose or to Kubernetes stays with it:
+
+| Place | Holds | Read by |
+| --- | --- | --- |
+| `server.env`, from [server.env.example](../server.env.example) | **The server's settings**: limits, workers, the database's backups, and the optional features. Every setting below unless it says otherwise. | the server, on every deployment |
+| `.env`, from [.env.example](../.env.example) | **What Docker Compose itself reads**: `COMPOSE_PROFILES`, `API_BIND_ADDRESS`, `POSTGRES_DATA_LOCATION`, `WORKER_GPU_BUILD` | Docker Compose |
+| `docker-compose.yml`, `deploy/kubernetes/wiring.yaml` | **Wiring**: container paths and service addresses (`REDIS_URL`, `DATA_DIR`, `DATABASE_PATH`, `DATABASE_BACKUP_DIR`, `DEPLOYMENT`), fixed per deployment. The code defaults suit local development outside containers. | the server |
+| `deploy/kubernetes/` | **Kubernetes only**: images, replicas, scaling, and `settings.env`, a copy of `server.env` | Kubernetes |
+| `./secrets` | **Secrets**, one file each, mounted read-only at `/run/secrets`. Never read from an env file or the environment, and never in logs or error messages. See [Secrets](#-secrets). | the server |
+
+* **A line in the wrong file is moved.** `python scripts/server.py start`, `restart`, and `restore`, and `python scripts/setup.py`, put each line in its file. A `.env` from before `server.env` existed, which held everything, is split into both on the first start, with its values; the old file is kept as `.env.before-split`. Until then, Compose reads both files, so nothing stops working.
+* **The process environment overrides both files**, and `server.env` overrides `.env`. Empty values count as unset.
 
 All settings are validated when a service starts. An invalid value stops the service with a message that names the variable. A variable that starts with `WORKER_`, `BILLING_`, `OUTSOURCE_`, `STORAGE_`, `RUNPOD_`, `GOOGLE_PLAY_`, `CLOUDFLARE_`, `OFFSITE_`, or `ERROR_REPORT_` but is not a known setting is reported as a warning with the closest known name, for example `Unknown setting WORKER_BATCHSIZE; did you mean WORKER_BATCH_SIZE?`.
 
@@ -35,7 +43,7 @@ A basic server needs no setting: `python scripts/server.py start` runs it with e
 docker compose run --rm api python -m app.config check
 ```
 
-The command validates everything, prints the resolved configuration with secrets masked, and exits with code `1` on errors. Outside Docker, run `python -m app.config check --env-file .env --secrets-dir secrets`.
+The command validates everything, prints the resolved configuration with secrets masked, and exits with code `1` on errors, and it says which lines are in the wrong one of the two files. Outside Docker, run `python -m app.config check --secrets-dir secrets`, which reads `.env` and `server.env`; `--env-file` chooses other files.
 
 It works offline, so it cannot tell whether a key is *correct*. Add `--online` to test each configured service with the real credentials:
 
@@ -66,7 +74,7 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 * **Durations** use a number and a unit: `s`, `m`, `h`, `d`, or `w`, for example `2s`, `10m`, `1.5h`, `30d`. A plain number is rejected, so `600` cannot be mistaken for minutes.
 * **`auto` or a number:** `WORKER_THREADS`, `WORKER_BATCH_SIZE`, and `WORKER_MAX_CONCURRENCY` accept `auto` or a positive integer.
 * **Lists and mappings** are JSON on one line, for example `GOOGLE_OAUTH_CLIENT_IDS=["id-1","id-2"]`.
-* Comments go on their own lines in `.env`.
+* Comments go on their own lines in `.env` and `server.env`.
 
 ## 📋 Settings
 
@@ -266,6 +274,7 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 | --- | --- | --- | --- |
 | `REDIS_URL` | `redis://localhost:6379/0` | `redis://app@redis:6379/0` | Redis connection URL, with the Redis user the services sign in as. |
 | `REDIS_PASSWORD_FILE` | empty | `/run/redis/password` | The file with that user's password, from `secrets/redis/app`. Empty for a Redis without users, such as one for local development. See [Redis users](architecture.md#-redis-users). |
+| `DEPLOYMENT` | `local` | `compose` | Where the services run: `local` outside containers, `compose`, or `kubernetes` (set in `deploy/kubernetes/wiring.yaml`). Checks of one deployment apply only to it: Compose's profiles and the bind address only with Compose, and on Kubernetes the tunnel always counts as on, because `cloudflared` always runs there. |
 | `REDIS_CA_FILE` | empty | unset | For a `rediss://` `REDIS_URL` whose certificate is signed by the provider's own CA: that CA's certificate file. Empty trusts the public CAs. See [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). |
 | `DATA_DIR` | `/data` | `/data` | Shared directory for job files; with `JOB_STORAGE=s3`, for scratch files only. |
 | `DATABASE_URL` | `postgresql://billing@postgres:5432/billing` | same | Production PostgreSQL URL for balances, purchases, and reservations. Keep passwords in `secrets/database_url` (or use Compose's PostgreSQL password file). |
@@ -304,7 +313,7 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `offsite_backup_access_key` | Optional. Access key ID for the off-site backup bucket. See [Off-site copies](#off-site-copies). |
 | `offsite_backup_secret_key` | Optional. Secret access key for the off-site backup bucket. |
 | `server_password` | Optional. When present, every request except `/health` and `/ready` needs this password, as the `X-Server-Password` header or HTTP Basic auth with any user name. At least 12 characters; the API refuses to start otherwise. See [Password protection](setup.md#-password-protection). |
-| `postgres_password` | PostgreSQL password used by the API and workers. Mount it as `secrets/postgres_password`; never put it in `.env`. |
+| `postgres_password` | PostgreSQL password used by the API and workers. Mount it as `secrets/postgres_password`; never put it in an env file. |
 | `redis/operator`, `redis/app`, `redis/admin-read-only`, `redis/admin-read-write` | Redis passwords, one per [Redis user](architecture.md#-redis-users). `scripts/server.py` creates them; each service gets only its own. |
 | `admin-web/postgres-read-only`, `admin-web/postgres-read-write` | The passwords of the [admin web page's](administration.md#-admin-web-page) PostgreSQL roles, one per mode. `scripts/server.py` creates it, and the API gives the role its rights. |
 | `metrics_token` | Optional. Turns on `GET /metrics` for an autoscaler or Prometheus, which must send it as `Authorization: Bearer <token>`. Without it, `/metrics` answers `404`. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. See [Metrics for scaling](architecture.md#-metrics-for-scaling). |
@@ -312,7 +321,7 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 
 The Cloudflare tunnel token is in a folder of its own, `secrets/cloudflare/tunnel_token`, so that it can be hidden: anyone with it can receive the API's traffic. Besides `cloudflared`, only the API sees it, for `check`; the workers, which process untrusted media, have the folder covered by an empty one. `scripts/server.py` creates the empty folder when it is missing, because Docker cannot cover a folder that does not exist. The Redis passwords are in `secrets/redis` for the same reason: only the `redis` service sees the folder. See [HTTPS through a Cloudflare Tunnel](cloudflare-tunnel.md).
 
-Secrets are only read from these files: a variable with the same name in `.env` or the environment is ignored. Never commit the `secrets` folder.
+Secrets are only read from these files: a variable with the same name in an env file or the environment is ignored. Never commit the `secrets` folder.
 
 The services run as user ID `10001`, not root. On Linux, the secret files must be readable by that user: files created with the commands in these docs are, unless your `umask` is strict. If `check` reports a secret as missing although the file exists, run `sudo chown 10001 secrets/*`.
 
@@ -346,13 +355,13 @@ Old names keep working. Each logs one deprecation warning when a service starts.
 
 ### Migrating an existing deployment
 
-An existing `.env` keeps working without changes; you only see deprecation warnings. To move to the new format:
+An existing `.env` keeps working without changes; you only see deprecation warnings. The next `python scripts/server.py start` or `restart` splits it into `.env` and `server.env` by itself. To move to the new format:
 
 1. Rename `CLEANUP_INTERVAL_SECONDS=86400` to `CLEANUP_INTERVAL=1d`, and `WORKER_BATCH_TIMEOUT_SECONDS=2` to `WORKER_BATCH_TIMEOUT=2s`.
 2. Rename the service-account key in `secrets` to `google_play_service_account.json` and remove `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE`.
 3. Rename `OUTSOURCE_STORAGE_ENDPOINT`, `OUTSOURCE_STORAGE_BUCKET`, and `OUTSOURCE_STORAGE_REGION` to `STORAGE_ENDPOINT`, `STORAGE_BUCKET`, and `STORAGE_REGION`, and the secret files `outsource_storage_access_key` and `outsource_storage_secret_key` to `storage_access_key` and `storage_secret_key`. On the RunPod endpoint, `OUTSOURCE_STORAGE_ENDPOINT` keeps working; replace it with `STORAGE_ENDPOINT` whenever you like, but never set both.
 4. Rename the `BILLING_` settings of the database and its backups to `DATABASE_`, as the table above lists, `BILLING_JOB_DIAGNOSTICS_RETENTION` to `JOB_DIAGNOSTICS_RETENTION`, and the secret file `billing_database_url` to `database_url`. `BILLING_PROVIDER` and `BILLING_PRODUCTS` keep their names: they are about billing.
-5. Remove `REDIS_URL`, `DATA_DIR`, `DATABASE_URL`, and `DATABASE_PATH` from `.env`. Compose sets them now; values left in `.env` are overridden by Compose.
+5. Remove `REDIS_URL`, `DATA_DIR`, `DATABASE_URL`, and `DATABASE_PATH` from `.env` and `server.env`. Compose sets them now; values left there are overridden by Compose.
 6. Remove any inline comments after values.
 7. Run `docker compose run --rm api python -m app.config check`, then `docker compose up -d --build`.
 
@@ -521,7 +530,7 @@ The off-site history follows the same steps as the local one, decided from the c
    docker compose run --rm --no-deps api python -m app.backups keygen
    ```
 
-   It prints an `OFFSITE_BACKUP_RECIPIENT=age1...` line for `.env`, and the private key, `AGE-SECRET-KEY-...`. Save the private key in your password manager now. Do not put it in `.env` or `secrets`. A key pair from `age-keygen` works too.
+   It prints an `OFFSITE_BACKUP_RECIPIENT=age1...` line for `server.env`, and the private key, `AGE-SECRET-KEY-...`. Save the private key in your password manager now. Do not put it in an env file or `secrets`. A key pair from `age-keygen` works too.
 
 3. Save the storage keys as files in `secrets`:
 
@@ -539,7 +548,7 @@ The off-site history follows the same steps as the local one, decided from the c
    printf '%s' '<secret access key>' > secrets/offsite_backup_secret_key
    ```
 
-4. Add to `.env`:
+4. Add to `server.env`:
 
    ```env
    OFFSITE_BACKUP_ENDPOINT=https://<storage endpoint>
@@ -599,7 +608,7 @@ python scripts/server.py restore 2 --yes < key.txt
 rm key.txt
 ```
 
-On a new machine, copy `.env` and the `secrets/offsite_backup_*` files there first. Without this server's code, any S3 client and `age --decrypt -i key.txt` download and decrypt a backup too.
+On a new machine, copy `.env`, `server.env`, and the `secrets/offsite_backup_*` files there first. Without this server's code, any S3 client and `age --decrypt -i key.txt` download and decrypt a backup too.
 
 To only fetch a backup without restoring it, pipe the key into `docker compose run --rm --no-deps -T api python -m app.backups fetch latest`.
 

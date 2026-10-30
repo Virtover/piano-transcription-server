@@ -392,15 +392,25 @@ def test_start_stops_when_files_cannot_be_prepared(capsys):
 
 @pytest.fixture
 def checkout(tmp_path):
-    (tmp_path / ".env.example").write_text("MAX_ACTIVE_JOBS=50\n", encoding="utf-8")
+    (tmp_path / ".env.example").write_text("# Compose\n# COMPOSE_PROFILES=cloudflare\nAPI_BIND_ADDRESS=127.0.0.1\n",
+                                           encoding="utf-8")
+    (tmp_path / "server.env.example").write_text("# Limits\nMAX_ACTIVE_JOBS=50\n# OUTSOURCE_PROVIDER=runpod\n",
+                                                 encoding="utf-8")
     return tmp_path
 
 
 def test_new_installation_gets_env_and_password(checkout):
     created = server.prepare_files(checkout)
 
-    assert len(created) == 5
-    assert (checkout / ".env").read_text(encoding="utf-8") == "MAX_ACTIVE_JOBS=50\n"
+    assert len(created) == 6
+    assert (checkout / ".env").read_text(encoding="utf-8") == (checkout / ".env.example").read_text(encoding="utf-8")
+    assert (checkout / "server.env").read_text(encoding="utf-8") == (
+        (checkout / "server.env.example").read_text(encoding="utf-8")
+    )
+    assert created[:2] == [
+        "created .env from .env.example, for Docker Compose",
+        "created server.env from server.env.example: the server's settings",
+    ]
     passwords = [
         (checkout / "secrets" / name).read_text(encoding="utf-8")
         for name in ("postgres_password", "redis/operator", "redis/app", "redis/admin-read-only", "redis/admin-read-write", "admin-web/postgres-read-only", "admin-web/postgres-read-write")
@@ -410,13 +420,14 @@ def test_new_installation_gets_env_and_password(checkout):
         assert len(password) == 48 and password.isalnum()
         # Nothing prints a password.
         assert not any(password in message for message in created)
-    assert created[2] == "created random Redis passwords in secrets/redis: operator, app, admin-read-only, admin-read-write"
-    assert created[3] == "created random admin web page passwords in secrets/admin-web: postgres-read-only, postgres-read-write"
-    assert created[4] == "created the empty folder secrets/cloudflare, for a Cloudflare Tunnel's token"
+    assert created[3] == "created random Redis passwords in secrets/redis: operator, app, admin-read-only, admin-read-write"
+    assert created[4] == "created random admin web page passwords in secrets/admin-web: postgres-read-only, postgres-read-write"
+    assert created[5] == "created the empty folder secrets/cloudflare, for a Cloudflare Tunnel's token"
 
 
 def test_an_update_gets_the_missing_redis_passwords(checkout):
-    (checkout / ".env").write_text("MAX_ACTIVE_JOBS=5\n", encoding="utf-8")
+    (checkout / ".env").write_text("API_BIND_ADDRESS=127.0.0.1\n", encoding="utf-8")
+    (checkout / "server.env").write_text("MAX_ACTIVE_JOBS=5\n", encoding="utf-8")
     (checkout / "secrets" / "redis").mkdir(parents=True)
     (checkout / "secrets" / "postgres_password").write_text("chosen", encoding="utf-8")
     (checkout / "secrets" / "redis" / "operator").write_text("kept", encoding="utf-8")
@@ -489,7 +500,8 @@ def test_without_legacy_gpu_the_env_file_decides():
 
 
 def test_existing_files_are_never_changed(checkout):
-    (checkout / ".env").write_text("MAX_ACTIVE_JOBS=5\n", encoding="utf-8")
+    (checkout / ".env").write_text("API_BIND_ADDRESS=127.0.0.1\n", encoding="utf-8")
+    (checkout / "server.env").write_text("MAX_ACTIVE_JOBS=5\n", encoding="utf-8")
     (checkout / "secrets" / "redis").mkdir(parents=True)
     (checkout / "secrets" / "postgres_password").write_text("chosen", encoding="utf-8")
     (checkout / "secrets" / "admin-web").mkdir()
@@ -500,8 +512,78 @@ def test_existing_files_are_never_changed(checkout):
         (checkout / "secrets" / "admin-web" / name).write_text("chosen", encoding="utf-8")
 
     assert server.prepare_files(checkout) == []
-    assert (checkout / ".env").read_text(encoding="utf-8") == "MAX_ACTIVE_JOBS=5\n"
+    assert (checkout / "server.env").read_text(encoding="utf-8") == "MAX_ACTIVE_JOBS=5\n"
     assert (checkout / "secrets" / "postgres_password").read_text(encoding="utf-8") == "chosen"
+
+
+# --- .env and server.env ------------------------------------------------------------------
+
+def test_an_env_from_before_server_env_is_split_with_its_values(checkout):
+    old = "# my notes\nMAX_ACTIVE_JOBS=5\nCOMPOSE_PROFILES=cloudflare\nOUTSOURCE_PROVIDER=runpod\nAPI_BIND_ADDRESS=0.0.0.0\n"
+    (checkout / ".env").write_text(old, encoding="utf-8")
+
+    messages = server.separate_env_files(checkout)
+
+    assert "split .env into .env, for Docker Compose, and server.env" in messages[0]
+    assert (checkout / ".env.before-split").read_text(encoding="utf-8") == old
+    # Each file is its template, with the values in their places.
+    assert (checkout / ".env").read_text(encoding="utf-8") == "# Compose\nCOMPOSE_PROFILES=cloudflare\nAPI_BIND_ADDRESS=0.0.0.0\n"
+    assert (checkout / "server.env").read_text(encoding="utf-8") == "# Limits\nMAX_ACTIVE_JOBS=5\nOUTSOURCE_PROVIDER=runpod\n"
+
+
+def test_a_split_changes_no_value(checkout):
+    # The old file sets neither of the templates' active lines.
+    (checkout / ".env").write_text("OUTSOURCE_PROVIDER=runpod\n", encoding="utf-8")
+
+    server.separate_env_files(checkout)
+
+    assert (checkout / ".env").read_text(encoding="utf-8") == (
+        "# Compose\n# COMPOSE_PROFILES=cloudflare\n# API_BIND_ADDRESS=127.0.0.1\n"
+    )
+    assert (checkout / "server.env").read_text(encoding="utf-8") == (
+        "# Limits\n# MAX_ACTIVE_JOBS=50\nOUTSOURCE_PROVIDER=runpod\n"
+    )
+
+
+def test_a_line_in_the_wrong_file_is_moved(checkout):
+    (checkout / ".env").write_text("API_BIND_ADDRESS=127.0.0.1\nRESULT_RETENTION='2h'\n", encoding="utf-8")
+    (checkout / "server.env").write_text("MAX_ACTIVE_JOBS=5\nCOMPOSE_PROFILES=cloudflare,admin\n", encoding="utf-8")
+
+    messages = server.separate_env_files(checkout)
+
+    assert messages == [
+        "moved RESULT_RETENTION from .env to server.env: they are the server's settings",
+        "moved COMPOSE_PROFILES from server.env to .env: Docker Compose reads them",
+    ]
+    assert (checkout / ".env").read_text(encoding="utf-8") == (
+        "API_BIND_ADDRESS=127.0.0.1\n\n" + server.ADDED_HEADER + "\nCOMPOSE_PROFILES=cloudflare,admin\n"
+    )
+    # The line as it was, quotes and all.
+    assert "RESULT_RETENTION='2h'" in (checkout / "server.env").read_text(encoding="utf-8")
+    assert not (checkout / ".env.before-split").exists()
+
+
+def test_a_value_in_both_files_keeps_the_one_that_applies(checkout):
+    (checkout / ".env").write_text("MAX_ACTIVE_JOBS=5\n", encoding="utf-8")
+    (checkout / "server.env").write_text("MAX_ACTIVE_JOBS=9\n", encoding="utf-8")
+
+    server.separate_env_files(checkout)
+
+    assert (checkout / "server.env").read_text(encoding="utf-8") == "MAX_ACTIVE_JOBS=9\n"
+    assert (checkout / ".env").read_text(encoding="utf-8") == "# MAX_ACTIVE_JOBS=5  (moved: server.env sets it)\n"
+
+
+def test_files_in_their_places_are_left_alone(checkout):
+    (checkout / ".env").write_text("# mine\nAPI_BIND_ADDRESS=127.0.0.1\n", encoding="utf-8")
+    (checkout / "server.env").write_text("# mine\nMAX_ACTIVE_JOBS=5\n", encoding="utf-8")
+
+    assert server.separate_env_files(checkout) == []
+    assert (checkout / ".env").read_text(encoding="utf-8") == "# mine\nAPI_BIND_ADDRESS=127.0.0.1\n"
+
+
+def test_the_script_knows_what_compose_reads_as_the_server_does():
+    assert server.COMPOSE_ONLY_VARIABLES == config.COMPOSE_ONLY_VARIABLES
+    assert (server.COMPOSE_ENV, server.SERVER_ENV) == (config.COMPOSE_ENV_FILE, config.SERVER_ENV_FILE)
 
 
 def test_empty_folder_left_by_docker_becomes_the_password(checkout):

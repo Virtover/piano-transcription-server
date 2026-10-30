@@ -6,12 +6,12 @@ Piano Transcription Server: a FastAPI API, Dramatiq workers, and Redis, run with
 
 ```powershell
 .\.venv\Scripts\python -m pytest -q                              # all tests; no Docker, GPU, or credentials needed (.venv/bin/python on macOS/Linux)
-docker compose run --rm api python -m app.config check           # validate .env and secrets, offline
+docker compose run --rm api python -m app.config check           # validate server.env, .env, and secrets, offline
 docker compose run --rm api python -m app.config check --online  # also test storage, RunPod, Google Play for real
 docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents
 docker compose run --rm api python -m app.config features --json # the optional features: on or off, what each needs, what is missing
 python scripts/setup.py status                                  # the same for people; python scripts/setup.py <feature> sets one up
-docker compose up -d --build                                     # the stack; OUTSOURCE_PROVIDER in .env switches RunPod on
+docker compose up -d --build                                     # the stack; OUTSOURCE_PROVIDER in server.env switches RunPod on
 python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start (also first start), status, cancel
 python scripts/server.py restore 2                               # billing database from a backup: latest, a name, or Nth newest; --from local, --fallback
 python scripts/admin.py status                                  # live picture; also jobs, user, users find, billing, limits, audit
@@ -44,7 +44,7 @@ python scripts/admin.py status                                  # live picture; 
 
 ## Conventions
 
-- **Secrets are files** in `secrets/` (mounted at `/run/secrets`), never `.env` values. `.env` holds only choices; container paths are in `docker-compose.yml`.
+- **Secrets are files** in `secrets/` (mounted at `/run/secrets`), never env file values. **Choices are in two files:** `server.env`, the server's settings, the same on every deployment, and `.env`, only what Docker Compose itself reads (`COMPOSE_ONLY_VARIABLES` in `app/config.py`). Container paths are wiring, in `docker-compose.yml` and `deploy/kubernetes/wiring.yaml`. A check that applies to one deployment is gated on `DEPLOYMENT` (`uses_compose_profiles`, `tunnel_enabled`).
 - **Every setting is documented** in `docs/configuration.md`; a test fails otherwise. Durations use units (`30s`, `2m`, `1d`).
 - **An optional feature is a row of `FEATURES`** in `app/features.py`: its switch, needs, exclusions, settings, and secrets. Add a rule there, not in `validate_settings`, and give the feature a block in `.env.example` and a row in "Optional features" in `docs/configuration.md`; tests keep the three in step.
 - **Docs and skills describe only this project.** What a provider must offer lives in `app/requirements.py`, stated as an intent with its reason ("signed links must work from any IP address"), with values calculated from settings and code. Never add provider menu paths or setting names to docs or skills: they go stale. Where a provider's API can read a setting, verify it in `app/online_check.py`.

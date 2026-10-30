@@ -54,7 +54,7 @@ DRAIN_INTERVAL = 5
 ALL_PROFILES = ["*"]
 # docker-compose.yml passes it to Dockerfile.worker as GPU_BUILD.
 GPU_BUILD_VARIABLE = "WORKER_GPU_BUILD"
-OUTSOURCE_NOTE = "--outsource is no longer needed: OUTSOURCE_PROVIDER in .env turns outsourcing on or off"
+OUTSOURCE_NOTE = "--outsource is no longer needed: OUTSOURCE_PROVIDER in server.env turns outsourcing on or off"
 # Everything that uses the billing database; PostgreSQL keeps running.
 BILLING_SERVICES = ["api", "worker", "remote-worker", "cleanup"]
 # The last line of `python -m app.backups fetch`.
@@ -98,6 +98,155 @@ def remaining_text(seconds: float) -> str:
     return f"{minutes} m {seconds} s" if minutes else f"{seconds} s"
 
 
+# The variables Docker Compose itself reads, which go in .env; everything
+# else is the server's and goes in server.env. COMPOSE_ONLY_VARIABLES in
+# app/config.py, which a test compares.
+COMPOSE_ONLY_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD",
+                          "COMPOSE_PROFILES"}
+COMPOSE_ENV, SERVER_ENV = ".env", "server.env"
+ADDED_HEADER = "# --- Added by scripts/setup.py or scripts/server.py"
+ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
+SPLIT_BACKUP = ".env.before-split"
+
+
+# --- .env and server.env, edited in place ------------------------------------------
+
+class EnvFile:
+    """An env file as lines, so comments and order survive. A setting is
+    changed on its own line, or on its commented example line from the
+    template, which stays in its block; a new one goes at the end."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+    def _find(self, name: str, commented: bool) -> int | None:
+        pattern = re.compile(rf"^#\s?{re.escape(name)}=" if commented else rf"^{re.escape(name)}=")
+        return next((index for index, line in enumerate(self.lines) if pattern.match(line)), None)
+
+    def get(self, name: str) -> str | None:
+        index = self._find(name, commented=False)
+        if index is None:
+            return None
+        return _unquote(self.lines[index].split("=", 1)[1].strip())
+
+    def assignments(self) -> dict[str, int]:
+        """Each setting the file sets, by its line number."""
+        found = {}
+        for index, line in enumerate(self.lines):
+            match = ASSIGNMENT.match(line)
+            if match and match.group(1) not in found:
+                found[match.group(1)] = index
+        return found
+
+    def set(self, name: str, value: str) -> None:
+        self.set_line(name, f"{name}={_quote(value)}")
+
+    def set_line(self, name: str, line: str) -> None:
+        """Put a setting's whole line, as another file had it."""
+        index = self._find(name, commented=False)
+        if index is None:
+            index = self._find(name, commented=True)
+        if index is not None:
+            self.lines[index] = line
+            return
+        if ADDED_HEADER not in self.lines:
+            self.lines += ["", ADDED_HEADER]
+        self.lines.append(line)
+
+    def unset(self, name: str) -> None:
+        """Comment the setting out, so its default applies again."""
+        index = self._find(name, commented=False)
+        if index is not None:
+            self.lines[index] = f"# {self.lines[index]}"
+
+    def profiles(self) -> list[str]:
+        return [profile.strip() for profile in (self.get("COMPOSE_PROFILES") or "").split(",") if profile.strip()]
+
+    def add_profile(self, profile: str) -> None:
+        profiles = self.profiles()
+        if profile not in profiles:
+            self.set("COMPOSE_PROFILES", ",".join([*profiles, profile]))
+
+    def remove_profile(self, profile: str) -> None:
+        profiles = [item for item in self.profiles() if item != profile]
+        if profiles:
+            self.set("COMPOSE_PROFILES", ",".join(profiles))
+        else:
+            self.unset("COMPOSE_PROFILES")
+
+    def save(self) -> None:
+        self.path.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
+
+
+def _quote(value: str) -> str:
+    # Compose and python-dotenv end a value at " #", and trim spaces.
+    if " #" in value or value != value.strip():
+        return "'" + value.replace("'", "\\'") + "'"
+    return value
+
+
+def _unquote(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
+
+
+def separate_env_files(root: Path) -> list[str]:
+    """Put every line in its file: Docker Compose's in .env, the server's in
+    server.env, and say what moved. A .env from before server.env existed,
+    which held everything, is split into both templates with its values,
+    and kept as .env.before-split. A value set in both files keeps the one
+    that applies: server.env's for the server, .env's for Compose."""
+    compose, server = EnvFile(root / COMPOSE_ENV), EnvFile(root / SERVER_ENV)
+    first_split = not server.path.exists()
+    to_server = [name for name in compose.assignments() if name not in COMPOSE_ONLY_VARIABLES]
+    to_compose = [name for name in server.assignments() if name in COMPOSE_ONLY_VARIABLES]
+    if not to_server and not to_compose:
+        if first_split:
+            shutil.copyfile(root / "server.env.example", server.path)
+            return [f"created {SERVER_ENV} from server.env.example: the server's settings"]
+        return []
+    messages = []
+    if first_split:
+        shutil.copyfile(compose.path, root / SPLIT_BACKUP)
+        old = compose
+        compose = EnvFile(root / ".env.example")
+        compose.path = root / COMPOSE_ENV
+        server = EnvFile(root / "server.env.example")
+        server.path = root / SERVER_ENV
+        kept = old.assignments()
+        for name, index in kept.items():
+            (compose if name in COMPOSE_ONLY_VARIABLES else server).set_line(name, old.lines[index])
+        # The templates' own active lines that the old file did not set stay
+        # examples: a split changes no value.
+        for target in (compose, server):
+            for name, index in target.assignments().items():
+                if name not in kept:
+                    target.lines[index] = f"# {target.lines[index]}"
+        messages.append(
+            f"split .env into .env, for Docker Compose, and {SERVER_ENV}, for the server's settings, "
+            f"keeping your values; the old file is {SPLIT_BACKUP}"
+        )
+    else:
+        for source, target, names in ((compose, server, to_server), (server, compose, to_compose)):
+            for name in names:
+                index = source.assignments()[name]
+                if name in target.assignments():
+                    # The target's applies; keep the other as a comment.
+                    source.lines[index] = f"# {source.lines[index]}  (moved: {target.path.name} sets it)"
+                else:
+                    target.set_line(name, source.lines[index])
+                    del source.lines[index]
+        if to_server:
+            messages.append(f"moved {', '.join(to_server)} from .env to {SERVER_ENV}: they are the server's settings")
+        if to_compose:
+            messages.append(f"moved {', '.join(to_compose)} from {SERVER_ENV} to .env: Docker Compose reads them")
+    compose.save()
+    server.save()
+    return messages
+
+
 def prepare_files(root: Path) -> list[str]:
     """Create the files Compose needs before anything starts, and say what
     was created. Existing files are never changed."""
@@ -105,7 +254,9 @@ def prepare_files(root: Path) -> list[str]:
     env = root / ".env"
     if not env.exists():
         shutil.copyfile(root / ".env.example", env)
-        created.append("created .env from .env.example; change what you need, then restart")
+        created.append("created .env from .env.example, for Docker Compose")
+    # Also moves a line that is in the wrong one of the two files.
+    created += separate_env_files(root)
     if create_password(root, "secrets/postgres_password"):
         created.append("created a random PostgreSQL password in secrets/postgres_password")
     new_users = [name for name in REDIS_USERS if create_password(root, f"secrets/redis/{name}")]

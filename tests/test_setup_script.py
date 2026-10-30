@@ -49,10 +49,11 @@ def server(tmp_path):
     """A server folder with .env from .env.example, and the configuration
     commands answered by this code instead of a container."""
     shutil.copyfile(ROOT / ".env.example", tmp_path / ".env")
+    shutil.copyfile(ROOT / "server.env.example", tmp_path / "server.env")
     (tmp_path / "secrets").mkdir()
 
     def config(*arguments, capture=True):
-        settings = load_settings(str(tmp_path / ".env"), str(tmp_path / "secrets"))
+        settings = load_settings([str(tmp_path / ".env"), str(tmp_path / "server.env")], str(tmp_path / "secrets"))
         if arguments[0] == "features":
             output = json.dumps(describe_features(settings), default=str)
         elif arguments[0] == "requirements":
@@ -74,6 +75,11 @@ def make(server, answers=(), hidden=()):
 
 
 def env(server):
+    """The server's settings."""
+    return setup_script.EnvFile(server[0] / "server.env")
+
+
+def compose_env(server):
     return setup_script.EnvFile(server[0] / ".env")
 
 
@@ -172,13 +178,13 @@ def test_outsourcing_sets_up_object_storage_first(server):
 
 
 def test_an_unfinished_setup_says_what_is_missing(server):
-    before = (server[0] / ".env").read_text(encoding="utf-8")
+    before = (server[0] / "server.env").read_text(encoding="utf-8")
     setup, script = make(server, answers=["", "audio", "https://storage.example", ""], hidden=["", ""])
 
     assert setup.set_up("object_storage") is False
 
     # Turned back off: .env as it was before.
-    assert (server[0] / ".env").read_text(encoding="utf-8") == before
+    assert (server[0] / "server.env").read_text(encoding="utf-8") == before
     assert "Object storage is off again" in script.text
 
     # Each missing secret file by its place on the host, not in the container.
@@ -219,7 +225,7 @@ def test_reconfiguring_a_feature_that_then_fails_keeps_its_previous_settings(ser
     file.save()
     for name in ("storage_access_key", "storage_secret_key"):
         (server[0] / "secrets" / name).write_text("key", encoding="utf-8")
-    before = (server[0] / ".env").read_text(encoding="utf-8")
+    before = (server[0] / "server.env").read_text(encoding="utf-8")
     # A new bucket, then the secret files deleted meanwhile: not ready.
     setup, script = make(server, answers=["", "other-bucket", "", "", "n", "n"], hidden=["", ""])
     original = setup.ask_secrets
@@ -233,12 +239,12 @@ def test_reconfiguring_a_feature_that_then_fails_keeps_its_previous_settings(ser
     setup.ask_secrets = lose_the_keys
 
     assert setup.set_up("object_storage") is False
-    assert (server[0] / ".env").read_text(encoding="utf-8") == before
+    assert (server[0] / "server.env").read_text(encoding="utf-8") == before
     assert "keeps its previous settings" in script.text
 
 
 def test_stopping_with_ctrl_c_turns_it_back_off(server):
-    before = (server[0] / ".env").read_text(encoding="utf-8")
+    before = (server[0] / "server.env").read_text(encoding="utf-8")
     setup, _ = make(server, answers=["", "audio", "https://storage.example", ""])
 
     def interrupted(prompt):
@@ -248,15 +254,15 @@ def test_stopping_with_ctrl_c_turns_it_back_off(server):
 
     with pytest.raises(KeyboardInterrupt):
         setup.set_up("object_storage")
-    assert (server[0] / ".env").read_text(encoding="utf-8") == before
+    assert (server[0] / "server.env").read_text(encoding="utf-8") == before
 
 
 def test_stopping_at_the_external_services_changes_nothing(server):
-    before = (server[0] / ".env").read_text(encoding="utf-8")
+    before = (server[0] / "server.env").read_text(encoding="utf-8")
     setup, _ = make(server, answers=["q"])
 
     assert setup.set_up("object_storage") is False
-    assert (server[0] / ".env").read_text(encoding="utf-8") == before
+    assert (server[0] / "server.env").read_text(encoding="utf-8") == before
 
 
 def test_a_generated_password(server):
@@ -283,7 +289,9 @@ def test_the_admin_page_offers_only_modes_that_turn_it_on(server):
 
     file = env(server)
     assert file.get("ADMIN_WEB_MODE") == "read-write"
-    assert file.get("COMPOSE_PROFILES") == "cloudflare,admin"
+    # The settings in server.env, the services to start in .env.
+    assert compose_env(server).get("COMPOSE_PROFILES") == "cloudflare,admin"
+    assert file.get("COMPOSE_PROFILES") is None
     assert "One of: read-only, read-write" in script.text
 
 

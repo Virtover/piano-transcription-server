@@ -102,7 +102,7 @@ duration, and worker settings.
 
 ## 🤖 Continuous integration
 
-GitHub Actions runs the tests on every push to `main` and every pull request ([.github/workflows/tests.yml](../.github/workflows/tests.yml)), on Linux with Python 3.12 and ffmpeg, from a clean checkout: no `.env`, no secrets. The model tests, which need the worker requirements and PyTorch, are skipped there. Run them locally after installing `requirements.worker.txt`.
+GitHub Actions runs the tests on every push to `main` and every pull request ([.github/workflows/tests.yml](../.github/workflows/tests.yml)), on Linux with Python 3.12 and ffmpeg, from a clean checkout: no `.env` or `server.env`, no secrets. The model tests, which need the worker requirements and PyTorch, are skipped there. Run them locally after installing `requirements.worker.txt`.
 
 A test that needs an optional dependency must skip without it: import the dependency with `pytest.importorskip` before anything that uses it, not with a plain `import` at the top.
 
@@ -124,7 +124,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_admin_script.py` | `scripts/admin.py`: the command it runs in the API container, no terminal for the container without one, and the user name the audit log gets. |
 | `test_admin_web.py` | The admin web page: Cloudflare Access tokens (signature, algorithm, issuer, audience, lifetime, allowed addresses, key rotation), every route refusing strangers, the security headers, read-only routes, recorded account views, lowering its own access and every way to misuse it, read-write changes (plan, single-use confirmation kept on the server, the same administrator, refused when anything changed, rate limit, credit cap, nothing irreversible), the page's code (no HTML parsing, nothing loaded from elsewhere, no accidental lowering), restoring it from the command line, its settings, its Compose service, and its online check. Its credentials were also checked against a real Redis and PostgreSQL. |
 | `test_redis_users.py` | Redis users: the rules in `redis/users.acl`, which services see which password, that every Redis client signs in, and the `check --online` probe. The rules themselves were checked against a real Redis, because fakeredis does not enforce them. |
-| `test_server_script.py` | `scripts/server.py` with a fake stack and clock: announce, build during the countdown, cancel on build failure or Ctrl+C, drain within the grace period, restart, stop every profile, start, and clear. |
+| `test_server_script.py` | `scripts/server.py` with a fake stack and clock: announce, build during the countdown, cancel on build failure or Ctrl+C, drain within the grace period, restart, stop every profile, start, and clear; and moving each line of `.env` and `server.env` to its file. |
 | `test_cloudflare_tunnel.py` | The optional Cloudflare Tunnel: `COMPOSE_PROFILES`, the token check, warnings for an open server, the `check --online` results and hints, the requirements, and the `cloudflared` service in `docker-compose.yml`. |
 | `test_requirements.py` | `requirements`: values calculated from the configuration, the RunPod CUDA version matching `Dockerfile.runpod`, and the text and JSON output. |
 | `test_job_diagnostics.py` | Job diagnostics records at each job state, survival after the Redis job expires, account deletion, pruning, and inclusion in backups. |
@@ -144,7 +144,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_kubernetes.py` | `deploy/kubernetes` against `docker-compose.yml`: images, commands, wiring, secret mounts, the tunnel token's isolation, the non-root user and hardening, and scaling on metrics the API reports. |
 | `test_copy_to.py` | `python -m app.backups copy-to`: the newest backup restored in one transaction, the password kept out of the command line, and refusals. |
 | `test_features.py` | The optional features' table: references, needs and exclusions, required settings and secrets per role, unused settings, `features --json`, and `.env.example` and the docs in step with it. |
-| `test_setup_script.py` | `scripts/setup.py`: editing `.env` in place, descriptions from the docs, setting features up with what they need, secrets never shown, what is missing named by its file or setting, colors only in a terminal, and turning features off. |
+| `test_setup_script.py` | `scripts/setup.py`: editing `server.env` and `.env` in place, descriptions from the docs, setting features up with what they need, secrets never shown, what is missing named by its file or setting, colors only in a terminal, and turning features off. |
 | `test_leader.py` | Which API replica leads: one at a time, handover on shutdown and after a crash, periodic tasks waiting for the lead, and startup recovery only when no other API runs. |
 | `test_batching.py` | Batch size rules (`auto` per GPU, clamping, CPU default) and splitting a batch in half on GPU out-of-memory. |
 | `test_gpu_batcher.py` | The real batcher and batch loop with a fake model that runs out of memory. Needs the worker image. |
