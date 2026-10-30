@@ -108,7 +108,7 @@ def job_time(billing, start: float, period: str, price_per_hour: float | None) -
         "remote_price_per_hour": price_per_hour,
         "remote_cost": remote_seconds / 3600 * price_per_hour if price_per_hour is not None else None,
         # How far back job records go.
-        "records_kept_seconds": settings.billing.job_diagnostics_retention,
+        "records_kept_seconds": settings.jobs.diagnostics_retention,
     }
 
 
@@ -187,5 +187,5 @@ def render_jobs(data: dict) -> None:
             print(f"  Estimated remote cost: {data['remote_cost']:.2f} at {price:g} per hour.")
     print(
         "  Run time is from start to finish, including the download, so it overstates the time a remote GPU is billed. "
-        f"Job records are kept for {data['records_kept_seconds'] / 86400:g} days (BILLING_JOB_DIAGNOSTICS_RETENTION)."
+        f"Job records are kept for {data['records_kept_seconds'] / 86400:g} days (JOB_DIAGNOSTICS_RETENTION)."
     )

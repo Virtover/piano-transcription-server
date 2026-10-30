@@ -102,7 +102,7 @@ def test_the_wiring_is_composes_with_the_choices_several_machines_need():
     assert wiring["data"]["REDIS_PASSWORD_FILE"] == COMPOSE["x-wiring"]["REDIS_PASSWORD_FILE"]
     assert wiring["data"]["DATA_DIR"] == COMPOSE["x-wiring"]["DATA_DIR"]
     assert wiring["data"]["JOB_STORAGE"] == "s3"
-    assert wiring["data"]["BILLING_BACKUPS"] == "provider"
+    assert wiring["data"]["DATABASE_BACKUPS"] == "provider"
     # Every value is a setting the server knows.
     assert set(wiring["data"]) <= set(config.known_variables())
 

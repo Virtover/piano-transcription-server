@@ -88,20 +88,20 @@ def test_two_features_needing_one_report_it_once(default_settings):
 
 def test_offsite_copies_exclude_provider_backups(default_settings):
     default_settings.offsite.bucket = "backups"
-    default_settings.billing.backups = "provider"
+    default_settings.database.backups = "provider"
 
     problems = validate_settings(default_settings, "api")
 
-    assert "OFFSITE_BACKUP_BUCKET copies the server's backups, which BILLING_BACKUPS=provider turns off" in problems
+    assert "OFFSITE_BACKUP_BUCKET copies the server's backups, which DATABASE_BACKUPS=provider turns off" in problems
 
 
 def test_provider_backups_need_a_managed_database(default_settings):
-    default_settings.billing.backups = "provider"
+    default_settings.database.backups = "provider"
 
-    assert any(problem.startswith("BILLING_BACKUPS=provider needs a managed database")
+    assert any(problem.startswith("DATABASE_BACKUPS=provider needs a managed database")
                for problem in validate_settings(default_settings, "api"))
 
-    default_settings.billing.database_url = "postgresql://billing@db.example.com/billing?sslmode=verify-full"
+    default_settings.database.url = "postgresql://billing@db.example.com/billing?sslmode=verify-full"
     assert validate_settings(default_settings, "api") == []
 
 
@@ -198,7 +198,7 @@ def test_env_example_has_a_block_for_every_feature():
     for feature in FEATURES:
         if feature.key == "provider_backups":
             # A choice of the billing database's block.
-            assert "# BILLING_BACKUPS=server" in example
+            assert "# DATABASE_BACKUPS=server" in example
             continue
         block = re.search(rf"^# --- {re.escape(feature.title)} -+$\n(.*?)(?=^# ---|\Z)", example, re.M | re.S)
         assert block, feature.title

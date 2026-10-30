@@ -5,8 +5,8 @@ x-wiring: &wiring
   REDIS_URL: redis://app@redis:6379/0
   REDIS_PASSWORD_FILE: /run/redis/password
   DATA_DIR: /data
-  BILLING_DATABASE_URL: postgresql://billing@postgres:5432/billing
-  BILLING_BACKUP_DIR: /billing/backups
+  DATABASE_URL: postgresql://billing@postgres:5432/billing
+  DATABASE_BACKUP_DIR: /billing/backups
 
 # Docker keeps container logs without limit by default, so a busy or failing
 # service could fill the disk. This keeps about 100 MB per container.
@@ -199,7 +199,7 @@ services:
     environment:
       <<: *wiring
       REDIS_URL: redis://admin-${ADMIN_WEB_MODE:-disabled}@redis:6379/0
-      BILLING_DATABASE_URL: postgresql://admin-${ADMIN_WEB_MODE:-disabled}@postgres:5432/billing
+      DATABASE_URL: postgresql://admin-${ADMIN_WEB_MODE:-disabled}@postgres:5432/billing
     volumes:
       - data:/data:ro
       - ./billing-data/backups:/billing/backups:ro

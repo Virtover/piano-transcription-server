@@ -17,7 +17,7 @@ def tools(monkeypatch):
 
 
 def url_file(tmp_path, url):
-    path = tmp_path / "managed_billing_database_url"
+    path = tmp_path / "managed_database_url"
     path.write_text(url + "\n", encoding="utf-8")
     return str(path)
 

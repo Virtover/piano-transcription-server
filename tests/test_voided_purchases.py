@@ -102,7 +102,7 @@ def test_deleted_accounts_purchase_is_marked_without_a_balance(billed):
     billing.delete_user("user")
 
     assert billing.void_purchase("token-1") is None
-    with sqlite3.connect(settings.billing.database_path) as connection:
+    with sqlite3.connect(settings.database.path) as connection:
         assert connection.execute("SELECT voided_at IS NOT NULL FROM purchases").fetchone() == (1,)
 
 
@@ -130,7 +130,7 @@ def test_free_minutes_come_once_the_debt_is_paid(billed):
     billing.void_purchase("token-1")
     assert billing.grant_free_minutes("user") == 0
 
-    with sqlite3.connect(settings.billing.database_path) as connection:
+    with sqlite3.connect(settings.database.path) as connection:
         connection.execute("UPDATE users SET minutes = 0 WHERE user_id = 'user'")
 
     assert billing.grant_free_minutes("user") == 5

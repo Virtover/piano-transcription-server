@@ -40,7 +40,7 @@ def test_ready_reports_billing_database_state(api_context, monkeypatch, tmp_path
     assert client.get("/ready").json() == {"status": "ready"}
 
     # A directory cannot be opened as a database.
-    settings.billing.database_path = str(tmp_path)
+    settings.database.path = str(tmp_path)
     response = client.get("/ready")
     assert response.status_code == 503
     assert response.json() == {"detail": "The billing database is unavailable"}

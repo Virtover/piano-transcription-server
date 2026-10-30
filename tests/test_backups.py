@@ -15,7 +15,7 @@ class StopLoop(BaseException):
 
 
 def backup_files(settings):
-    return sorted(Path(settings.billing.backup_dir).glob("billing-*.sqlite3"))
+    return sorted(Path(settings.database.backup_dir).glob("billing-*.sqlite3"))
 
 
 def test_backup_is_a_readable_copy_of_the_database(api_context):
@@ -94,11 +94,11 @@ def test_retention_limits_every_step_but_keeps_the_newest():
 
 def test_policy_comes_from_settings(api_context):
     _, settings, _ = api_context
-    settings.billing.backup_keep_all = "6h"
-    settings.billing.backup_keep_weekly = "0s"
-    settings.billing.backup_retention = "30d"
+    settings.database.backup_keep_all = "6h"
+    settings.database.backup_keep_weekly = "0s"
+    settings.database.backup_retention = "30d"
 
-    policy = RetentionPolicy.from_settings(settings.billing)
+    policy = RetentionPolicy.from_settings(settings.database)
 
     assert policy == RetentionPolicy(6 * HOUR, 2 * DAY, 14 * DAY, 0, 0, 30 * DAY)
     assert policy.longest() == 14 * DAY
@@ -106,11 +106,11 @@ def test_policy_comes_from_settings(api_context):
 
 def test_backup_run_prunes_by_policy(api_context):
     _, settings, _ = api_context
-    settings.billing.backup_keep_all = "1h"
-    settings.billing.backup_keep_hourly = "0s"
-    settings.billing.backup_keep_daily = "0s"
-    settings.billing.backup_keep_weekly = "0s"
-    backup_dir = Path(settings.billing.backup_dir)
+    settings.database.backup_keep_all = "1h"
+    settings.database.backup_keep_hourly = "0s"
+    settings.database.backup_keep_daily = "0s"
+    settings.database.backup_keep_weekly = "0s"
+    backup_dir = Path(settings.database.backup_dir)
     backup_dir.mkdir(parents=True)
     now = int(time.time())
     expired = backup_dir / f"billing-{now - 2 * HOUR}.sqlite3"
@@ -152,7 +152,7 @@ def test_prune_handles_missing_directory(tmp_path):
 
 def test_backup_loop_uses_configured_interval(api_context, monkeypatch):
     _, settings, _ = api_context
-    settings.billing.backup_interval = "15m"
+    settings.database.backup_interval = "15m"
     sleeps = []
 
     def fake_sleep(seconds):
@@ -183,12 +183,12 @@ def test_backup_loop_survives_backup_errors(api_context, monkeypatch):
 def test_backup_defaults(api_context):
     _, settings, _ = api_context
 
-    assert settings.billing.backup_interval == 15 * 60
-    assert RetentionPolicy.from_settings(settings.billing) == DEFAULT_POLICY
-    assert settings.billing.backup_retention is None
+    assert settings.database.backup_interval == 15 * 60
+    assert RetentionPolicy.from_settings(settings.database) == DEFAULT_POLICY
+    assert settings.database.backup_retention is None
 
 
-@pytest.mark.parametrize("line", ["BILLING_BACKUP_RETENTION=forever", "BILLING_BACKUP_KEEP_DAILY=-1d"])
+@pytest.mark.parametrize("line", ["DATABASE_BACKUP_RETENTION=forever", "DATABASE_BACKUP_KEEP_DAILY=-1d"])
 def test_invalid_backup_setting_fails_at_load(tmp_path, line):
     env_file = tmp_path / ".env"
     env_file.write_text(line + "\n")
@@ -217,7 +217,7 @@ def test_backup_that_fails_its_check_leaves_no_file(api_context, monkeypatch):
     with pytest.raises(sqlite3.DatabaseError, match="integrity check"):
         main.run_billing_backup()
 
-    assert list(Path(settings.billing.backup_dir).iterdir()) == []
+    assert list(Path(settings.database.backup_dir).iterdir()) == []
 
 
 # --- PostgreSQL ----------------------------------------------------------------
@@ -299,7 +299,7 @@ def test_database_newer_than_every_backup_stops_the_api(api_context):
     from app.billing import LEDGER_SINCE_KEY
 
     _, settings, billing = api_context
-    backups_dir = Path(settings.billing.backup_dir)
+    backups_dir = Path(settings.database.backup_dir)
     backups_dir.mkdir()
     (backups_dir / "billing-1000.dump").write_bytes(b"PGDMP")
     billing.set_state(LEDGER_SINCE_KEY, "2000")
@@ -320,7 +320,7 @@ def test_database_older_than_its_backups_is_accepted(api_context, files, created
     from app.billing import LEDGER_SINCE_KEY
 
     _, settings, billing = api_context
-    backups_dir = Path(settings.billing.backup_dir)
+    backups_dir = Path(settings.database.backup_dir)
     backups_dir.mkdir()
     for name in files:
         (backups_dir / name).write_bytes(b"x")

@@ -149,8 +149,8 @@ Each user's password is a file in `secrets/redis`, which `scripts/server.py star
 The Compose stack runs Redis and PostgreSQL itself. Several machines need them as services they all reach, usually managed ones; the server then connects by URL alone, and `python -m app.config requirements` lists what each service must provide when its URL leads outside the stack.
 
 * **Redis:** a `rediss://` `REDIS_URL` encrypts the connection. A provider whose certificates its own CA signs needs that CA's file in `REDIS_CA_FILE`. `redis/start.sh` does not run there: create the users of `redis/users.acl` at the provider, or at least the services' user, which must not change the configuration. `check --online` confirms that Redis refuses strangers, and accepts a provider that removed `CONFIG` altogether. Redis must never evict keys, because queued jobs exist only there.
-* **PostgreSQL:** the URL in `secrets/billing_database_url` carries the TLS options, for example `postgresql://billing:<password>@db.example.com:5432/billing?sslmode=verify-full&sslrootcert=/run/secrets/postgres_ca.crt`, with the provider's CA file next to the other secrets. The server opens a connection per request and per job, so the database must allow one per request thread; a pooler in transaction mode works, because every lock the server takes lasts one transaction.
-* **Backups:** the API's pg_dump reads servers of its own major version and older. With a provider that keeps point-in-time backups, `BILLING_BACKUPS=provider` leaves backups to it and the server makes none; `check` warns as a reminder. Off-site copies need the server's backups, so they cannot be on then.
+* **PostgreSQL:** the URL in `secrets/database_url` carries the TLS options, for example `postgresql://billing:<password>@db.example.com:5432/billing?sslmode=verify-full&sslrootcert=/run/secrets/postgres_ca.crt`, with the provider's CA file next to the other secrets. The server opens a connection per request and per job, so the database must allow one per request thread; a pooler in transaction mode works, because every lock the server takes lasts one transaction.
+* **Backups:** the API's pg_dump reads servers of its own major version and older. With a provider that keeps point-in-time backups, `DATABASE_BACKUPS=provider` leaves backups to it and the server makes none; `check` warns as a reminder. Off-site copies need the server's backups, so they cannot be on then.
 
 `check` warns when either URL leads outside the stack without TLS. A Redis failover with asynchronous replicas can lose the last second of writes: a job queued in it stays queued until the next full restart sends it again.
 
@@ -163,7 +163,7 @@ Redis job state disappears `RESULT_RETENTION` after a job ends, so each job also
 * status, the full error (the type, message, and a failed command's output; users only see a short message), backend, whether the job was outsourced, and why it was last moved between backends,
 * times queued, first started, first finished, and last updated (Unix seconds).
 
-Records older than `BILLING_JOB_DIAGNOSTICS_RETENTION` (default `30d`) are deleted before each backup. Deleting an account deletes its records. Writing a record never fails a job; errors are logged.
+Records older than `JOB_DIAGNOSTICS_RETENTION` (default `30d`) are deleted before each backup. Deleting an account deletes its records. Writing a record never fails a job; errors are logged.
 
 To look at recent failures, use `python -m app.admin jobs --failed` and `jobs show <job>`; see [Administration](administration.md#-jobs). A backup copy can also be queried directly:
 

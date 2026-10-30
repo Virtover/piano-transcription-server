@@ -266,7 +266,7 @@ Some records are kept without personal data:
 * Purchases keep the product, order ID, purchase token, and minutes, but no user. This keeps refunds and accounting possible and stops the same purchase from being credited twice.
 * When free minutes are enabled, a SHA-256 hash of the Google account ID and the time of the last free grant are kept until the free-minute period ends. A deleted and recreated account therefore cannot get free minutes early. The record is removed when the period ends or when the user signs in again.
 
-Billing backups, including off-site copies, still contain the deleted data until they are deleted: after 8 weeks with the default retention steps, or `BILLING_BACKUP_RETENTION` if it is set. See [Configuration](configuration.md#-billing-database-backups).
+Billing backups, including off-site copies, still contain the deleted data until they are deleted: after 8 weeks with the default retention steps, or `DATABASE_BACKUP_RETENTION` if it is set. See [Configuration](configuration.md#-billing-database-backups).
 
 The endpoint returns `401` without a valid token and `409` when billing is disabled, because there are no accounts then.
 

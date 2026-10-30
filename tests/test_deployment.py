@@ -176,8 +176,8 @@ def test_every_service_rotates_its_logs():
 @pytest.fixture
 def directories(default_settings, tmp_path):
     default_settings.service.data_dir = str(tmp_path / "data")
-    default_settings.billing.database_path = str(tmp_path / "billing" / "billing.sqlite3")
-    default_settings.billing.backup_dir = str(tmp_path / "billing" / "backups")
+    default_settings.database.path = str(tmp_path / "billing" / "billing.sqlite3")
+    default_settings.database.backup_dir = str(tmp_path / "billing" / "backups")
     for directory in ("data", "billing", "billing/backups"):
         (tmp_path / directory).mkdir()
     return default_settings

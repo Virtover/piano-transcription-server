@@ -17,7 +17,7 @@ def auth(token):
 
 
 def rows(settings, query, *params):
-    with sqlite3.connect(settings.billing.database_path) as connection:
+    with sqlite3.connect(settings.database.path) as connection:
         return connection.execute(query, params).fetchall()
 
 
@@ -101,7 +101,7 @@ def test_deleted_account_gets_free_minutes_after_period(api_context):
     client, settings, billing = api_context
     enable_billing(settings, free_minutes=5)
     client.get("/api/billing/balance", headers=auth("owner"))
-    with sqlite3.connect(settings.billing.database_path) as connection:
+    with sqlite3.connect(settings.database.path) as connection:
         connection.execute(
             "UPDATE users SET free_grant_at = ? WHERE user_id = 'owner'",
             (int(time.time()) - 2 * 24 * 60 * 60,),

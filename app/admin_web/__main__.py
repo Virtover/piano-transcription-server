@@ -56,7 +56,7 @@ def least_privilege_problems(mode: str, redis=None, billing=None) -> list[str]:
         with closing(billing._connect()) as connection:
             try:
                 connection.execute(statement)
-                problems.append(f"its database role may run {statement!r}; BILLING_DATABASE_URL must name the role admin-{mode}")
+                problems.append(f"its database role may run {statement!r}; DATABASE_URL must name the role admin-{mode}")
             except Exception as error:
                 if "permission denied" not in str(error).lower():
                     raise

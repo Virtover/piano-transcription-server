@@ -61,8 +61,8 @@ spec:
               readOnly: true
             # The URL of its PostgreSQL role, with password and TLS options.
             - name: admin
-              mountPath: /run/secrets/billing_database_url
-              subPath: billing_database_url
+              mountPath: /run/secrets/database_url
+              subPath: database_url
               readOnly: true
       volumes:
         - name: tmp

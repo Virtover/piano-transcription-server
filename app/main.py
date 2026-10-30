@@ -52,7 +52,7 @@ def run_billing_backup() -> None:
 
 
 def backup_billing_database(leader: Leadership | None = None) -> None:
-    if settings.billing.backups == "provider":
+    if settings.database.backups == "provider":
         return
     while True:
         wait_for_lead(leader)
@@ -60,14 +60,14 @@ def backup_billing_database(leader: Leadership | None = None) -> None:
             run_billing_backup()
         except Exception:
             logger.exception("Could not back up billing database")
-        time.sleep(settings.billing.backup_interval)
+        time.sleep(settings.database.backup_interval)
 
 
 def monitor_backup_health(leader: Leadership | None = None) -> None:
     """Warn when configured off-site backups fail or stop advancing."""
-    if not settings.offsite.enabled or settings.billing.backups == "provider":
+    if not settings.offsite.enabled or settings.database.backups == "provider":
         return
-    interval = settings.billing.backup_interval
+    interval = settings.database.backup_interval
     while True:
         time.sleep(interval)
         wait_for_lead(leader)
@@ -212,7 +212,7 @@ async def security_headers(request: Request, call_next):
 def sync_billing_catalog() -> None:
     ensure_valid("api")
     # Before anything reads or changes billing, and before the next backup.
-    problem = backups.replaced_database_problem(Billing(), settings.billing.backup_dir)
+    problem = backups.replaced_database_problem(Billing(), settings.database.backup_dir)
     if problem:
         raise RuntimeError(problem)
     error_report.install("api")

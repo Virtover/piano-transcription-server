@@ -65,7 +65,7 @@ def test_what_runs_outside_the_stack(url, elsewhere):
 
 def test_check_warns_about_unencrypted_services_elsewhere(default_settings):
     default_settings.service.redis_url = "redis://app@redis.example.com:6379/0"
-    default_settings.billing.database_url = "postgresql://billing@db.example.com/billing"
+    default_settings.database.url = "postgresql://billing@db.example.com/billing"
 
     warnings = configuration_warnings(default_settings, {})
 
@@ -77,13 +77,13 @@ def test_check_is_quiet_about_encrypted_and_local_services(default_settings):
     assert not any("TLS" in warning for warning in configuration_warnings(default_settings, {}))
 
     default_settings.service.redis_url = "rediss://app@redis.example.com:6380/0"
-    default_settings.billing.database_url = "postgresql://billing@db.example.com/billing?sslmode=verify-full"
+    default_settings.database.url = "postgresql://billing@db.example.com/billing?sslmode=verify-full"
 
     assert not any("TLS" in warning for warning in configuration_warnings(default_settings, {}))
 
 
 def test_the_database_url_secret_is_the_one_checked(default_settings):
-    default_settings.secrets.billing_database_url = "postgresql://billing:pw@db.example.com/billing?sslmode=require"
+    default_settings.secrets.database_url = "postgresql://billing:pw@db.example.com/billing?sslmode=require"
 
     assert not any("TLS" in warning for warning in configuration_warnings(default_settings, {}))
 
@@ -137,16 +137,16 @@ def test_another_config_error_fails(default_settings, tmp_path):
 # --- Backups off --------------------------------------------------------------------------
 
 def test_backups_are_the_servers_by_default(default_settings):
-    assert default_settings.billing.backups == "server"
+    assert default_settings.database.backups == "server"
 
 
 def test_the_interval_must_be_positive(default_settings):
     with pytest.raises(ValueError):
-        default_settings.billing.backup_interval = "0s"
+        default_settings.database.backup_interval = "0s"
 
 
 def test_the_server_makes_no_backups_when_the_provider_does(default_settings, monkeypatch):
-    default_settings.billing.backups = "provider"
+    default_settings.database.backups = "provider"
     monkeypatch.setattr(main, "run_billing_backup", lambda: pytest.fail("backed up"))
     monkeypatch.setattr(main.time, "sleep", lambda seconds: pytest.fail("waited"))
 
@@ -154,17 +154,17 @@ def test_the_server_makes_no_backups_when_the_provider_does(default_settings, mo
 
 
 def test_check_reminds_that_the_provider_must_back_up(default_settings):
-    default_settings.billing.backups = "provider"
+    default_settings.database.backups = "provider"
 
-    assert any("BILLING_BACKUPS=provider" in warning for warning in configuration_warnings(default_settings, {}))
+    assert any("DATABASE_BACKUPS=provider" in warning for warning in configuration_warnings(default_settings, {}))
 
 
 def test_offsite_copies_need_the_backups(default_settings):
-    default_settings.billing.backups = "provider"
+    default_settings.database.backups = "provider"
 
     default_settings.offsite.bucket = "backups"
 
-    assert "OFFSITE_BACKUP_BUCKET copies the server's backups, which BILLING_BACKUPS=provider turns off" in (
+    assert "OFFSITE_BACKUP_BUCKET copies the server's backups, which DATABASE_BACKUPS=provider turns off" in (
         validate_settings(default_settings, "api")
     )
 
@@ -183,7 +183,7 @@ def test_requirements_for_the_compose_stack_need_no_managed_service(default_sett
 
 def test_requirements_for_managed_services(default_settings):
     default_settings.service.redis_url = "rediss://app@redis.example.com:6380/0"
-    default_settings.billing.database_url = "postgresql://billing@db.example.com/billing?sslmode=verify-full"
+    default_settings.database.url = "postgresql://billing@db.example.com/billing?sslmode=verify-full"
 
     found = sections(default_settings)
 
@@ -196,7 +196,7 @@ def test_requirements_for_managed_services(default_settings):
 
 
 def test_without_backups_the_provider_must_keep_them(default_settings):
-    default_settings.billing.backups = "provider"
+    default_settings.database.backups = "provider"
 
     items = {item.item: item.value for item in sections(default_settings)["PostgreSQL"].requirements}
 

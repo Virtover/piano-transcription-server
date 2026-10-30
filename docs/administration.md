@@ -53,7 +53,7 @@ python scripts/admin.py jobs --failed --since 1d
 python scripts/admin.py jobs show 3f2a9c1e
 ```
 
-`jobs` lists recent jobs from their [diagnostics records](architecture.md#-job-diagnostics), newest first, so jobs that ended long ago are included until `BILLING_JOB_DIAGNOSTICS_RETENTION`. Filter with `--failed` or `--status`, `--user` (email address or user ID), `--backend local` or `remote`, and `--since` (a duration such as `2h` or `7d`). `--limit` sets how many are listed (default 30).
+`jobs` lists recent jobs from their [diagnostics records](architecture.md#-job-diagnostics), newest first, so jobs that ended long ago are included until `JOB_DIAGNOSTICS_RETENTION`. Filter with `--failed` or `--status`, `--user` (email address or user ID), `--backend local` or `remote`, and `--since` (a duration such as `2h` or `7d`). `--limit` sets how many are listed (default 30).
 
 A job is named by its ID or its first characters, as the list shows them.
 
@@ -92,7 +92,7 @@ Whether the price per minute covers the GPU time:
 * **Minutes** per day or month (`--per`): sold, given free, used by transcriptions, taken back for voided purchases, and changed by hand. `--since` sets how far back (default `30d`). Balance changes are recorded from the version that added this command on; earlier ones are not in the report, and it says so.
 * **Negative balances:** how many users owe minutes, and the largest.
 * **Voided purchases:** when the API last read them from Google Play.
-* **Completed jobs and their run time** per backend. Run time is from start to finish, including the download, so it overstates the time a remote GPU is billed for. With `--remote-price-per-hour`, your provider's price per hour of the GPU you use, it estimates the remote cost. Job records are kept for `BILLING_JOB_DIAGNOSTICS_RETENTION`, which limits how far back this goes.
+* **Completed jobs and their run time** per backend. Run time is from start to finish, including the download, so it overstates the time a remote GPU is billed for. With `--remote-price-per-hour`, your provider's price per hour of the GPU you use, it estimates the remote cost. Job records are kept for `JOB_DIAGNOSTICS_RETENTION`, which limits how far back this goes.
 
 Times are in UTC.
 
@@ -136,7 +136,7 @@ The [admin web page](#-admin-web-page) logs as `web:<email>`: `web.user_view` wh
 
 Optional: a page that shows what `status`, `jobs`, `user`, `billing`, `limits`, and `audit` show, for running the server from anywhere: an overview that refreshes itself, jobs with their full errors, accounts, charts of minutes and jobs per day or month, limits, and the audit log. It runs in a service of its own, `admin`, reached through the [Cloudflare Tunnel](cloudflare-tunnel.md) on a hostname of its own, behind Cloudflare Access.
 
-The charts are drawn from what the server already keeps (balance changes, and job records for `BILLING_JOB_DIAGNOSTICS_RETENTION`) and from what is live now; the page collects and stores nothing of its own for them.
+The charts are drawn from what the server already keeps (balance changes, and job records for `JOB_DIAGNOSTICS_RETENTION`) and from what is live now; the page collects and stores nothing of its own for them.
 
 `ADMIN_WEB_MODE` sets what it may do, when the service starts:
 

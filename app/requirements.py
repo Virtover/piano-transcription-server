@@ -80,15 +80,15 @@ def database_sections(config) -> list[Section]:
     """Redis and PostgreSQL run by a provider, when their URLs lead outside the
     Compose stack, as in the Kubernetes deployment."""
     from app.backups import RetentionPolicy
-    from app.config import billing_database_url, runs_elsewhere
+    from app.config import effective_database_url, runs_elsewhere
 
     redis_host = urlsplit(config.service.redis_url).hostname
     redis_managed = runs_elsewhere(config.service.redis_url)
-    database_url = billing_database_url(config)
+    database_url = effective_database_url(config)
     database_host = urlsplit(database_url).hostname
     database_managed = runs_elsewhere(database_url)
-    backups = config.billing.backups == "server"
-    longest = RetentionPolicy.from_settings(config.billing).longest()
+    backups = config.database.backups == "server"
+    longest = RetentionPolicy.from_settings(config.database).longest()
     redis = Section(
         "Redis",
         "a managed Redis service",
@@ -155,7 +155,7 @@ def database_sections(config) -> list[Section]:
             Requirement(
                 "Encryption",
                 "TLS with certificate checks: sslmode=verify-full and sslrootcert=<the provider's CA file> in the "
-                "URL in secrets/billing_database_url",
+                "URL in secrets/database_url",
                 "Balances, purchases, and users' email addresses cross networks you do not control.",
             ),
             Requirement(
@@ -166,13 +166,13 @@ def database_sections(config) -> list[Section]:
             ),
             Requirement(
                 "Backups",
-                "pg_dump allowed for the billing user, and BILLING_BACKUP_DIR on lasting storage"
+                "pg_dump allowed for the billing user, and DATABASE_BACKUP_DIR on lasting storage"
                 if backups
                 else f"automatic backups with point-in-time recovery, kept {_days(longest)} or longer",
-                f"The API dumps the database every {config.billing.backup_interval / 60:g} minutes."
+                f"The API dumps the database every {config.database.backup_interval / 60:g} minutes."
                 if backups
-                else "With BILLING_BACKUPS=provider, the server makes none; the provider's are the only ones. The "
-                "retention follows BILLING_BACKUP_KEEP_*.",
+                else "With DATABASE_BACKUPS=provider, the server makes none; the provider's are the only ones. The "
+                "retention follows DATABASE_BACKUP_KEEP_*.",
             ),
             Requirement(
                 "Location",
@@ -644,7 +644,7 @@ def offsite_sections(config) -> list[Section]:
     )
     endpoint = _or_placeholder(config.offsite.endpoint, "OFFSITE_BACKUP_ENDPOINT")
     bucket = _or_placeholder(config.offsite.bucket, "OFFSITE_BACKUP_BUCKET")
-    longest = RetentionPolicy.from_settings(config.billing).longest()
+    longest = RetentionPolicy.from_settings(config.database).longest()
     return [
         Section(
             "Off-site backups",
@@ -675,7 +675,7 @@ def offsite_sections(config) -> list[Section]:
                 Requirement(
                     "Automatic deletion",
                     f"none, or after more than {_days(longest)}",
-                    "The server deletes what BILLING_BACKUP_KEEP_* and BILLING_BACKUP_RETENTION no longer keep; "
+                    "The server deletes what DATABASE_BACKUP_KEEP_* and DATABASE_BACKUP_RETENTION no longer keep; "
                     "an earlier deletion rule would remove the oldest history.",
                 ),
                 Requirement(

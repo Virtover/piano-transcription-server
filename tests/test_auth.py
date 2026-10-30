@@ -143,7 +143,7 @@ def test_current_user_normalizes_email(google, api_context):
 
     assert response.status_code == 200
     assert response.json()["user_id"] == "user-1"
-    with sqlite3.connect(settings.billing.database_path) as connection:
+    with sqlite3.connect(settings.database.path) as connection:
         assert connection.execute("SELECT email FROM users").fetchall() == [("user@example.com",)]
 
 

@@ -118,11 +118,11 @@ def _billing_problems(config: Settings, role: str) -> list[str]:
 
 
 def _provider_backups_problems(config: Settings, role: str) -> list[str]:
-    url = app_config.billing_database_url(config)
+    url = app_config.effective_database_url(config)
     if app_config.runs_elsewhere(url):
         return []
     return [
-        "BILLING_BACKUPS=provider needs a managed database, whose provider backs it up; the billing database "
+        "DATABASE_BACKUPS=provider needs a managed database, whose provider backs it up; the billing database "
         "here is the stack's own, which nothing would back up"
     ]
 
@@ -228,11 +228,11 @@ FEATURES: tuple[Feature, ...] = (
         key="provider_backups",
         title="Backups by the database's provider",
         summary="A managed PostgreSQL's provider backs the billing database up, instead of the server.",
-        switch="BILLING_BACKUPS=provider",
-        enabled=lambda config: config.billing.backups == "provider",
+        switch="DATABASE_BACKUPS=provider",
+        enabled=lambda config: config.database.backups == "provider",
         docs="docs/architecture.md#managed-redis-and-postgresql",
-        turn_on={"BILLING_BACKUPS": "provider"},
-        turn_off={"BILLING_BACKUPS": "server"},
+        turn_on={"DATABASE_BACKUPS": "provider"},
+        turn_off={"DATABASE_BACKUPS": "server"},
         requirement_sections=("PostgreSQL",),
         problems=_provider_backups_problems,
     ),

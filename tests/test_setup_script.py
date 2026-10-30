@@ -239,14 +239,14 @@ def test_a_file_secret_is_copied(server, tmp_path_factory):
 
 def test_an_excluded_feature_is_turned_off_first(server):
     file = env(server)
-    file.set("BILLING_BACKUPS", "provider")
+    file.set("DATABASE_BACKUPS", "provider")
     file.save()
     setup, script = make(server, answers=["y", "q"])
 
     setup.set_up("offsite")
 
     assert "cannot be on together with Backups by the database's provider" in script.text
-    assert env(server).get("BILLING_BACKUPS") == "server"
+    assert env(server).get("DATABASE_BACKUPS") == "server"
 
 
 # --- Turning off ----------------------------------------------------------------------------------

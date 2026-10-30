@@ -131,7 +131,7 @@ def job():
 
 
 def reservation(settings):
-    with sqlite3.connect(settings.billing.database_path) as connection:
+    with sqlite3.connect(settings.database.path) as connection:
         return connection.execute(
             "SELECT status, charged_minutes FROM transcription_reservations WHERE job_id = 'job'"
         ).fetchone()

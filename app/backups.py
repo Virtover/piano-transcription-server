@@ -6,7 +6,7 @@ optional encrypted copies in off-site storage.
     python -m app.backups keygen     # a new key pair for OFFSITE_BACKUP_RECIPIENT
     python -m app.backups fetch latest < key.txt   # download and decrypt one
 
-Backups are kept in steps by age (BILLING_BACKUP_KEEP_*): every backup at
+Backups are kept in steps by age (DATABASE_BACKUP_KEEP_*): every backup at
 first, then the oldest of each hour, day, week, and month (UTC). Keeping the
 oldest of each period means a backup kept by one step is also the one the
 next step keeps, so thinning never deletes a backup that is still needed.
@@ -66,15 +66,15 @@ class RetentionPolicy:
     max_age: float | None = None
 
     @classmethod
-    def from_settings(cls, billing=None) -> "RetentionPolicy":
-        billing = billing or settings.billing
+    def from_settings(cls, database=None) -> "RetentionPolicy":
+        database = database or settings.database
         return cls(
-            keep_all=billing.backup_keep_all,
-            hourly=billing.backup_keep_hourly,
-            daily=billing.backup_keep_daily,
-            weekly=billing.backup_keep_weekly,
-            monthly=billing.backup_keep_monthly,
-            max_age=billing.backup_retention,
+            keep_all=database.backup_keep_all,
+            hourly=database.backup_keep_hourly,
+            daily=database.backup_keep_daily,
+            weekly=database.backup_keep_weekly,
+            monthly=database.backup_keep_monthly,
+            max_age=database.backup_retention,
         )
 
     def steps(self) -> list[tuple[float, Callable[[int], Any]]]:
@@ -160,7 +160,7 @@ def replaced_database_problem(billing, directory: str) -> str | None:
 
 def offsite_key(timestamp: int, extension: str | None = None) -> str:
     extension = extension or (
-        "dump" if settings.billing.database_url.startswith(("postgres://", "postgresql://")) else "sqlite3"
+        "dump" if settings.database.url.startswith(("postgres://", "postgresql://")) else "sqlite3"
     )
     return f"{OFFSITE_PREFIX}billing-{timestamp}.{extension}.age"
 
@@ -256,13 +256,13 @@ def run_backup(billing, config=None, now: float | None = None, store_factory: Ca
     False. A failed local backup raises."""
     config = config or settings
     now = time.time() if now is None else now
-    removed = billing.prune_job_diagnostics(config.billing.job_diagnostics_retention)
+    removed = billing.prune_job_diagnostics(config.jobs.diagnostics_retention)
     if removed:
         logger.info("Removed %d expired job diagnostics records", removed)
-    directory = config.billing.backup_dir
+    directory = config.database.backup_dir
     extension = "dump" if getattr(billing, "_postgres", False) else "sqlite3"
     billing.backup(f"{directory}/billing-{int(now)}.{extension}")
-    policy = RetentionPolicy.from_settings(config.billing)
+    policy = RetentionPolicy.from_settings(config.database)
     for path in prune_backups(directory, policy, now):
         logger.info("Removed billing backup %s", path.name)
     if not config.offsite.enabled:
@@ -324,8 +324,8 @@ def keygen() -> int:
 
 
 def list_backups(store_factory: Callable | None = None) -> int:
-    local = local_backups(settings.billing.backup_dir)
-    print(f"Local ({settings.billing.backup_dir}): {len(local)}")
+    local = local_backups(settings.database.backup_dir)
+    print(f"Local ({settings.database.backup_dir}): {len(local)}")
     # Numbered newest first, as `scripts/server.py restore --from local` counts them.
     for number, (timestamp, path) in enumerate(sorted(local.items(), reverse=True), 1):
         print(f"  {number:>3}. {_when(timestamp)}  {path.name}  {path.stat().st_size:,} bytes")
@@ -341,7 +341,7 @@ def list_backups(store_factory: Callable | None = None) -> int:
 
 
 def fetch(name: str, identity: str, store_factory: Callable | None = None) -> int:
-    """Download and decrypt one off-site backup into BILLING_BACKUP_DIR's
+    """Download and decrypt one off-site backup into DATABASE_BACKUP_DIR's
     sibling folder `restore`, and check it."""
     if not settings.offsite.enabled:
         print("Off-site backups are off: OFFSITE_BACKUP_BUCKET is not set.", file=sys.stderr)
@@ -375,7 +375,7 @@ def fetch(name: str, identity: str, store_factory: Callable | None = None) -> in
             return 1
     data = store.download(remote[timestamp]["key"], keys[0])
     extension = remote[timestamp]["key"].rsplit(".", 2)[-2]
-    target = Path(settings.billing.backup_dir).parent / "restore" / f"billing-{timestamp}.{extension}"
+    target = Path(settings.database.backup_dir).parent / "restore" / f"billing-{timestamp}.{extension}"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
     if extension == "dump":
@@ -412,7 +412,7 @@ def copy_to(url_file: str, directory: str | None = None) -> int:
     if not url.startswith(("postgres://", "postgresql://")):
         print(f"{url_file} does not hold a postgresql:// URL", file=sys.stderr)
         return 1
-    dumps = {stamp: path for stamp, path in local_backups(directory or settings.billing.backup_dir).items()
+    dumps = {stamp: path for stamp, path in local_backups(directory or settings.database.backup_dir).items()
              if path.suffix == ".dump"}
     if not dumps:
         print("There is no backup to copy; make one with: python -m app.backups now", file=sys.stderr)

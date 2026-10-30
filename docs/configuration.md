@@ -3,7 +3,7 @@
 ## 🧭 How configuration works
 
 * **Choices go in `.env`.** Start from [.env.example](../.env.example), which lists the values operators usually change. Every setting is described below.
-* **Wiring goes in `docker-compose.yml`.** Container paths and service addresses (`REDIS_URL`, `DATA_DIR`, `BILLING_DATABASE_PATH`, `BILLING_BACKUP_DIR`) are fixed in the Compose `environment:` sections. The code defaults suit local development outside Docker.
+* **Wiring goes in `docker-compose.yml`.** Container paths and service addresses (`REDIS_URL`, `DATA_DIR`, `DATABASE_PATH`, `DATABASE_BACKUP_DIR`) are fixed in the Compose `environment:` sections. The code defaults suit local development outside Docker.
 * **Secrets are files in `./secrets`.** Compose mounts the folder read-only at `/run/secrets`. The file name is the setting name. Secrets are never read from `.env` or the environment, and never appear in logs or error messages. See [Secrets](#-secrets).
 * **The process environment overrides `.env`.** Empty values count as unset.
 
@@ -19,8 +19,8 @@ A basic server needs no setting: `python scripts/server.py start` runs it with e
 | HTTPS through a Cloudflare Tunnel | `cloudflare` in `COMPOSE_PROFILES` | | `cloudflare/tunnel_token` | [Cloudflare Tunnel](cloudflare-tunnel.md) |
 | Admin web page | `ADMIN_WEB_MODE=read-only` or `read-write`, and `admin` in `COMPOSE_PROFILES` | the tunnel | created by `scripts/server.py` | [Admin web page](administration.md#-admin-web-page) |
 | Billing with Google Play and Google sign-in | `BILLING_PROVIDER=google_play` | | `google_play_service_account.json` | [Google Play billing](google-play-billing.md) |
-| Backups by the database's provider | `BILLING_BACKUPS=provider` | a managed PostgreSQL | | [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql) |
-| Off-site backups | `OFFSITE_BACKUP_BUCKET` | the server's own backups: not with `BILLING_BACKUPS=provider` | `offsite_backup_access_key`, `offsite_backup_secret_key` | [Off-site copies](#off-site-copies) |
+| Backups by the database's provider | `DATABASE_BACKUPS=provider` | a managed PostgreSQL | | [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql) |
+| Off-site backups | `OFFSITE_BACKUP_BUCKET` | the server's own backups: not with `DATABASE_BACKUPS=provider` | `offsite_backup_access_key`, `offsite_backup_secret_key` | [Off-site copies](#off-site-copies) |
 | Object storage | `STORAGE_BUCKET` | | `storage_access_key`, `storage_secret_key` | [Object storage](#object-storage) |
 | Job files in object storage | `JOB_STORAGE=s3` | object storage, for this server alone | | [Job storage](architecture.md#job-storage) |
 | Outsourcing to RunPod | `OUTSOURCE_PROVIDER=runpod` | object storage | `runpod_api_key`, optionally `runpod_read_api_key` | [Outsourcing to RunPod](runpod.md) |
@@ -110,20 +110,20 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 | `BILLING_PRODUCTS` | `{}` | JSON mapping of Google Play product IDs to transcription minutes. |
 | `FREE_MINUTES` | unset | Free minutes granted per period; omit to disable. |
 | `FREE_MINUTES_PERIOD` | `30d` | How often free minutes are topped up. |
-| `BILLING_BACKUPS` | `server` | Who backs up the billing database. `server`: the API, every `BILLING_BACKUP_INTERVAL`, as described in [Billing database backups](#-billing-database-backups). `provider`: the provider of a [managed database](architecture.md#managed-redis-and-postgresql), which must then keep point-in-time backups; the server makes none, off-site copies cannot be on, and `check` warns as a reminder. |
-| `BILLING_BACKUP_INTERVAL` | `15m` | How often the server backs up the billing database, with `BILLING_BACKUPS=server`. |
-| `BILLING_BACKUP_KEEP_ALL` | `1d` | Every backup younger than this is kept. See [Which backups are kept](#which-backups-are-kept). |
-| `BILLING_BACKUP_KEEP_HOURLY` | `2d` | Then the first backup of each hour, up to this age. `0s` turns a step off. |
-| `BILLING_BACKUP_KEEP_DAILY` | `14d` | Then the first of each day. |
-| `BILLING_BACKUP_KEEP_WEEKLY` | `8w` | Then the first of each week. |
-| `BILLING_BACKUP_KEEP_MONTHLY` | `0s` | Then the first of each month; off by default. |
-| `BILLING_BACKUP_RETENTION` | unset | Optional upper limit: older backups are deleted whatever the steps keep. The newest backup is always kept. |
-| `BILLING_JOB_DIAGNOSTICS_RETENTION` | `30d` | Age after which job diagnostics records are deleted. See [Job diagnostics](architecture.md#-job-diagnostics). |
+| `DATABASE_BACKUPS` | `server` | Who backs up the billing database. `server`: the API, every `DATABASE_BACKUP_INTERVAL`, as described in [Billing database backups](#-billing-database-backups). `provider`: the provider of a [managed database](architecture.md#managed-redis-and-postgresql), which must then keep point-in-time backups; the server makes none, off-site copies cannot be on, and `check` warns as a reminder. |
+| `DATABASE_BACKUP_INTERVAL` | `15m` | How often the server backs up the billing database, with `DATABASE_BACKUPS=server`. |
+| `DATABASE_BACKUP_KEEP_ALL` | `1d` | Every backup younger than this is kept. See [Which backups are kept](#which-backups-are-kept). |
+| `DATABASE_BACKUP_KEEP_HOURLY` | `2d` | Then the first backup of each hour, up to this age. `0s` turns a step off. |
+| `DATABASE_BACKUP_KEEP_DAILY` | `14d` | Then the first of each day. |
+| `DATABASE_BACKUP_KEEP_WEEKLY` | `8w` | Then the first of each week. |
+| `DATABASE_BACKUP_KEEP_MONTHLY` | `0s` | Then the first of each month; off by default. |
+| `DATABASE_BACKUP_RETENTION` | unset | Optional upper limit: older backups are deleted whatever the steps keep. The newest backup is always kept. |
+| `JOB_DIAGNOSTICS_RETENTION` | `30d` | Age after which job diagnostics records are deleted. See [Job diagnostics](architecture.md#-job-diagnostics). |
 | `GOOGLE_OAUTH_CLIENT_IDS` | `[]` | Public OAuth client IDs whose Google ID tokens are accepted. Required for billing. |
 | `GOOGLE_PLAY_PACKAGE_NAME` | unset | Android package name used for Google Play verification. Required for billing. |
 | `GOOGLE_PLAY_VOIDED_PURCHASES_INTERVAL` | `1h` | How often refunded and charged-back purchases are read from Google Play, and their minutes taken back. See [Refunds](google-play-billing.md#-refunds-and-chargebacks). |
 
-`BILLING_PROVIDER=google_play` also requires the secret `google_play_service_account.json`. The API refuses to start if the package name, the OAuth client IDs, or the secret is missing. See the [Google Play billing guide](google-play-billing.md). The optional complete URL secret file is named `billing_database_url` (not an environment variable).
+`BILLING_PROVIDER=google_play` also requires the secret `google_play_service_account.json`. The API refuses to start if the package name, the OAuth client IDs, or the secret is missing. See the [Google Play billing guide](google-play-billing.md). The optional complete URL secret file is named `database_url` (not an environment variable).
 
 Production billing is PostgreSQL. The Compose `postgres` service is
 reachable only on the internal Compose network, and keeps its live database
@@ -268,9 +268,9 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 | `REDIS_PASSWORD_FILE` | empty | `/run/redis/password` | The file with that user's password, from `secrets/redis/app`. Empty for a Redis without users, such as one for local development. See [Redis users](architecture.md#-redis-users). |
 | `REDIS_CA_FILE` | empty | unset | For a `rediss://` `REDIS_URL` whose certificate is signed by the provider's own CA: that CA's certificate file. Empty trusts the public CAs. See [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). |
 | `DATA_DIR` | `/data` | `/data` | Shared directory for job files; with `JOB_STORAGE=s3`, for scratch files only. |
-| `BILLING_DATABASE_URL` | `postgresql://billing@postgres:5432/billing` | same | Production PostgreSQL URL for balances, purchases, and reservations. Keep passwords in `secrets/billing_database_url` (or use Compose's PostgreSQL password file). |
-| `BILLING_DATABASE_PATH` | `/billing/billing.sqlite3` | tests/tools | Explicit SQLite path retained for legacy tests and the one-time migration source. |
-| `BILLING_BACKUP_DIR` | `/billing/backups` | same | Directory for billing database backups. |
+| `DATABASE_URL` | `postgresql://billing@postgres:5432/billing` | same | Production PostgreSQL URL for balances, purchases, and reservations. Keep passwords in `secrets/database_url` (or use Compose's PostgreSQL password file). |
+| `DATABASE_PATH` | `/billing/billing.sqlite3` | tests/tools | Explicit SQLite path retained for legacy tests and the one-time migration source. |
+| `DATABASE_BACKUP_DIR` | `/billing/backups` | same | Directory for billing database backups. |
 
 `POSTGRES_DATA_LOCATION` in `.env` is read by Docker Compose, not by the server: where PostgreSQL keeps the live billing database. See [Where the database is kept](#where-the-database-is-kept).
 
@@ -328,6 +328,19 @@ Old names keep working. Each logs one deprecation warning when a service starts.
 | `OUTSOURCE_STORAGE_ENDPOINT` | `STORAGE_ENDPOINT` | The bucket also keeps job files now. The RunPod handler reads the old name too, so an endpoint that has it keeps working; `check --online` refuses an endpoint with both. |
 | `OUTSOURCE_STORAGE_BUCKET` | `STORAGE_BUCKET` | |
 | `OUTSOURCE_STORAGE_REGION` | `STORAGE_REGION` | |
+| `BILLING_DATABASE_URL` | `DATABASE_URL` | Every server has the database, with or without billing. |
+| `BILLING_DATABASE_PATH` | `DATABASE_PATH` |  |
+| `BILLING_BACKUPS` | `DATABASE_BACKUPS` |  |
+| `BILLING_BACKUP_DIR` | `DATABASE_BACKUP_DIR` |  |
+| `BILLING_BACKUP_INTERVAL` | `DATABASE_BACKUP_INTERVAL` |  |
+| `BILLING_BACKUP_KEEP_ALL` | `DATABASE_BACKUP_KEEP_ALL` | And the same for `_HOURLY`, `_DAILY`, `_WEEKLY`, and `_MONTHLY`. |
+| `BILLING_BACKUP_KEEP_HOURLY` | `DATABASE_BACKUP_KEEP_HOURLY` |  |
+| `BILLING_BACKUP_KEEP_DAILY` | `DATABASE_BACKUP_KEEP_DAILY` |  |
+| `BILLING_BACKUP_KEEP_WEEKLY` | `DATABASE_BACKUP_KEEP_WEEKLY` |  |
+| `BILLING_BACKUP_KEEP_MONTHLY` | `DATABASE_BACKUP_KEEP_MONTHLY` |  |
+| `BILLING_BACKUP_RETENTION` | `DATABASE_BACKUP_RETENTION` |  |
+| `BILLING_JOB_DIAGNOSTICS_RETENTION` | `JOB_DIAGNOSTICS_RETENTION` |  |
+| the secret file `billing_database_url` | the secret file `database_url` | Rename the file. Having both is an error. |
 | the secret file `outsource_storage_access_key` | the secret file `storage_access_key` | Rename the file: `secrets/outsource_storage_access_key` to `secrets/storage_access_key`. Having both is an error. |
 | the secret file `outsource_storage_secret_key` | the secret file `storage_secret_key` | The same. |
 
@@ -338,9 +351,10 @@ An existing `.env` keeps working without changes; you only see deprecation warni
 1. Rename `CLEANUP_INTERVAL_SECONDS=86400` to `CLEANUP_INTERVAL=1d`, and `WORKER_BATCH_TIMEOUT_SECONDS=2` to `WORKER_BATCH_TIMEOUT=2s`.
 2. Rename the service-account key in `secrets` to `google_play_service_account.json` and remove `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE`.
 3. Rename `OUTSOURCE_STORAGE_ENDPOINT`, `OUTSOURCE_STORAGE_BUCKET`, and `OUTSOURCE_STORAGE_REGION` to `STORAGE_ENDPOINT`, `STORAGE_BUCKET`, and `STORAGE_REGION`, and the secret files `outsource_storage_access_key` and `outsource_storage_secret_key` to `storage_access_key` and `storage_secret_key`. On the RunPod endpoint, `OUTSOURCE_STORAGE_ENDPOINT` keeps working; replace it with `STORAGE_ENDPOINT` whenever you like, but never set both.
-4. Remove `REDIS_URL`, `DATA_DIR`, `BILLING_DATABASE_URL`, and `BILLING_DATABASE_PATH` from `.env`. Compose sets them now; values left in `.env` are overridden by Compose.
-5. Remove any inline comments after values.
-6. Run `docker compose run --rm api python -m app.config check`, then `docker compose up -d --build`.
+4. Rename the `BILLING_` settings of the database and its backups to `DATABASE_`, as the table above lists, `BILLING_JOB_DIAGNOSTICS_RETENTION` to `JOB_DIAGNOSTICS_RETENTION`, and the secret file `billing_database_url` to `database_url`. `BILLING_PROVIDER` and `BILLING_PRODUCTS` keep their names: they are about billing.
+5. Remove `REDIS_URL`, `DATA_DIR`, `DATABASE_URL`, and `DATABASE_PATH` from `.env`. Compose sets them now; values left in `.env` are overridden by Compose.
+6. Remove any inline comments after values.
+7. Run `docker compose run --rm api python -m app.config check`, then `docker compose up -d --build`.
 
 `MAX_UPLOAD_SIZE_MB` limits disk use per upload. Uploads are written to the shared `DATA_DIR` and removed after conversion. Compressed files are small: an hour of MP3 at 192 kbit/s is about 85 MB. Uncompressed WAV is large: an hour of 16-bit 44.1 kHz stereo is about 635 MB. Raise the limit only if users need to upload long lossless recordings and the disk has room for several at once.
 
@@ -452,7 +466,9 @@ See [Administration](administration.md#-users).
 
 ## 💾 Billing database backups
 
-The API creates a PostgreSQL custom-format dump in `/billing/backups` every `BILLING_BACKUP_INTERVAL` (default `15m`), starting when the API starts. On the host these files are in `./billing-data/backups`. Each dump is written under a temporary name, checked with `pg_restore --list`, and only then atomically renamed, so every `billing-<unix-time>.dump` file is complete. A backup that fails the check is deleted and the error logged.
+Every server has the billing database, with or without `BILLING_PROVIDER`: it always keeps each job's full error for administrators ([job diagnostics](architecture.md#-job-diagnostics)) and the admin audit log, and with billing also balances, purchases, and reservations. So it is backed up either way.
+
+The API creates a PostgreSQL custom-format dump in `/billing/backups` every `DATABASE_BACKUP_INTERVAL` (default `15m`), starting when the API starts. On the host these files are in `./billing-data/backups`. Each dump is written under a temporary name, checked with `pg_restore --list`, and only then atomically renamed, so every `billing-<unix-time>.dump` file is complete. A backup that fails the check is deleted and the error logged.
 
 To back up now, for example before an update, and to see what exists:
 
@@ -469,18 +485,18 @@ After each backup, the API thins out older ones, so recent history is dense and 
 
 | Age | Kept | Setting |
 | --- | --- | --- |
-| up to 1 day | every backup (96 at `15m`) | `BILLING_BACKUP_KEEP_ALL=1d` |
-| up to 2 days | the first of each hour | `BILLING_BACKUP_KEEP_HOURLY=2d` |
-| up to 14 days | the first of each day | `BILLING_BACKUP_KEEP_DAILY=14d` |
-| up to 8 weeks | the first of each week (Monday) | `BILLING_BACKUP_KEEP_WEEKLY=8w` |
-| older | none; with a monthly step, the first of each month | `BILLING_BACKUP_KEEP_MONTHLY=0s` |
+| up to 1 day | every backup (96 at `15m`) | `DATABASE_BACKUP_KEEP_ALL=1d` |
+| up to 2 days | the first of each hour | `DATABASE_BACKUP_KEEP_HOURLY=2d` |
+| up to 14 days | the first of each day | `DATABASE_BACKUP_KEEP_DAILY=14d` |
+| up to 8 weeks | the first of each week (Monday) | `DATABASE_BACKUP_KEEP_WEEKLY=8w` |
+| older | none; with a monthly step, the first of each month | `DATABASE_BACKUP_KEEP_MONTHLY=0s` |
 
 That is about 140 files. Hours, days, weeks, and months are in UTC. Each step keeps the *first* backup of its period, which is also the one the next step keeps, so thinning never removes a backup a longer step still needs. `0s` turns a step off. The newest backup is always kept, so a server that was off for months still has its last one. The age is read from the timestamp in the file name; other files in the directory, such as manually renamed copies, are never deleted.
 
-`BILLING_BACKUP_RETENTION`, unset by default, is an upper limit: older backups are deleted whatever the steps keep. Data from a deleted account stays in backups until they are deleted, so the longest step, or this limit, is also the longest time deleted data is kept: 8 weeks with the defaults. Job diagnostics records are in the same database, so a record can survive in backups for up to `BILLING_JOB_DIAGNOSTICS_RETENTION` plus that. For example, for at most 30 days of history:
+`DATABASE_BACKUP_RETENTION`, unset by default, is an upper limit: older backups are deleted whatever the steps keep. Data from a deleted account stays in backups until they are deleted, so the longest step, or this limit, is also the longest time deleted data is kept: 8 weeks with the defaults. Job diagnostics records are in the same database, so a record can survive in backups for up to `JOB_DIAGNOSTICS_RETENTION` plus that. For example, for at most 30 days of history:
 
 ```env
-BILLING_BACKUP_RETENTION=30d
+DATABASE_BACKUP_RETENTION=30d
 ```
 
 ### Off-site copies

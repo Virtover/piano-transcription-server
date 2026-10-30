@@ -152,7 +152,7 @@ def test_current_production_style_env_still_loads(tmp_path, caplog):
     env = "\n".join([
         "REDIS_URL=redis://redis:6379/0",
         "DATA_DIR=/data",
-        "BILLING_DATABASE_PATH=/billing/billing.sqlite3",
+        "DATABASE_PATH=/billing/billing.sqlite3",
         "WORKER_THREADS=4",
         "WORKER_BATCH_SIZE=6",
         "WORKER_BATCH_TIMEOUT_SECONDS=2",
@@ -373,7 +373,7 @@ def test_env_example_has_no_inline_comments_or_wiring():
     for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
         if re.match(r"^#?\s?[A-Z][A-Z0-9_]+=", line):
             assert " #" not in line, line
-    assert not example_keys() & {"REDIS_URL", "DATA_DIR", "BILLING_DATABASE_PATH", "BILLING_BACKUP_DIR"}
+    assert not example_keys() & {"REDIS_URL", "DATA_DIR", "DATABASE_PATH", "DATABASE_BACKUP_DIR"}
 
 
 def test_offsite_backup_endpoint_requires_tls(tmp_path):
@@ -443,6 +443,29 @@ def test_deprecated_storage_names_keep_working(tmp_path, caplog):
     assert settings.secrets.storage_secret_key.get_secret_value() == "secret"
     assert "OUTSOURCE_STORAGE_BUCKET is deprecated; use STORAGE_BUCKET instead" in caplog.text
     assert "The secret file outsource_storage_access_key is deprecated; rename it to storage_access_key" in caplog.text
+
+
+def test_deprecated_database_names_keep_working(tmp_path, caplog):
+    settings = load(
+        tmp_path,
+        "BILLING_BACKUP_INTERVAL=30m\nBILLING_BACKUP_KEEP_DAILY=7d\nBILLING_BACKUPS=provider\n"
+        "BILLING_JOB_DIAGNOSTICS_RETENTION=14d\n",
+        {"billing_database_url": "postgresql://billing:pw@db.example.com/billing"},
+    )
+
+    assert settings.database.backup_interval == 30 * 60
+    assert settings.database.backup_keep_daily == 7 * 86400
+    assert settings.database.backups == "provider"
+    assert settings.jobs.diagnostics_retention == 14 * 86400
+    assert settings.secrets.database_url.get_secret_value() == "postgresql://billing:pw@db.example.com/billing"
+    assert "BILLING_BACKUP_INTERVAL is deprecated; use DATABASE_BACKUP_INTERVAL instead" in caplog.text
+    assert "The secret file billing_database_url is deprecated; rename it to database_url" in caplog.text
+
+
+def test_billing_settings_keep_their_names(tmp_path):
+    settings = load(tmp_path, "BILLING_PROVIDER=google_play\n")
+
+    assert settings.billing.provider == "google_play"
 
 
 def test_old_and_new_storage_secret_files_together_are_an_error(tmp_path):

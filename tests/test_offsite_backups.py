@@ -111,16 +111,16 @@ def test_off_site_history_follows_the_policy_and_survives_losing_this_disk(offsi
     policy = RetentionPolicy(keep_all=HOUR, hourly=0, daily=10 * DAY, weekly=0, monthly=0)
     now = 1_704_067_200 + 20 * DAY
     old_days = [now - day * DAY for day in (12, 5, 3)]
-    make_backups(settings.billing.backup_dir, old_days)
-    sync_offsite(store, settings.billing.backup_dir, policy, now)
+    make_backups(settings.database.backup_dir, old_days)
+    sync_offsite(store, settings.database.backup_dir, policy, now)
     # The 12-day-old backup is past every step; there is a newer one.
     assert set(store.backups()) == set(old_days[1:])
 
     # The disk is replaced: only a new backup exists here.
-    for path in Path(settings.billing.backup_dir).iterdir():
+    for path in Path(settings.database.backup_dir).iterdir():
         path.unlink()
-    make_backups(settings.billing.backup_dir, [now])
-    uploaded, deleted = sync_offsite(store, settings.billing.backup_dir, policy, now)
+    make_backups(settings.database.backup_dir, [now])
+    uploaded, deleted = sync_offsite(store, settings.database.backup_dir, policy, now)
 
     assert (uploaded, deleted) == (1, 0)
     assert set(store.backups()) == {*old_days[1:], now}
@@ -132,7 +132,7 @@ def test_off_site_failure_keeps_the_local_backup_and_is_reported(offsite, capsys
 
     assert backups.run_backup(billing) is False
 
-    assert len(backups.local_backups(settings.billing.backup_dir)) == 1
+    assert len(backups.local_backups(settings.database.backup_dir)) == 1
     state = backups.offsite_status(billing)
     assert state["error"] == "ClientError: AccessDenied" and state["succeeded_at"] is None
     rendered = status.render(status.collect())
@@ -150,12 +150,12 @@ def test_status_without_off_site_backups(api_context):
 
 def test_fetch_downloads_decrypts_and_checks(offsite, identity, capsys):
     settings, _, store = offsite
-    make_backups(settings.billing.backup_dir, [1000, 2000])
-    sync_offsite(store, settings.billing.backup_dir, RetentionPolicy(DAY, 0, 0, 0, 0), 2500)
+    make_backups(settings.database.backup_dir, [1000, 2000])
+    sync_offsite(store, settings.database.backup_dir, RetentionPolicy(DAY, 0, 0, 0, 0), 2500)
 
     assert backups.fetch("latest", f"# created: today\n{identity}\n") == 0
 
-    restored = Path(settings.billing.backup_dir).parent / "restore" / "billing-2000.sqlite3"
+    restored = Path(settings.database.backup_dir).parent / "restore" / "billing-2000.sqlite3"
     with sqlite3.connect(restored) as connection:
         assert connection.execute("SELECT at FROM marker").fetchone() == (2000,)
     connection.close()
@@ -170,8 +170,8 @@ def test_fetch_downloads_decrypts_and_checks(offsite, identity, capsys):
 
 def test_fetch_counts_from_the_newest(offsite, identity, capsys):
     settings, _, store = offsite
-    make_backups(settings.billing.backup_dir, [1000, 2000, 3000])
-    sync_offsite(store, settings.billing.backup_dir, RetentionPolicy(DAY, 0, 0, 0, 0), 3500)
+    make_backups(settings.database.backup_dir, [1000, 2000, 3000])
+    sync_offsite(store, settings.database.backup_dir, RetentionPolicy(DAY, 0, 0, 0, 0), 3500)
 
     assert backups.fetch("2", str(identity)) == 0
     assert "billing-2000.sqlite3" in capsys.readouterr().out
@@ -185,8 +185,8 @@ def test_fetch_counts_from_the_newest(offsite, identity, capsys):
 
 def test_fetch_with_the_wrong_key_fails(offsite):
     settings, _, store = offsite
-    make_backups(settings.billing.backup_dir, [1000])
-    sync_offsite(store, settings.billing.backup_dir, RetentionPolicy(DAY, 0, 0, 0, 0), 1500)
+    make_backups(settings.database.backup_dir, [1000])
+    sync_offsite(store, settings.database.backup_dir, RetentionPolicy(DAY, 0, 0, 0, 0), 1500)
 
     with pytest.raises(Exception):
         backups.fetch("latest", str(x25519.Identity.generate()))
@@ -210,8 +210,8 @@ def test_now_command_backs_up_and_copies(offsite, capsys):
 
 def test_list_shows_both_places(offsite, capsys):
     settings, _, store = offsite
-    make_backups(settings.billing.backup_dir, [1_704_067_200])
-    sync_offsite(store, settings.billing.backup_dir, RetentionPolicy(DAY, 0, 0, 0, 0), 1_704_067_200)
+    make_backups(settings.database.backup_dir, [1_704_067_200])
+    sync_offsite(store, settings.database.backup_dir, RetentionPolicy(DAY, 0, 0, 0, 0), 1_704_067_200)
 
     assert backups.list_backups() == 0
     output = capsys.readouterr().out
@@ -258,7 +258,7 @@ def test_sharing_the_outsourcing_bucket_is_warned_about(api_context):
 
 def test_requirements_follow_the_retention(api_context):
     _, settings, _ = api_context
-    settings.billing.backup_keep_weekly = "10w"
+    settings.database.backup_keep_weekly = "10w"
 
     [section] = [section for section in build_requirements(settings) if section.name == "Off-site backups"]
 

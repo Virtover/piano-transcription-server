@@ -83,7 +83,7 @@ def collect() -> dict:
             "virtual_disk": in_docker_desktop_vm(),
         }
 
-    local_backups = backups.local_backups(settings.billing.backup_dir)
+    local_backups = backups.local_backups(settings.database.backup_dir)
     backup_state = {
         "count": len(local_backups),
         "newest_at": max(local_backups) if local_backups else None,
@@ -196,8 +196,8 @@ def render(state: dict) -> str:
             lines.append("              Docker Desktop's virtual disk: its limit, not the host's drive, which may have less free")
 
     backup_state = state["backups"]
-    if settings.billing.backups == "provider":
-        text = "left to the database's provider (BILLING_BACKUPS=provider)"
+    if settings.database.backups == "provider":
+        text = "left to the database's provider (DATABASE_BACKUPS=provider)"
     elif backup_state["newest_at"] is None:
         text = "none yet"
     else:

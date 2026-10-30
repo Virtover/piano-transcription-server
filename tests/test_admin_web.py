@@ -553,7 +553,7 @@ def test_complete_settings_pass(default_settings):
         (lambda s: setattr(s.admin_web, "hostname", "piano.example.com"), "must differ from CLOUDFLARE_TUNNEL_HOSTNAME"),
         (lambda s: setattr(s.tunnel, "compose_profiles", "cloudflare"), "needs admin in COMPOSE_PROFILES"),
         (lambda s: setattr(s.tunnel, "compose_profiles", "admin"), "needs HTTPS through a Cloudflare Tunnel"),
-        (lambda s: setattr(s.billing, "database_url", ""), "needs the PostgreSQL billing database"),
+        (lambda s: setattr(s.database, "url", ""), "needs the PostgreSQL billing database"),
         (lambda s: setattr(s.admin_web, "mode", "disabled"), "remove it from COMPOSE_PROFILES"),
     ],
 )
@@ -579,7 +579,7 @@ def test_the_service_in_compose_has_only_what_its_mode_needs():
     assert service["command"] == ["python", "-m", "app.admin_web"]
     # Credentials follow the mode: in read-only mode there are no others.
     assert service["environment"]["REDIS_URL"] == "redis://admin-${ADMIN_WEB_MODE:-disabled}@redis:6379/0"
-    assert service["environment"]["BILLING_DATABASE_URL"] == "postgresql://admin-${ADMIN_WEB_MODE:-disabled}@postgres:5432/billing"
+    assert service["environment"]["DATABASE_URL"] == "postgresql://admin-${ADMIN_WEB_MODE:-disabled}@postgres:5432/billing"
     assert sorted(service["volumes"]) == sorted([
         "data:/data:ro",
         "./billing-data/backups:/billing/backups:ro",

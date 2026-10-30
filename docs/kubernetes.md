@@ -7,7 +7,7 @@ The Compose stack runs everything on one machine. For more than one machine, `de
 * **One remote worker** for RunPod, **one cleanup**, **two `cloudflared` connectors**, and optionally the [admin web page](#-the-admin-web-page).
 * **No Redis, PostgreSQL, or data volume of its own.** Redis and PostgreSQL are managed services, and job files are kept in the object storage bucket.
 
-The manifests set `JOB_STORAGE=s3` and `BILLING_BACKUPS=provider` themselves, because several machines share no folder: see [Job storage](architecture.md#job-storage) and [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). `tests/test_kubernetes.py` keeps them in step with `docker-compose.yml`: the same commands, wiring, secret paths, user, and hardening.
+The manifests set `JOB_STORAGE=s3` and `DATABASE_BACKUPS=provider` themselves, because several machines share no folder: see [Job storage](architecture.md#job-storage) and [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). `tests/test_kubernetes.py` keeps them in step with `docker-compose.yml`: the same commands, wiring, secret paths, user, and hardening.
 
 ## 📋 What you need
 
@@ -43,15 +43,15 @@ The commands run from the repository's folder, with `kubectl` signed in to the c
    REDIS_URL=rediss://app@<host>:<port>/0
    ```
 
-   If the provider's own CA signs its certificate, put that CA's file in `secrets/redis_ca.crt` and add `REDIS_CA_FILE=/run/secrets/redis_ca.crt`. Leave out `JOB_STORAGE` and `BILLING_BACKUPS`: the manifests set them.
+   If the provider's own CA signs its certificate, put that CA's file in `secrets/redis_ca.crt` and add `REDIS_CA_FILE=/run/secrets/redis_ca.crt`. Leave out `JOB_STORAGE` and `DATABASE_BACKUPS`: the manifests set them.
 
-3. **The database URL**, with its password and TLS options, goes in `secrets/billing_database_url`, for example `postgresql://billing:<password>@<host>:5432/billing?sslmode=verify-full&sslrootcert=/run/secrets/postgres_ca.crt`, with the provider's CA file in `secrets/postgres_ca.crt`. Write it with the commands in [Secrets](configuration.md#-secrets), so it is never in a command's history.
+3. **The database URL**, with its password and TLS options, goes in `secrets/database_url`, for example `postgresql://billing:<password>@<host>:5432/billing?sslmode=verify-full&sslrootcert=/run/secrets/postgres_ca.crt`, with the provider's CA file in `secrets/postgres_ca.crt`. Write it with the commands in [Secrets](configuration.md#-secrets), so it is never in a command's history.
 
 4. **The secrets**, as Kubernetes Secrets. First the namespace, then the secret files the API and workers read, each with its own `--from-file`; leave out the ones you do not use:
 
    ```shell
    kubectl create namespace piano-transcription
-   kubectl -n piano-transcription create secret generic piano-secrets --from-file=secrets/billing_database_url --from-file=secrets/storage_access_key --from-file=secrets/storage_secret_key --from-file=secrets/metrics_token --from-file=secrets/google_play_service_account.json --from-file=secrets/runpod_api_key --from-file=secrets/postgres_ca.crt
+   kubectl -n piano-transcription create secret generic piano-secrets --from-file=secrets/database_url --from-file=secrets/storage_access_key --from-file=secrets/storage_secret_key --from-file=secrets/metrics_token --from-file=secrets/google_play_service_account.json --from-file=secrets/runpod_api_key --from-file=secrets/postgres_ca.crt
    ```
 
    The Redis password of the services' user, under the key `app`, and the tunnel token, each in a Secret of its own so that only their pods see them:
@@ -104,7 +104,7 @@ kubectl -n piano-transcription exec -it deploy/api -- python -m app.admin jobs -
 Uncomment `components` in `kustomization.yaml`. The page signs in to Redis and PostgreSQL with roles of its own, as in Compose: create at the providers the Redis user `admin-read-only` (or `admin-read-write`) with the rules of `redis/users.acl`, and the PostgreSQL role that the API creates for `ADMIN_WEB_MODE`. Then their Secret:
 
 ```shell
-kubectl -n piano-transcription create secret generic piano-admin-web --from-literal=redis_url=rediss://admin-read-only@<host>:<port>/0 --from-file=redis_password=<file with its Redis password> --from-file=billing_database_url=<file with its database URL>
+kubectl -n piano-transcription create secret generic piano-admin-web --from-literal=redis_url=rediss://admin-read-only@<host>:<port>/0 --from-file=redis_password=<file with its Redis password> --from-file=database_url=<file with its database URL>
 ```
 
 The tunnel sends the page's hostname to `http://admin:8100`, behind Cloudflare Access, as described in [Administration](administration.md#-admin-web-page).

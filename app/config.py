@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 SECRETS_DIR = "/run/secrets"
 # Unknown variables with these prefixes are reported as possible typos.
-CHECKED_PREFIXES = ("WORKER_", "BILLING_", "OUTSOURCE_", "STORAGE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_", "OFFSITE_", "ERROR_REPORT_")
+CHECKED_PREFIXES = ("WORKER_", "BILLING_", "DATABASE_", "JOB_", "OUTSOURCE_", "STORAGE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_", "OFFSITE_", "ERROR_REPORT_")
 MIN_SERVER_PASSWORD_LENGTH = 12
 # Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
 COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD"}
@@ -263,6 +263,8 @@ class JobSettings(BaseSettings):
     # share. s3: in the outsourcing bucket, for API replicas and workers on
     # several machines; see app/job_storage.py.
     storage: Literal["local", "s3"] = "local"
+    # How long each job's full error is kept for administrators.
+    diagnostics_retention: Duration = 30 * 24 * 60 * 60.0
 
 
 class CleanupSettings(BaseSettings):
@@ -277,15 +279,17 @@ class AuthSettings(BaseSettings):
     client_ids: list[str] = Field(default_factory=list)
 
 
-class BillingSettings(BaseSettings):
-    model_config = _group_config("BILLING_")
+class DatabaseSettings(BaseSettings):
+    """The PostgreSQL database every server has, with or without billing: job
+    diagnostics and the admin audit log, and with billing also balances and
+    purchases. Its backups."""
 
-    provider: Literal["none", "google_play"] = "none"
-    products: dict[str, int] = Field(default_factory=dict)
-    # PostgreSQL is the production database. database_path remains for the
-    # explicit SQLite compatibility used by local tests and migration tools.
-    database_url: str = "postgresql://billing@postgres:5432/billing"
-    database_path: str = "/billing/billing.sqlite3"
+    model_config = _group_config("DATABASE_")
+
+    # path remains for the explicit SQLite compatibility used by local tests
+    # and migration tools.
+    url: str = "postgresql://billing@postgres:5432/billing"
+    path: str = "/billing/billing.sqlite3"
     backup_dir: str = "/billing/backups"
     # Who backs the database up: the server, with pg_dump, or the provider
     # of a managed database, which then must; see app/requirements.py.
@@ -300,7 +304,13 @@ class BillingSettings(BaseSettings):
     backup_keep_monthly: DurationOrZero = 0.0
     # Optional upper limit: older backups are deleted whatever the steps say.
     backup_retention: OptionalDuration = None
-    job_diagnostics_retention: Duration = 30 * 24 * 60 * 60.0
+
+
+class BillingSettings(BaseSettings):
+    model_config = _group_config("BILLING_")
+
+    provider: Literal["none", "google_play"] = "none"
+    products: dict[str, int] = Field(default_factory=dict)
     free_minutes: int | None = Field(default=None, ge=0, validation_alias="FREE_MINUTES")
     free_minutes_period: DurationText = Field(default=None, validation_alias="FREE_MINUTES_PERIOD")
 
@@ -335,7 +345,7 @@ class SecretSettings(BaseSettings):
     offsite_backup_secret_key: SecretStr | None = None
     # Optional. When present, every request except /health and /ready needs it.
     server_password: SecretStr | None = None
-    billing_database_url: SecretStr | None = None
+    database_url: SecretStr | None = None
     # Sent with every error report to ERROR_REPORT_URL.
     error_report_token: SecretStr | None = None
     # Optional. Turns on GET /metrics, for a scraper that sends it.
@@ -511,6 +521,7 @@ GROUPS: dict[str, type[BaseSettings]] = {
     "jobs": JobSettings,
     "cleanup": CleanupSettings,
     "auth": AuthSettings,
+    "database": DatabaseSettings,
     "billing": BillingSettings,
     "google_play": GooglePlaySettings,
     "outsource": OutsourceSettings,
@@ -532,6 +543,7 @@ class Settings:
     jobs: JobSettings
     cleanup: CleanupSettings
     auth: AuthSettings
+    database: DatabaseSettings
     billing: BillingSettings
     google_play: GooglePlaySettings
     outsource: OutsourceSettings
@@ -597,12 +609,26 @@ ALIASES: dict[str, Alias] = {
     "OUTSOURCE_STORAGE_ENDPOINT": Alias("STORAGE_ENDPOINT", str),
     "OUTSOURCE_STORAGE_BUCKET": Alias("STORAGE_BUCKET", str),
     "OUTSOURCE_STORAGE_REGION": Alias("STORAGE_REGION", str),
+    # The database is every server's, with or without billing.
+    "BILLING_DATABASE_URL": Alias("DATABASE_URL", str),
+    "BILLING_DATABASE_PATH": Alias("DATABASE_PATH", str),
+    "BILLING_BACKUP_DIR": Alias("DATABASE_BACKUP_DIR", str),
+    "BILLING_BACKUPS": Alias("DATABASE_BACKUPS", str),
+    "BILLING_BACKUP_INTERVAL": Alias("DATABASE_BACKUP_INTERVAL", str),
+    "BILLING_BACKUP_KEEP_ALL": Alias("DATABASE_BACKUP_KEEP_ALL", str),
+    "BILLING_BACKUP_KEEP_HOURLY": Alias("DATABASE_BACKUP_KEEP_HOURLY", str),
+    "BILLING_BACKUP_KEEP_DAILY": Alias("DATABASE_BACKUP_KEEP_DAILY", str),
+    "BILLING_BACKUP_KEEP_WEEKLY": Alias("DATABASE_BACKUP_KEEP_WEEKLY", str),
+    "BILLING_BACKUP_KEEP_MONTHLY": Alias("DATABASE_BACKUP_KEEP_MONTHLY", str),
+    "BILLING_BACKUP_RETENTION": Alias("DATABASE_BACKUP_RETENTION", str),
+    "BILLING_JOB_DIAGNOSTICS_RETENTION": Alias("JOB_DIAGNOSTICS_RETENTION", str),
 }
 
 # Old secret file name -> replacement, read the same way as ALIASES.
 SECRET_ALIASES: dict[str, str] = {
     "outsource_storage_access_key": "storage_access_key",
     "outsource_storage_secret_key": "storage_secret_key",
+    "billing_database_url": "database_url",
 }
 
 # Still supported, but replaced by another mechanism.
@@ -748,11 +774,11 @@ def runs_elsewhere(url: str | None) -> bool:
     return bool(host) and host not in LOCAL_HOSTS
 
 
-def billing_database_url(config: "Settings | None" = None) -> str:
+def effective_database_url(config: "Settings | None" = None) -> str:
     """The PostgreSQL URL the billing database uses, as app.billing chooses it."""
     config = config or settings
-    secret = config.secrets.billing_database_url
-    return secret.get_secret_value() if secret else config.billing.database_url
+    secret = config.secrets.database_url
+    return secret.get_secret_value() if secret else config.database.url
 
 
 def database_sslmode(url: str) -> str | None:
@@ -807,8 +833,8 @@ def admin_web_problems(config: "Settings", check_profile: bool = True) -> list[s
         problems.append("ADMIN_WEB_HOSTNAME must differ from CLOUDFLARE_TUNNEL_HOSTNAME, the API's hostname")
     if admin.access_team_domain and not admin.access_team_domain.endswith(".cloudflareaccess.com"):
         problems.append("CLOUDFLARE_ACCESS_TEAM_DOMAIN must be your team domain, such as example.cloudflareaccess.com")
-    if not config.billing.database_url:
-        problems.append("The admin web page needs the PostgreSQL billing database (BILLING_DATABASE_URL)")
+    if not config.database.url:
+        problems.append("The admin web page needs the PostgreSQL billing database (DATABASE_URL)")
     if check_profile and ADMIN_WEB_PROFILE not in profiles and "*" not in profiles:
         problems.append(f"ADMIN_WEB_MODE={admin.mode} needs {ADMIN_WEB_PROFILE} in COMPOSE_PROFILES, which starts the service")
     return problems
@@ -841,9 +867,9 @@ def offsite_problems(config: "Settings") -> list[str]:
 def configuration_warnings(config: "Settings", environment: dict[str, str]) -> list[str]:
     """Choices that work but are probably mistakes."""
     warnings = []
-    if config.billing.backups == "provider":
+    if config.database.backups == "provider":
         warnings.append(
-            "The server does not back up the billing database (BILLING_BACKUPS=provider): its provider must. "
+            "The server does not back up the billing database (DATABASE_BACKUPS=provider): its provider must. "
             "python -m app.config requirements says how."
         )
     redis_url = config.service.redis_url
@@ -852,11 +878,11 @@ def configuration_warnings(config: "Settings", environment: dict[str, str]) -> l
             f"REDIS_URL leads to {urlsplit(redis_url).hostname} without TLS: job state and the password travel "
             "unencrypted. Use a rediss:// URL."
         )
-    database_url = billing_database_url(config)
+    database_url = effective_database_url(config)
     if runs_elsewhere(database_url) and database_sslmode(database_url) not in ENCRYPTED_SSLMODES:
         warnings.append(
             f"The billing database at {urlsplit(database_url).hostname} is reached without required TLS. Add "
-            "sslmode=verify-full and sslrootcert=<the provider's CA file> to the URL in secrets/billing_database_url."
+            "sslmode=verify-full and sslrootcert=<the provider's CA file> to the URL in secrets/database_url."
         )
     if config.tunnel.enabled:
         if config.secrets.server_password is None and config.billing.provider == "none":
@@ -894,9 +920,9 @@ def unwritable_directories(config: "Settings | None" = None, role: str = "all") 
     # The admin web page only reads, and gets the data folder read-only.
     directories = [] if role == "admin" else [config.service.data_dir]
     if role in ("api", "worker", "remote", "all"):
-        directories.append(str(Path(config.billing.database_path).parent))
+        directories.append(str(Path(config.database.path).parent))
     if role in ("api", "all"):
-        directories.append(config.billing.backup_dir)
+        directories.append(config.database.backup_dir)
     problems = []
     for directory in dict.fromkeys(directories):
         if Path(directory).is_dir() and not os.access(directory, os.W_OK):

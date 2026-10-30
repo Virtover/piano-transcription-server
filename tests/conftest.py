@@ -49,14 +49,14 @@ def api_context(tmp_path, monkeypatch, video_sites) -> Iterator[tuple[TestClient
     from app.worker import tasks
 
     settings.auth.client_ids = ["test-client-id"]
-    settings.billing.database_url = ""
-    settings.billing.database_path = str(tmp_path / "billing.sqlite3")
-    settings.billing.backup_dir = str(tmp_path / "backups")
+    settings.database.url = ""
+    settings.database.path = str(tmp_path / "billing.sqlite3")
+    settings.database.backup_dir = str(tmp_path / "backups")
     settings.service.data_dir = str(tmp_path / "data")
     settings.limits.max_video_length_minutes = 20
 
     redis = fakeredis.FakeRedis(decode_responses=True)
-    billing = Billing(settings.billing.database_path)
+    billing = Billing(settings.database.path)
     monkeypatch.setattr(billing_routes, "redis", redis)
     monkeypatch.setattr(transcription_routes, "redis", redis)
     monkeypatch.setattr(tasks, "redis", redis)

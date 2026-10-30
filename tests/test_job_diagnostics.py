@@ -24,7 +24,7 @@ def auth(token):
 
 
 def diagnostics(settings, job_id):
-    connection = sqlite3.connect(settings.billing.database_path)
+    connection = sqlite3.connect(settings.database.path)
     connection.row_factory = sqlite3.Row
     try:
         row = connection.execute("SELECT * FROM job_diagnostics WHERE job_id = ?", (job_id,)).fetchone()
@@ -147,10 +147,10 @@ def test_account_deletion_removes_diagnostics(worker):
 
 def test_backup_prunes_old_diagnostics_and_contains_the_rest(worker):
     client, settings, billing = worker
-    settings.billing.job_diagnostics_retention = "1d"
+    settings.jobs.diagnostics_retention = "1d"
     old = submit(client)
     recent = submit(client)
-    with sqlite3.connect(settings.billing.database_path) as connection:
+    with sqlite3.connect(settings.database.path) as connection:
         connection.execute(
             "UPDATE job_diagnostics SET created_at = ? WHERE job_id = ?",
             (int(time.time()) - 2 * 24 * 60 * 60, old),
@@ -159,7 +159,7 @@ def test_backup_prunes_old_diagnostics_and_contains_the_rest(worker):
     main.run_billing_backup()
 
     assert diagnostics(settings, old) is None
-    [backup] = list(Path(settings.billing.backup_dir).glob("billing-*.sqlite3"))
+    [backup] = list(Path(settings.database.backup_dir).glob("billing-*.sqlite3"))
     connection = sqlite3.connect(backup)
     try:
         assert connection.execute("SELECT job_id FROM job_diagnostics").fetchall() == [(recent,)]
@@ -170,4 +170,4 @@ def test_backup_prunes_old_diagnostics_and_contains_the_rest(worker):
 def test_diagnostics_retention_default(api_context):
     _, settings, _ = api_context
 
-    assert settings.billing.job_diagnostics_retention == 30 * 24 * 60 * 60
+    assert settings.jobs.diagnostics_retention == 30 * 24 * 60 * 60

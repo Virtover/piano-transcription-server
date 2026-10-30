@@ -9,7 +9,7 @@ The server runs in one of two ways, from the same code:
 | GPU workers | the machine's GPUs | one GPU per pod, added and removed on the queue by KEDA |
 | Job files | the `data` volume (`JOB_STORAGE=local`) | the object storage bucket (`JOB_STORAGE=s3`) |
 | Redis, PostgreSQL | containers of the stack | managed services |
-| Billing backups | the server's, every 15 minutes, optionally off-site | the database provider's (`BILLING_BACKUPS=provider`) |
+| Billing backups | the server's, every 15 minutes, optionally off-site | the database provider's (`DATABASE_BACKUPS=provider`) |
 | Updates | `python scripts/server.py restart`, announced to clients | rolling updates, which interrupt nothing |
 
 Clients see one difference: with `JOB_STORAGE=s3`, the MIDI download answers with a redirect to a signed link instead of the file. Apps must follow it without their `Authorization` header; see [Following a job](api.md#-following-a-job).
@@ -35,7 +35,7 @@ Move during a quiet hour; users cannot submit jobs from step 4 until step 8. The
 
 1. **Create the services**: a bucket for this server alone, a managed Redis, and a managed PostgreSQL. Check them against `requirements` as above.
 2. **Try job storage on one machine.** Set `JOB_STORAGE=s3` with the bucket's settings in `.env`, apply them during a quiet moment (`python scripts/server.py restart 5m`), and transcribe a link and an upload. The MIDI download now redirects to the bucket. Change it back later only when no job is queued.
-3. **Prepare the cluster** as in [Kubernetes](kubernetes.md), steps 1 to 5, without applying yet. The database URL that goes into `secrets/billing_database_url` there is the managed one; keep a copy of it in `secrets/managed_billing_database_url` for step 6. That name is read by nothing else, so the Compose stack keeps its own database meanwhile.
+3. **Prepare the cluster** as in [Kubernetes](kubernetes.md), steps 1 to 5, without applying yet. The database URL that goes into `secrets/database_url` there is the managed one; keep a copy of it in `secrets/managed_database_url` for step 6. That name is read by nothing else, so the Compose stack keeps its own database meanwhile.
 4. **Stop new jobs**, and let the running ones finish:
 
    ```shell
@@ -56,7 +56,7 @@ Move during a quiet hour; users cannot submit jobs from step 4 until step 8. The
 6. **Copy it into the managed database**, which must still be empty. The restore is one transaction, so on any error the managed database stays empty:
 
    ```shell
-   docker compose run --rm --no-deps api python -m app.backups copy-to /run/secrets/managed_billing_database_url
+   docker compose run --rm --no-deps api python -m app.backups copy-to /run/secrets/managed_database_url
    docker compose stop postgres
    ```
 

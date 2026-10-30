@@ -63,10 +63,10 @@ class Billing:
         # The database is created on first use, not here: modules create a
         # Billing when imported, also in services and tests without access
         # to the billing directory.
-        self.database_path = database_path or settings.billing.database_path
+        self.database_path = database_path or settings.database.path
         self.database_url = None if database_path else (
-            settings.secrets.billing_database_url.get_secret_value()
-            if settings.secrets.billing_database_url else settings.billing.database_url
+            settings.secrets.database_url.get_secret_value()
+            if settings.secrets.database_url else settings.database.url
         )
         self._postgres = bool(self.database_url and not database_path)
         # The admin web page's roles may not create or change tables; the
@@ -242,7 +242,7 @@ class Billing:
 
     def _postgres_url(self) -> str:
         # Compose deliberately keeps the password out of the URL and exposes
-        # it as a Docker secret. A complete billing_database_url secret still
+        # it as a Docker secret. A complete database_url secret still
         # takes precedence in __init__.
         url = self.database_url
         password_file = Path(settings.secrets_dir) / "postgres_password"
