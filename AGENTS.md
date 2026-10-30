@@ -43,6 +43,7 @@ python scripts/kube.py local up                                 # Kubernetes: a 
 | `scripts/kube.py` | Kubernetes from the host: up, update, status, down, for a real cluster and, with `local`, the test cluster |
 | `scripts/setup.py` | Guided setup of the optional features on the host, from `features --json` and `requirements --json` |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
+| `scripts/stacks.py` | Where the server runs, for the host scripts: requests built on a few primitives, `ComposeStack` gives them with the docker CLI |
 
 ## Conventions
 

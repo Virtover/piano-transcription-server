@@ -161,7 +161,7 @@ def test_profiles_reach_restart_commands():
         calls.append(command)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    stack = server.Stack(["outsource"], run=fake_run, popen=lambda command: calls.append(command))
+    stack = server.ComposeStack(["outsource"], run=fake_run, popen=lambda command: calls.append(command))
     stack.maintenance("status")
     stack.start_build()
     stack.up()
@@ -174,9 +174,49 @@ def test_profiles_reach_restart_commands():
     assert calls[3][4:] == ["up", "-d"]
 
 
+def test_requests_are_built_on_the_primitives_alone(tmp_path):
+    """What the scripts ask of a stack goes through exec and one_off, so
+    another place to run the server needs only those."""
+    calls = []
+
+    class Recording(server.Stack):
+        def exec(self, service, *command, **options):
+            calls.append(("exec", service, command[:3]))
+            return SimpleNamespace(returncode=0, stdout="OK\n", stderr="")
+
+        def one_off(self, service, *command, **options):
+            calls.append(("one_off", service, command[:3]))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    stack = Recording()
+    dump = tmp_path / "billing-1.dump"
+    dump.write_bytes(b"PGDMP")
+    stack.maintenance("status")
+    stack.ready()
+    stack.reload_redis_users()
+    stack.redis("ping")
+    stack.fetch_backup("latest", KEY)
+    stack.backup_now()
+    stack.restore_dump(dump)
+
+    assert [call[:2] for call in calls] == [
+        ("exec", "api"), ("exec", "api"), ("exec", "redis"), ("exec", "redis"),
+        ("one_off", "api"), ("one_off", "api"), ("exec", "postgres"),
+    ]
+
+
+def test_compose_stack_prepares_the_files_of_its_checkout(tmp_path):
+    roots = []
+    stack = server.ComposeStack([], root=tmp_path, prepare=lambda root: roots.append(root) or ["created .env"])
+
+    assert stack.prepare_files() == ["created .env"]
+    assert roots == [tmp_path]
+    assert server.ComposeStack([], root=tmp_path).prepare_files() == []
+
+
 def test_stop_covers_every_profile():
     calls = []
-    stack = server.Stack([], run=lambda command, **kwargs: calls.append(command) or SimpleNamespace(returncode=0, stdout="api\n"))
+    stack = server.ComposeStack([], run=lambda command, **kwargs: calls.append(command) or SimpleNamespace(returncode=0, stdout="api\n"))
 
     stack.stop(down=False)
     stack.stop(down=True)
@@ -187,7 +227,7 @@ def test_stop_covers_every_profile():
 
 def test_custom_command_is_run_instead_of_compose_up():
     calls = []
-    stack = server.Stack([], run=lambda command, **kwargs: calls.append(command) or SimpleNamespace(returncode=0))
+    stack = server.ComposeStack([], run=lambda command, **kwargs: calls.append(command) or SimpleNamespace(returncode=0))
 
     stack.up("docker compose up -d --build api")
 
@@ -195,7 +235,7 @@ def test_custom_command_is_run_instead_of_compose_up():
 
 
 def test_maintenance_errors_name_the_problem():
-    stack = server.Stack([], run=lambda command, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr='service "api" is not running'))
+    stack = server.ComposeStack([], run=lambda command, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr='service "api" is not running'))
 
     with pytest.raises(RuntimeError, match="not running"):
         stack.maintenance("status")
@@ -713,9 +753,9 @@ def test_reloading_redis_users_runs_the_start_script():
         calls.append(command)
         return SimpleNamespace(returncode=0, stdout="OK\n", stderr="")
 
-    assert server.Stack([], run=fake_run).reload_redis_users() == ""
+    assert server.ComposeStack([], run=fake_run).reload_redis_users() == ""
     assert calls == [["docker", "compose", "exec", "-T", "redis", "sh", "/redis/start.sh", "reload"]]
-    refused = server.Stack([], run=lambda command, **kwargs: SimpleNamespace(returncode=0, stdout="ERR Error in user declaration", stderr=""))
+    refused = server.ComposeStack([], run=lambda command, **kwargs: SimpleNamespace(returncode=0, stdout="ERR Error in user declaration", stderr=""))
     assert refused.reload_redis_users() == "ERR Error in user declaration"
 
 
@@ -738,17 +778,17 @@ def test_redis_cli_signs_in_as_operator_without_showing_the_password():
         calls.append(command)
         return SimpleNamespace(returncode=0, stdout="OK\n", stderr="")
 
-    assert server.Stack([], run=fake_run).redis("config", "set", "appendonly", "yes") == "OK"
+    assert server.ComposeStack([], run=fake_run).redis("config", "set", "appendonly", "yes") == "OK"
     [command] = calls
     assert command[:6] == ["docker", "compose", "exec", "-T", "redis", "sh"]
-    assert command[6:8] == ["-c", server.REDIS_CLI]
+    assert command[6:8] == ["-c", server.STACKS.REDIS_CLI]
     assert command[8:] == ["redis-cli", "config", "set", "appendonly", "yes"]
-    assert "REDISCLI_AUTH" in server.REDIS_CLI and "--pass" not in server.REDIS_CLI
+    assert "REDISCLI_AUTH" in server.STACKS.REDIS_CLI and "--pass" not in server.STACKS.REDIS_CLI
 
 
 @pytest.mark.parametrize("answer", ["NOPERM User app has no permissions", "AUTH failed: WRONGPASS invalid", "ERR unknown command"])
 def test_a_refused_redis_command_is_an_error(answer):
-    stack = server.Stack([], run=lambda command, **kwargs: SimpleNamespace(returncode=0, stdout=answer, stderr=""))
+    stack = server.ComposeStack([], run=lambda command, **kwargs: SimpleNamespace(returncode=0, stdout=answer, stderr=""))
 
     with pytest.raises(RuntimeError, match="Redis refused"):
         stack.redis("config", "set", "appendonly", "yes")
@@ -839,7 +879,7 @@ class RestoreStack(FakeStack):
         return 0, "Backup from 2026-10-27 16:47 UTC saved and checked: /billing/restore/billing-1793116030.dump"
 
     def host_path(self, container_path):
-        return server.Stack.host_path(self, container_path)
+        return server.ComposeStack.host_path(self, container_path)
 
     def start_postgres(self):
         self.steps.append(("postgres",))
@@ -958,7 +998,7 @@ def test_key_is_sent_on_standard_input_only(tmp_path):
         calls.append((command, options))
         return SimpleNamespace(returncode=0, stdout="saved and checked: /billing/restore/billing-1.dump\n", stderr="")
 
-    stack = server.Stack([], run=fake_run, root=tmp_path)
+    stack = server.ComposeStack([], run=fake_run, root=tmp_path)
     stack.fetch_backup("2", KEY)
 
     command, options = calls[0]
@@ -977,16 +1017,16 @@ def test_dump_is_streamed_into_pg_restore(tmp_path):
         received.append((command, options["stdin"].read()))
         return SimpleNamespace(returncode=0)
 
-    server.Stack([], run=fake_run, root=tmp_path).restore_dump(dump)
+    server.ComposeStack([], run=fake_run, root=tmp_path).restore_dump(dump)
 
     command, data = received[0]
-    assert command[-len(server.PG_RESTORE):] == server.PG_RESTORE
+    assert command[-len(server.STACKS.PG_RESTORE):] == server.STACKS.PG_RESTORE
     assert "--single-transaction" in command and "--clean" in command
     assert data == b"PGDMP"
 
 
 def test_container_paths_map_to_billing_data(tmp_path):
-    stack = server.Stack([], root=tmp_path)
+    stack = server.ComposeStack([], root=tmp_path)
 
     assert stack.host_path("/billing/restore/billing-1.dump") == tmp_path / "billing-data" / "restore" / "billing-1.dump"
 

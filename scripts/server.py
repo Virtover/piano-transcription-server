@@ -32,26 +32,35 @@ transaction, and starts again.
 
 import argparse
 import getpass
+import importlib.util
 import json
 import os
 import re
 import secrets
-import shlex
 import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_script(name: str):
+    spec = importlib.util.spec_from_file_location(f"{name}_script", Path(__file__).with_name(f"{name}.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+STACKS = load_script("stacks")
+Stack, ComposeStack = STACKS.Stack, STACKS.ComposeStack
+
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 DEFAULT_GRACE = "5m"
 READY_TIMEOUT = 180
 AOF_TIMEOUT = 60
 STATUS_INTERVAL = 10
 DRAIN_INTERVAL = 5
-# A shutdown stops every service, whichever profiles started it.
-ALL_PROFILES = ["*"]
 # docker-compose.yml passes it to Dockerfile.worker as GPU_BUILD.
 GPU_BUILD_VARIABLE = "WORKER_GPU_BUILD"
 OUTSOURCE_NOTE = "--outsource is no longer needed: OUTSOURCE_PROVIDER in server.env turns outsourcing on or off"
@@ -67,18 +76,6 @@ REDIS_USERS = ["operator", "app", "admin-read-only", "admin-read-write"]
 ADMIN_WEB_DATABASE_PASSWORDS = ["postgres-read-only", "postgres-read-write"]
 # The folder of app.config.TUNNEL_TOKEN_FILE, which the workers hide.
 TUNNEL_TOKEN_FOLDER = "secrets/cloudflare"
-# redis-cli in the redis container, signed in as operator. A container from
-# before Redis had users has no password file and needs none. The password
-# goes through the environment, not the command line.
-REDIS_CLI = (
-    'if [ -f /run/secrets/redis/operator ]; then '
-    'export REDISCLI_AUTH="$(cat /run/secrets/redis/operator)"; set -- --user operator "$@"; fi; '
-    'exec redis-cli "$@"'
-)
-# redis-cli exits with 0 when Redis refuses a command; its answer says so.
-REDIS_REFUSALS = ("NOAUTH", "WRONGPASS", "NOPERM", "AUTH failed", "ERR ")
-PG_RESTORE = ["pg_restore", "-U", "billing", "-d", "billing", "--clean", "--if-exists", "--no-owner",
-              "--single-transaction", "--exit-on-error"]
 
 
 def parse_duration(text: str) -> float:
@@ -414,98 +411,6 @@ def select_gpu_build(args, environment) -> None:
     if getattr(args, "legacy_gpu", False):
         environment[GPU_BUILD_VARIABLE] = "legacy"
         say("building the worker for older GPUs (GTX 10 series and similar)")
-
-
-class Stack:
-    """The Docker Compose stack, reached through the docker CLI."""
-
-    def __init__(self, profiles: list[str], run=subprocess.run, popen=subprocess.Popen, root: Path = ROOT):
-        self.profiles = profiles
-        self._run = run
-        self._popen = popen
-        self.root = root
-
-    def prepare_files(self) -> list[str]:
-        return prepare_files(self.root)
-
-    def compose(self, profiles: list[str] | None = None) -> list[str]:
-        selected = self.profiles if profiles is None else profiles
-        return ["docker", "compose"] + [part for name in selected for part in ("--profile", name)]
-
-    def maintenance(self, *arguments: str) -> str:
-        result = self._run(
-            self.compose() + ["exec", "-T", "api", "python", "-m", "app.maintenance", *arguments],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout).strip() or "the api service is not running")
-        return result.stdout.strip()
-
-    def ready(self) -> bool:
-        probe = "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=5)"
-        result = self._run(self.compose() + ["exec", "-T", "api", "python", "-c", probe], capture_output=True, text=True)
-        return result.returncode == 0
-
-    def reload_redis_users(self) -> str:
-        """Make the running Redis read its users again (redis/start.sh reload).
-        Returns what went wrong, or an empty string."""
-        result = self._run(self.compose() + ["exec", "-T", "redis", "sh", "/redis/start.sh", "reload"],
-                           capture_output=True, text=True)
-        answer = (result.stdout or "").strip()
-        if result.returncode != 0 or answer != "OK":
-            return (result.stderr or answer).strip() or f"exit code {result.returncode}"
-        return ""
-
-    def redis(self, *arguments: str) -> str:
-        result = self._run(self.compose() + ["exec", "-T", "redis", "sh", "-c", REDIS_CLI, "redis-cli", *arguments],
-                           capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout).strip() or "the redis service is not running")
-        answer = result.stdout.strip()
-        if answer.startswith(REDIS_REFUSALS):
-            raise RuntimeError(f"Redis refused: {answer.splitlines()[0]}")
-        return answer
-
-    def start_build(self):
-        return self._popen(self.compose() + ["build"])
-
-    def up(self, command: str | None = None, build: bool = True) -> int:
-        if command:
-            return self._run(shlex.split(command, posix=(sys.platform != "win32"))).returncode
-        return self._run(self.compose() + ["up", "-d"] + (["--build"] if build else [])).returncode
-
-    def stop(self, down: bool) -> int:
-        return self._run(self.compose(ALL_PROFILES) + (["down"] if down else ["stop"])).returncode
-
-    def fetch_backup(self, which: str, key: str) -> tuple[int, str]:
-        # The key goes on standard input: arguments and the environment are
-        # visible to other processes.
-        result = self._run(
-            self.compose() + ["run", "--rm", "--no-deps", "-T", "api", "python", "-m", "app.backups", "fetch", which],
-            input=key, capture_output=True, text=True,
-        )
-        return result.returncode, "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
-
-    def host_path(self, container_path: str) -> Path:
-        # billing-data is mounted at /billing in docker-compose.yml.
-        return self.root / "billing-data" / Path(container_path).relative_to("/billing")
-
-    def start_postgres(self) -> int:
-        return self._run(self.compose() + ["up", "-d", "--wait", "postgres"]).returncode
-
-    def stop_services(self, services: list[str]) -> int:
-        return self._run(self.compose() + ["stop", *services]).returncode
-
-    def backup_now(self) -> int:
-        return self._run(self.compose() + ["run", "--rm", "--no-deps", "api", "python", "-m", "app.backups", "now"]
-                         ).returncode
-
-    def restore_dump(self, dump: Path) -> int:
-        # pg_restore reads a custom-format dump from standard input, so
-        # nothing is copied into the container.
-        with dump.open("rb") as stream:
-            return self._run(self.compose() + ["exec", "-T", "postgres", *PG_RESTORE], stdin=stream).returncode
 
 
 class Clock:
@@ -886,7 +791,7 @@ def main(arguments: list[str], stack: Stack | None = None, clock: Clock | None =
     if stack is None:
         share_billing_data(os.environ)
         select_gpu_build(args, os.environ)
-    stack = stack or Stack(args.profile)
+    stack = stack or ComposeStack(args.profile, prepare=prepare_files)
     clock = clock or Clock()
     try:
         if args.action == "status":
