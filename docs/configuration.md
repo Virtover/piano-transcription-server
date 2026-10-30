@@ -441,6 +441,8 @@ docker compose exec api python -m app.backups now
 docker compose exec api python -m app.backups list
 ```
 
+`python -m app.backups copy-to <file>` restores the newest backup into another, empty PostgreSQL database, such as a managed one when [moving to several machines](scaling.md#-moving-a-running-server). The file holds that database's URL, with its password and TLS options, so neither is in a command line. The restore is one transaction: a database that is not empty is left unchanged.
+
 ### Which backups are kept
 
 After each backup, the API thins out older ones, so recent history is dense and older history sparse. With the defaults:
@@ -656,6 +658,8 @@ docker compose exec -T postgres pg_restore -U billing -d billing --no-owner --ex
 docker compose exec -T postgres rm -f /tmp/billing.dump
 docker compose up -d
 ```
+
+To move it to a managed PostgreSQL instead, see [Moving a running server](scaling.md#-moving-a-running-server).
 
 Then check balances, for example with `docker compose exec api python -m
 app.admin status`. The old database is left where it was. Remove it once the

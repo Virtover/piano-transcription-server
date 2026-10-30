@@ -29,6 +29,7 @@ See [Local setup](docs/setup.md) for requirements, GPU checks, health checks, an
 * [Local setup](docs/setup.md) - run the Docker stack, check services, protect a private server with a password, tune CPU/GPU workers, and free disk space.
 * [HTTPS through a Cloudflare Tunnel](docs/cloudflare-tunnel.md) - an HTTPS address for the server without opening ports, turned on from `.env`.
 * [Outsourcing to RunPod](docs/runpod.md) - step by step: Cloudflare R2 storage, Docker Hub, the RunPod endpoint, and a free local test.
+* [Scaling beyond one machine](docs/scaling.md) - the two ways to run the server, what makes several machines work, and moving a running server.
 * [Kubernetes](docs/kubernetes.md) - several machines: API replicas, GPU workers added as the queue grows, managed Redis and PostgreSQL.
 * [Administration](docs/administration.md) - server status, jobs, user accounts and credits, the billing report, and temporary limits, with `python scripts/admin.py`.
 * [Configuration and environment](docs/configuration.md) - environment variables, GPU memory and batching, secrets, error reports, and database backups.

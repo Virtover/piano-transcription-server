@@ -256,18 +256,7 @@ class Billing:
         return url
 
     def _postgres_tool_arguments(self) -> tuple[str, dict[str, str]]:
-        """The URL without its password, and an environment with it. Command
-        arguments are visible to every process in the container and appear in
-        the error of a failed command, which is logged."""
-        parts = urlsplit(self._postgres_url())
-        environment = dict(os.environ)
-        if parts.password is None:
-            return urlunsplit(parts), environment
-        environment["PGPASSWORD"] = unquote(parts.password)
-        netloc = f"{parts.username}@{parts.hostname}" if parts.username else parts.hostname
-        if parts.port:
-            netloc += f":{parts.port}"
-        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment)), environment
+        return postgres_tool_arguments(self._postgres_url())
 
     def _open(self):
         if self._postgres:
@@ -744,12 +733,12 @@ class Billing:
             partial = target_path.with_name(target_path.name + ".partial")
             url, environment = self._postgres_tool_arguments()
             try:
-                _run_postgres_tool(
+                run_postgres_tool(
                     ["pg_dump", "--format=custom", "--no-owner", "--file", str(partial), url], environment
                 )
                 if partial.stat().st_size == 0:
                     raise RuntimeError("pg_dump produced an empty backup")
-                _run_postgres_tool(["pg_restore", "--list", str(partial)], environment)
+                run_postgres_tool(["pg_restore", "--list", str(partial)], environment)
                 _replace_durably(partial, target_path)
             finally:
                 partial.unlink(missing_ok=True)
@@ -770,7 +759,22 @@ class InsufficientMinutes(Exception):
     pass
 
 
-def _run_postgres_tool(command: list[str], environment: dict[str, str]) -> None:
+def postgres_tool_arguments(url: str) -> tuple[str, dict[str, str]]:
+    """The URL without its password, and an environment with it. Command
+    arguments are visible to every process in the container and appear in
+    the error of a failed command, which is logged."""
+    parts = urlsplit(url)
+    environment = dict(os.environ)
+    if parts.password is None:
+        return urlunsplit(parts), environment
+    environment["PGPASSWORD"] = unquote(parts.password)
+    netloc = f"{parts.username}@{parts.hostname}" if parts.username else parts.hostname
+    if parts.port:
+        netloc += f":{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment)), environment
+
+
+def run_postgres_tool(command: list[str], environment: dict[str, str]) -> None:
     result = subprocess.run(command, capture_output=True, text=True, env=environment)
     if result.returncode != 0:
         # Only the tool's name and its own message: the command holds the URL.

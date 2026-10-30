@@ -1,6 +1,6 @@
 # ☸️ Kubernetes
 
-The Compose stack runs everything on one machine. For more than one machine, `deploy/kubernetes` runs the same images on Kubernetes:
+The Compose stack runs everything on one machine. For more than one machine, `deploy/kubernetes` runs the same images on Kubernetes. [Scaling beyond one machine](scaling.md) compares the two and moves a running server over.
 
 * **API replicas**, two or more behind the Service `api`, added on CPU. Any replica answers any request; one leads the periodic tasks.
 * **GPU workers**, one GPU each. KEDA adds them while jobs wait and removes them slowly afterwards; see [Metrics for scaling](architecture.md#-metrics-for-scaling).

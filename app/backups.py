@@ -394,6 +394,44 @@ def fetch(name: str, identity: str, store_factory: Callable | None = None) -> in
     return 0
 
 
+def copy_to(url_file: str, directory: str | None = None) -> int:
+    """Restore the newest local backup into another PostgreSQL database, such
+    as a managed one when moving to several machines. The URL, with password
+    and TLS options, is read from a file, so it is in no command line. The
+    restore is one transaction, so a database that is not empty is left as
+    it was."""
+    from urllib.parse import urlsplit
+
+    from app.billing import postgres_tool_arguments, run_postgres_tool
+
+    try:
+        url = Path(url_file).read_text(encoding="utf-8").strip()
+    except OSError as error:
+        print(f"Cannot read {url_file}: {type(error).__name__}", file=sys.stderr)
+        return 1
+    if not url.startswith(("postgres://", "postgresql://")):
+        print(f"{url_file} does not hold a postgresql:// URL", file=sys.stderr)
+        return 1
+    dumps = {stamp: path for stamp, path in local_backups(directory or settings.billing.backup_dir).items()
+             if path.suffix == ".dump"}
+    if not dumps:
+        print("There is no backup to copy; make one with: python -m app.backups now", file=sys.stderr)
+        return 1
+    newest = max(dumps)
+    target, environment = postgres_tool_arguments(url)
+    try:
+        run_postgres_tool(
+            ["pg_restore", "--no-owner", "--exit-on-error", "--single-transaction", "--dbname", target,
+             str(dumps[newest])],
+            environment,
+        )
+    except (OSError, RuntimeError) as error:
+        print(f"Could not copy the backup: {error}. The target database was not changed.", file=sys.stderr)
+        return 1
+    print(f"Copied {dumps[newest].name} ({_when(newest)}) into the database at {urlsplit(url).hostname}.")
+    return 0
+
+
 def main(arguments: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.backups", description="Billing database backups.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -404,6 +442,10 @@ def main(arguments: list[str]) -> int:
         "fetch", help="download and decrypt an off-site backup; the private key is read from standard input"
     )
     fetch_parser.add_argument("name", help="latest, a name from `list`, or its number there: 1 is the newest")
+    copy_parser = commands.add_parser(
+        "copy-to", help="restore the newest backup into another, empty PostgreSQL database, such as a managed one"
+    )
+    copy_parser.add_argument("url_file", help="a file with that database's URL, with its password and TLS options")
     args = parser.parse_args(arguments)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -413,6 +455,8 @@ def main(arguments: list[str]) -> int:
         return list_backups()
     if args.command == "fetch":
         return fetch(args.name, sys.stdin.read())
+    if args.command == "copy-to":
+        return copy_to(args.url_file)
     from app.billing import Billing
 
     if not run_backup(Billing()):
