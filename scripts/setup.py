@@ -157,6 +157,13 @@ class Console:
         for line in textwrap.wrap(text, WIDTH - len(indent)) or [""]:
             self.say(indent + self.style(line, *styles))
 
+    def labelled(self, label: str, text: str, indent: str = "  ", *styles: str) -> None:
+        """label, styled, then text wrapped beside it, its lines lined up."""
+        lines = textwrap.wrap(text, WIDTH - len(indent) - len(label)) or [""]
+        self.say(indent + self.style(label, *styles) + lines[0])
+        for line in lines[1:]:
+            self.say(indent + " " * len(label) + line)
+
     def heading(self, text: str) -> None:
         self.say("")
         self.say(self.style(text, "bold", "cyan"))
@@ -256,39 +263,77 @@ class Setup:
 
     # How each feature's role on Kubernetes reads, and in which color.
     KUBERNETES_USES = {
-        "needed": ("needed", ("cyan", "bold")),
+        "needed": ("required", ("cyan",)),
         "optional": ("optional", ("dim",)),
-        "unavailable": ("not available", ("red",)),
+        "unavailable": ("not used", ("yellow",)),
     }
 
-    def kubernetes_tag(self, feature: dict) -> str:
+    def kubernetes_use(self, feature: dict) -> tuple[str, tuple[str, ...]]:
         use = feature.get("kubernetes", {}).get("use", "optional")
-        text, styles = self.KUBERNETES_USES.get(use, (use, ()))
-        return self.style(text.ljust(13), *styles)
+        return self.KUBERNETES_USES.get(use, (use, ()))
+
+    @staticmethod
+    def differs_on_kubernetes(feature: dict) -> bool:
+        """Whether the cluster has it otherwise than this machine: required
+        there and off here, or on here and not used there."""
+        use = feature.get("kubernetes", {}).get("use", "optional")
+        return (use == "needed" and not feature["enabled"]) or (use == "unavailable" and feature["enabled"])
 
     def status(self) -> int:
         features = self.features()
         say, style = self.console.say, self.style
-        say(style("Optional features", "bold") + style("  (a basic server needs none)", "dim"))
-        width = max(len(feature["title"]) for feature in features.values())
-        say(style(f"  {'':4}{'here':5}{'':{width}}  {'name':16} {'on Kubernetes':13}", "dim"))
-        for number, feature in enumerate(features.values(), 1):
+        states = {}
+        for key, feature in features.items():
             missing = Missing.of(feature)
             if not feature["enabled"]:
-                state, tag = style("off", "dim"), ""
+                states[key] = (missing, "off", ("dim",))
             elif missing.count:
-                state, tag = style("on ", "green"), style(f"{missing.count} missing", "yellow", "bold")
+                states[key] = (missing, f"on, {missing.count} missing", ("yellow", "bold"))
             else:
-                state, tag = style("on ", "green"), style("ready", "green")
-            title = feature["title"].ljust(width)
-            title = style(title, "dim") if not feature["enabled"] else title
-            say(f"  {number:2}. {state}  {title}  {style(feature['key'].ljust(16), 'cyan')} "
-                f"{self.kubernetes_tag(feature)} {tag}".rstrip())
-            missing.show(self.console, " " * 12)
-        say(style("  Set one up: python scripts/setup.py <name>; turn one off: python scripts/setup.py off <name>",
-                  "dim"))
-        say(style("  On Kubernetes: needed ones must be on there, not available ones off; "
-                  "python scripts/kube.py status checks the cluster.", "dim"))
+                states[key] = (missing, "on, ready", ("green",))
+        title_width = max(len(feature["title"]) for feature in features.values())
+        name_width = max(len(key) for key in features)
+        state_width = max(len("Status"), *(len(state) for _, state, _ in states.values()))
+
+        def row(number: str, title: str, name: str, state: str, kubernetes: str) -> str:
+            return f"  {number:>2}  {title}  {name}  {state}  {kubernetes}".rstrip()
+
+        say(style("Optional features", "bold") + style("  (a basic server needs none of them)", "dim"))
+        say("")
+        say(style(row("#", "Feature".ljust(title_width), "Name".ljust(name_width),
+                      "Status".ljust(state_width), "On Kubernetes"), "bold"))
+        different = []
+        for number, (key, feature) in enumerate(features.items(), 1):
+            missing, state, state_styles = states[key]
+            kubernetes, kubernetes_styles = self.kubernetes_use(feature)
+            if self.differs_on_kubernetes(feature):
+                different.append(feature)
+                kubernetes += " *"
+            title = feature["title"].ljust(title_width)
+            say(row(str(number), style(title, "dim") if not feature["enabled"] else title,
+                    style(key.ljust(name_width), "cyan"), style(state.ljust(state_width), *state_styles),
+                    style(kubernetes, *kubernetes_styles)))
+            missing.show(self.console, " " * 6)
+
+        say("")
+        legend = [
+            ("Status", "on or off in server.env, which the server on this machine runs with; "
+                       "ready when nothing it needs is missing"),
+            ("On Kubernetes", "required: must be on in the cluster; optional: your choice; "
+                              "not used: must be off there"),
+        ]
+        for label, text in legend:
+            self.console.labelled(label.ljust(15), text, "  ", "bold")
+        if different:
+            say("")
+            say(f"  {style('*', 'bold')} Different on Kubernetes than here, and why:")
+            for feature in different:
+                self.console.labelled(f"{feature['key']:{name_width}}  ", feature["kubernetes"]["why"], "    ", "cyan")
+        say("")
+        for label, command in [("Set one up", "python scripts/setup.py <name>"),
+                               ("Turn one off", "python scripts/setup.py off <name>"),
+                               ("The cluster", "python scripts/kube.py status")]:
+            say(f"  {style(label.ljust(15), 'dim')}{command}")
         return 0
 
     # --- Setting a feature up --------------------------------------------------------------

@@ -366,10 +366,21 @@ def test_status_lists_every_feature_and_its_problems(server):
     setup.status()
 
     line = next(line for line in script.said if "Job files in object storage" in line)
-    assert line.split()[1] == "on" and "job_storage" in line and line.endswith("1 missing")
+    assert "job_storage" in line and "on, 1 missing" in line
     assert any(line.strip().startswith("! JOB_STORAGE=s3 needs object storage") for line in script.said)
     ready = next(line for line in script.said if "Password protection" in line)
-    assert ready.split()[1] == "off" and "missing" not in ready
+    assert " off " in ready and "missing" not in ready
+
+
+def test_status_names_its_columns_and_explains_them(server):
+    setup, script = make(server)
+
+    setup.status()
+
+    header = next(line for line in script.said if "Feature" in line)
+    assert header.split() == ["#", "Feature", "Name", "Status", "On", "Kubernetes"]
+    assert any(line.strip().startswith("Status") and "server.env" in line for line in script.said)
+    assert any(line.strip().startswith("On Kubernetes") and "required:" in line for line in script.said)
 
 
 def test_status_says_what_kubernetes_needs(server):
@@ -380,7 +391,26 @@ def test_status_says_what_kubernetes_needs(server):
     metrics = next(line for line in script.said if "Metrics for scaling" in line)
     offsite = next(line for line in script.said if "Off-site backups" in line)
     billing = next(line for line in script.said if "Billing with Google Play" in line)
-    assert "needed" in metrics and "not available" in offsite and "optional" in billing
+    assert "required" in metrics and "optional" in billing
+    # Off here, and required there: marked, with the reason below the table.
+    provider = next(line for line in script.said if "Backups by the database's provider" in line)
+    assert provider.endswith("required *")
+    reason = next(line for line in script.said if line.strip().startswith("provider_backups "))
+    assert "wiring.yaml" in reason
+
+
+def test_status_explains_a_feature_kubernetes_does_not_use(server):
+    file = env(server)
+    file.set("OFFSITE_BACKUP_BUCKET", "backups")
+    file.save()
+    setup, script = make(server)
+
+    setup.status()
+
+    offsite = next(line for line in script.said if "Off-site backups" in line)
+    assert offsite.endswith("not used *")
+    after = script.said[next(i for i, line in enumerate(script.said) if line.strip().startswith("offsite ")):]
+    assert "Kubernetes leaves to the provider" in " ".join(" ".join(after[:2]).split())
 
 
 def test_a_missing_setting_is_named(server):
