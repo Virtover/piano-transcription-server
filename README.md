@@ -48,20 +48,11 @@ Optional features, such as HTTPS, Google Play billing, or outsourcing to RunPod,
 
 * [Architecture and operations](docs/architecture.md) - service boundaries, transcription behavior, retention, cleanup, and limitations.
 
-## 🎼 Piano Weave
+## <img src="docs/images/pianoweave-icon.png" width="28" align="center" alt="" /> Piano Weave
 
-The server works with any client that can make HTTP requests and download MIDI files. One of them is Piano Weave, an Android app built on it.
+The server works with any client that can make HTTP requests and download MIDI files. **[Piano Weave](https://github.com/Virtover/pianoweave)** is an Android app built on it, for learning piano from the songs you love: send a video link, then practice the piano part on a falling-notes piano roll with looping, speed control, and a wait mode that listens to your piano.
 
-<p align="center">
-  <a href="https://github.com/Virtover/pianoweave"><img src="docs/images/pianoweave-icon.png" width="88" alt="Piano Weave icon" /></a>
-</p>
-<p align="center">
-  <b>Learn piano from the songs you love.</b><br />
-  <sub>Send a video link, get the piano part back as MIDI, and practice it on a falling-notes piano roll<br />with looping, speed control, and a wait mode that listens to your piano.</sub>
-</p>
-<p align="center">
-  <a href="https://github.com/Virtover/pianoweave"><img src="https://img.shields.io/badge/Piano%20Weave-on%20GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="Piano Weave on GitHub" height="28" /></a>
-</p>
+[![Piano Weave on GitHub](https://img.shields.io/badge/Piano%20Weave-on%20GitHub-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/Virtover/pianoweave)
 
 ## 💬 Community & Support
 
