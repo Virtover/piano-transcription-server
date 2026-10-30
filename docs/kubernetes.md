@@ -10,7 +10,7 @@ The Compose stack runs everything on one machine. For more than one machine, `de
 * **One remote worker** for RunPod, **one cleanup**, **two `cloudflared` connectors**, and optionally the [admin web page](#-the-admin-web-page).
 * **No Redis, PostgreSQL, or data volume of its own.** Redis and PostgreSQL are managed services, and job files are kept in the object storage bucket.
 
-The manifests set `JOB_STORAGE=s3` and `DATABASE_BACKUPS=provider` themselves, because several machines share no folder: see [Job storage](architecture.md#job-storage) and [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). `tests/test_kubernetes.py` keeps them in step with `docker-compose.yml`: the same commands, wiring, secret paths, user, and hardening.
+The manifests set `JOB_STORAGE=s3` and `DATABASE_BACKUPS=provider` themselves, because several machines share no folder: see [Job storage](architecture.md#job-storage) and [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). `tests/test_kubernetes.py` keeps them in step with `docker-compose.yml`: the same commands, wiring, secret paths, user, and hardening. No pod gets a token for the Kubernetes API, which none of them uses, so a worker that a malicious file takes over cannot act on the cluster.
 
 | Folder | What |
 | --- | --- |

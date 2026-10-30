@@ -191,6 +191,25 @@ def test_reconcile_billing_finishes_interrupted_transitions(worker):
     assert billing.get_balance("user") == 4
 
 
+def test_periodic_reconciliation_leaves_jobs_that_just_ended(worker):
+    _, billing = worker
+    queue_job(billing, "just-cancelled", cost=2, progress="1.0")
+    queue_job(billing, "long-completed", cost=2)
+    billing.reserve("user", "vanished", 1)
+    # Ended now: an administrator's refund may be releasing it meanwhile.
+    tasks.redis.hset(tasks.job_key("just-cancelled"), "status", "cancelled")
+    tasks.redis.expire(tasks.job_key("just-cancelled"), tasks.job_ttl())
+    # Ended longer ago than RECONCILE_AFTER: its settlement was lost.
+    tasks.redis.hset(tasks.job_key("long-completed"), "status", "completed")
+    tasks.redis.expire(tasks.job_key("long-completed"), tasks.job_ttl() - tasks.RECONCILE_AFTER - 1)
+
+    tasks.reconcile_billing(min_age=tasks.RECONCILE_AFTER)
+
+    assert billing.reserved_job_ids() == ["just-cancelled"]
+    # 10 - 2 (completed) - 2 (still reserved); the vanished job's minute is back.
+    assert billing.get_balance("user") == 6
+
+
 def test_restart_fails_interrupted_jobs_and_keeps_queued_ones(worker, monkeypatch):
     settings, billing = worker
     sent = []

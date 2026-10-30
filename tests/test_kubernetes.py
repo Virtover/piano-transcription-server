@@ -136,6 +136,15 @@ def test_every_pod_is_unprivileged(service):
         assert "/tmp" in mounts(service)
 
 
+def test_no_pod_gets_a_kubernetes_api_token():
+    pods = [deployment(service)["spec"]["template"]["spec"] for service in DEPLOYED]
+    pods += [document["spec"]["template"]["spec"] for document in documents("local/services.yaml")
+             if document["kind"] in {"Deployment", "StatefulSet"}]
+
+    assert len(pods) > len(DEPLOYED)
+    assert all(pod["automountServiceAccountToken"] is False for pod in pods)
+
+
 def test_the_wiring_is_composes_with_the_choices_several_machines_need():
     [wiring] = documents("base/wiring.yaml")
 

@@ -128,7 +128,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_cloudflare_tunnel.py` | The optional Cloudflare Tunnel: `COMPOSE_PROFILES`, the token check, warnings for an open server, the `check --online` results and hints, the requirements, and the `cloudflared` service in `docker-compose.yml`. |
 | `test_requirements.py` | `requirements`: values calculated from the configuration, the RunPod CUDA version matching `Dockerfile.runpod`, and the text and JSON output. |
 | `test_job_diagnostics.py` | Job diagnostics records at each job state, survival after the Redis job expires, account deletion, pruning, and inclusion in backups. |
-| `test_worker_tasks.py` | Worker job lifecycle, billing reconciliation, restart handling, and file cleanup. |
+| `test_worker_tasks.py` | Worker job lifecycle, billing reconciliation (leaving jobs that just ended to whoever ended them), restart handling, and file cleanup. |
 | `test_auth.py` | Google token checks: audience, expiry, verified email, userinfo fallback, caching, and outages. |
 | `test_url_safety.py` | Source URL validation: allowed hosts, schemes, ports, credentials, and private addresses. |
 | `test_server_api.py` | Health and readiness, server info offers, `yt-dlp` duration handling, reused video checks, and the video information saved for the worker. |
@@ -146,7 +146,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_features.py` | The optional features' table: references, needs and exclusions, required settings and secrets per role, unused settings, `features --json`, and `.env.example` and the docs in step with it. |
 | `test_setup_script.py` | `scripts/setup.py`: editing `server.env` and `.env` in place, descriptions from the docs, setting features up with what they need, secrets never shown, what is missing named by its file or setting, the status columns explained with what differs on Kubernetes, colors only in a terminal, and turning features off. |
 | `test_kube_script.py` | `scripts/kube.py` with a fake kubectl and docker: one question before any change, the order of the steps, Secrets from files and never shown, the test cluster's generated passwords and Redis users, KEDA installed for its scaling, the context checks, `down`'s confirmation, and `status`; and `scripts/server.py`'s and `scripts/admin.py`'s commands through `KubeStack`: one question before a restart, a rolling restart of the server's Deployments only, KEDA paused by `stop`, the build in the background, and `restore` refused. |
-| `test_leader.py` | Which API replica leads: one at a time, handover on shutdown and after a crash, periodic tasks waiting for the lead, and startup recovery only when no other API runs. |
+| `test_leader.py` | Which API replica leads: one at a time, handover on shutdown and after a crash, periodic tasks waiting for the lead, startup recovery only when no other API runs, and recovery by a replica that takes over. |
 | `test_batching.py` | Batch size rules (`auto` per GPU, clamping, CPU default) and splitting a batch in half on GPU out-of-memory. |
 | `test_gpu_batcher.py` | The real batcher and batch loop with a fake model that runs out of memory. Needs the worker image. |
 | `test_outsource_routing.py` | Routing: wait estimate, threshold, remote concurrency cap, missing heartbeat, several local workers, provider `none`, and the API's backend choice. |

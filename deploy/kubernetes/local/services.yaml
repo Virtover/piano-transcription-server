@@ -16,6 +16,8 @@ spec:
       labels:
         app: redis
     spec:
+      # No pod uses the Kubernetes API: a compromised one gets no token for it.
+      automountServiceAccountToken: false
       securityContext:
         # The image's redis user.
         runAsUser: 999
@@ -90,6 +92,8 @@ spec:
       labels:
         app: postgres
     spec:
+      # No pod uses the Kubernetes API: a compromised one gets no token for it.
+      automountServiceAccountToken: false
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -149,6 +153,8 @@ spec:
       labels:
         app: seaweed
     spec:
+      # No pod uses the Kubernetes API: a compromised one gets no token for it.
+      automountServiceAccountToken: false
       securityContext:
         seccompProfile:
           type: RuntimeDefault

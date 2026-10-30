@@ -17,6 +17,8 @@ spec:
       labels:
         app: cloudflared
     spec:
+      # No pod uses the Kubernetes API: a compromised one gets no token for it.
+      automountServiceAccountToken: false
       securityContext:
         # The image's own non-root user.
         runAsNonRoot: true

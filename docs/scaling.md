@@ -23,7 +23,7 @@ One machine is the right choice until it is not enough: a busy GPU that RunPod o
 
 Each part works on one machine too, so each can be turned on and checked before the move:
 
-* **Several API replicas.** One replica leads the periodic tasks, such as backups and the abandoned job check, and another takes over within 30 seconds when it stops. Startup recovery runs only when no other replica runs. See [Several API replicas](architecture.md#several-api-replicas).
+* **Several API replicas.** One replica leads the periodic tasks, such as backups and the abandoned job check, and another takes over within 30 seconds when it stops. Startup recovery runs when no other replica runs, and in a replica when it takes over. See [Several API replicas](architecture.md#several-api-replicas).
 * **Several local workers.** Each publishes a heartbeat of its own, and routing adds up their capacity. See [Routing](architecture.md#routing).
 * **Shared limits.** Video checks are counted across replicas (`MAX_VIDEO_CHECKS`), as video site downloads already were.
 * **Job storage** in the bucket (`JOB_STORAGE=s3`): uploads, video information, and results, with a scratch folder per attempt. See [Job storage](architecture.md#job-storage).

@@ -2,13 +2,15 @@
 job watcher, and the voided-purchase sync. With one API, it always does.
 
 The lead is a Redis key with this replica's token that expires unless
-renewed, so a replica that crashes hands the lead to another within LEADER_TTL.
+renewed, so a replica that crashes hands the lead to another within LEADER_TTL,
+which then recovers what the crash left.
 """
 
 import logging
 import socket
 import threading
 import uuid
+from collections.abc import Callable
 
 from redis import Redis
 from redis.exceptions import WatchError
@@ -31,6 +33,8 @@ class Leadership:
         self.token = f"{socket.gethostname()}:{uuid.uuid4().hex[:12]}"
         self._leading = threading.Event()
         self._stop = threading.Event()
+        # Whether the background renewal last saw this replica lead.
+        self._led = False
 
     @property
     def leading(self) -> bool:
@@ -71,15 +75,27 @@ class Leadership:
         """Block until this replica leads."""
         self._leading.wait()
 
-    def start(self) -> None:
+    def start(self, on_lead: Callable[[], None] | None = None) -> None:
         """Keep renewing in the background, so a follower takes over when
-        the leader stops."""
+        the leader stops. on_lead runs each time this replica gains the lead
+        here: the leader it follows may have crashed mid-task."""
 
         def run():
             while not self._stop.wait(RENEW_INTERVAL):
-                self.renew()
+                self.keep(on_lead)
 
+        self._led = self.leading
         threading.Thread(target=run, name="api-leader", daemon=True).start()
+
+    def keep(self, on_lead: Callable[[], None] | None = None) -> None:
+        """One renewal of the background thread."""
+        gained = self.renew() and not self._led
+        self._led = self.leading
+        if gained and on_lead is not None:
+            try:
+                on_lead()
+            except Exception:
+                logger.exception("Could not recover after taking the API lead")
 
     def stop(self) -> None:
         """Hand the lead over at once, as on a clean shutdown."""

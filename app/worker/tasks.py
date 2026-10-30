@@ -33,6 +33,9 @@ REMOTE_QUEUE = "remote"
 LEASE_TTL = 60
 LEASE_RENEW_INTERVAL = 15
 ABANDONED_JOB_CHECK_INTERVAL = 30
+# Whoever ends a job settles its billing at once. The leading API settles
+# what is still reserved this long after the job ended, as after a crash.
+RECONCILE_AFTER = 300
 WORKER_STOPPED = "Transcription interrupted because its worker stopped"
 # The error_code of a job failed by a restart or a stopped worker.
 INTERRUPTED = "transcription_interrupted"
@@ -286,13 +289,27 @@ def cancel_job(job_id: str, charge: bool = True) -> str | None:
     return status
 
 
-def reconcile_billing() -> None:
-    """Finish billing transitions left incomplete by a worker interruption."""
+def ended_recently(job_id: str, min_age: float) -> bool:
+    """Whether the job ended less than min_age seconds ago, read from the
+    expiry an ended job is given."""
+    if min_age <= 0:
+        return False
+    remaining = redis.ttl(job_key(job_id))
+    return remaining >= 0 and job_ttl() - remaining < min_age
+
+
+def reconcile_billing(min_age: float = 0) -> None:
+    """Finish billing transitions left incomplete by a worker interruption.
+    With min_age, jobs that ended more recently are left to whoever ended
+    them, which may be settling them now: an administrator's refund of a
+    cancelled job, for one, must not be charged meanwhile."""
     for job_id in billing.reserved_job_ids():
         job = redis.hgetall(job_key(job_id))
 
         if not job:
             billing.release(job_id)
+            continue
+        if ended_recently(job_id, min_age):
             continue
 
         status = job.get("status")

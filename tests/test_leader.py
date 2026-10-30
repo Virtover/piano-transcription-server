@@ -99,11 +99,84 @@ def test_the_abandoned_job_watcher_waits_for_the_lead(monkeypatch):
 
     monkeypatch.setattr(main.time, "sleep", sleep)
     monkeypatch.setattr(main, "fail_abandoned_jobs", lambda: events.append("check"))
+    monkeypatch.setattr(main, "reconcile_billing", lambda min_age: events.append(("settle", min_age)))
 
     with pytest.raises(StopLoop):
         main.watch_abandoned_jobs(FakeLeader(events))
 
-    assert events == ["sleep", "wait", "check"]
+    assert events == ["sleep", "wait", "check", ("settle", tasks.RECONCILE_AFTER)]
+
+
+def test_the_watcher_settles_billing_when_the_check_fails(monkeypatch):
+    events = []
+
+    def sleep(seconds):
+        if events:
+            raise StopLoop
+        events.append("sleep")
+
+    def broken():
+        raise ConnectionError("Redis is down")
+
+    monkeypatch.setattr(main.time, "sleep", sleep)
+    monkeypatch.setattr(main, "fail_abandoned_jobs", broken)
+    monkeypatch.setattr(main, "reconcile_billing", lambda min_age: events.append("settle"))
+
+    with pytest.raises(StopLoop):
+        main.watch_abandoned_jobs(FakeLeader(events))
+
+    assert events == ["sleep", "wait", "settle"]
+
+
+# --- Taking over ----------------------------------------------------------------
+
+def test_a_replica_that_gains_the_lead_recovers_once(redis):
+    first, second = Leadership(redis), Leadership(redis)
+    first.renew()
+    recovered = []
+
+    second.keep(lambda: recovered.append("recovered"))
+    assert recovered == []
+
+    # The leader crashed.
+    redis.delete(leader_module.LEADER_KEY)
+    second.keep(lambda: recovered.append("recovered"))
+    second.keep(lambda: recovered.append("recovered"))
+
+    assert recovered == ["recovered"]
+    assert second.leading
+
+
+def test_the_startup_leader_does_not_recover_twice(redis):
+    leader = Leadership(redis)
+    leader.renew()
+    recovered = []
+    leader._led = True
+
+    leader.keep(lambda: recovered.append("recovered"))
+
+    assert recovered == []
+
+
+def test_a_failed_recovery_keeps_the_lead(redis):
+    leader = Leadership(redis)
+
+    def broken():
+        raise RuntimeError("billing is down")
+
+    leader.keep(broken)
+
+    assert leader.leading
+
+
+def test_taking_over_recovers_jobs_and_billing(monkeypatch):
+    events = []
+    monkeypatch.setattr(main, "recover_active_jobs", lambda reason: events.append(("jobs", reason)))
+    monkeypatch.setattr(main, "reconcile_billing", lambda min_age: events.append(("billing", min_age)))
+
+    main.recover_after_takeover()
+
+    assert events == [("jobs", tasks.WORKER_STOPPED), ("billing", tasks.RECONCILE_AFTER)]
 
 
 def test_backups_wait_for_the_lead(monkeypatch):
@@ -130,7 +203,7 @@ def startup(api_context, monkeypatch):
     recovered = []
     monkeypatch.setattr(main, "ensure_valid", lambda role: None)
     monkeypatch.setattr(main, "recover_active_jobs", lambda reason: recovered.append("jobs"))
-    monkeypatch.setattr(main, "reconcile_billing", lambda: recovered.append("billing"))
+    monkeypatch.setattr(main, "reconcile_billing", lambda **options: recovered.append("billing"))
     monkeypatch.setattr(main, "monitor_backup_health", lambda leader=None: None)
     return recovered
 

@@ -25,6 +25,8 @@ from app import google_play
 from app.google_play import sync_products
 from app.worker.tasks import (
     ABANDONED_JOB_CHECK_INTERVAL,
+    RECONCILE_AFTER,
+    WORKER_STOPPED,
     cleanup_stored_jobs,
     fail_abandoned_jobs,
     reconcile_billing,
@@ -93,7 +95,8 @@ def monitor_backup_health(leader: Leadership | None = None) -> None:
 
 def watch_abandoned_jobs(leader: Leadership | None = None) -> None:
     """Fail and refund processing jobs whose worker stopped, for example
-    after a crash, while the API keeps running."""
+    after a crash, while the API keeps running, and settle the billing of
+    jobs whose end was not settled, as when a worker crashed right after."""
     while True:
         time.sleep(ABANDONED_JOB_CHECK_INTERVAL)
         wait_for_lead(leader)
@@ -101,6 +104,18 @@ def watch_abandoned_jobs(leader: Leadership | None = None) -> None:
             fail_abandoned_jobs()
         except Exception:
             logger.exception("Could not check for abandoned jobs")
+        try:
+            reconcile_billing(min_age=RECONCILE_AFTER)
+        except Exception:
+            logger.exception("Could not settle the billing of ended jobs")
+
+
+def recover_after_takeover() -> None:
+    """Run by a replica that gains the lead while running: the leader it
+    followed crashed, or this replica restarted before the lead it held
+    expired, so the startup recovery did not run."""
+    recover_active_jobs(WORKER_STOPPED)
+    reconcile_billing(min_age=RECONCILE_AFTER)
 
 
 def clean_stored_jobs(leader: Leadership | None = None) -> None:
@@ -230,13 +245,14 @@ def sync_billing_catalog() -> None:
     # Taking a lead no one held means no other API replica is running: the
     # server started or restarted. Joining running replicas recovers nothing,
     # because their jobs are not interrupted; the leader's abandoned job
-    # watcher still fails those whose worker stopped.
+    # watcher still fails those whose worker stopped. A replica that takes
+    # the lead later recovers then.
     if leadership.renew():
         recover_active_jobs("Transcription interrupted because the server restarted")
         reconcile_billing()
     else:
         logger.info("Another API replica runs the periodic tasks; this one takes over if it stops")
-    leadership.start()
+    leadership.start(on_lead=recover_after_takeover)
     sync_products()
     enable_transcription_submissions()
     threading.Thread(target=backup_billing_database, args=(leadership,), daemon=True).start()

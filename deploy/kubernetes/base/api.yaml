@@ -19,6 +19,8 @@ spec:
       labels:
         app: api
     spec:
+      # No pod uses the Kubernetes API: a compromised one gets no token for it.
+      automountServiceAccountToken: false
       # Uploads in progress get time to finish.
       terminationGracePeriodSeconds: 60
       securityContext:

@@ -17,6 +17,8 @@ spec:
       labels:
         app: admin
     spec:
+      # No pod uses the Kubernetes API: a compromised one gets no token for it.
+      automountServiceAccountToken: false
       securityContext:
         runAsUser: 10001
         runAsGroup: 10001
