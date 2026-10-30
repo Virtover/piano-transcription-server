@@ -361,18 +361,52 @@ class Setup:
 
         if "External services" in numbered and not self.external_services(feature, numbered["External services"]):
             return False
-        env = EnvFile(self.root / ".env")
-        if "Settings in .env" in numbered:
-            self.ask_settings(feature, env, numbered["Settings in .env"])
-        for name, value in feature["turn_on"].items():
-            if name not in {setting["name"] for setting in feature["settings"]}:
-                env.set(name, value)
-        for profile in feature["profiles"]:
-            env.add_profile(profile)
-        env.save()
-        if "Secret files in ./secrets" in numbered:
-            self.ask_secrets(feature, numbered["Secret files in ./secrets"])
-        return self.verify(key, numbered["Check"])
+        # From here on .env changes. A setup that does not finish puts it back,
+        # so the feature is not left half on.
+        env_path = self.root / ".env"
+        before = env_path.read_text(encoding="utf-8") if env_path.exists() else None
+        switch_secret = feature["off"]["delete_secret"]
+        switch_secret_existed = bool(switch_secret) and (self.secrets_dir / switch_secret).exists()
+        try:
+            env = EnvFile(env_path)
+            if "Settings in .env" in numbered:
+                self.ask_settings(feature, env, numbered["Settings in .env"])
+            for name, value in feature["turn_on"].items():
+                if name not in {setting["name"] for setting in feature["settings"]}:
+                    env.set(name, value)
+            for profile in feature["profiles"]:
+                env.add_profile(profile)
+            env.save()
+            if "Secret files in ./secrets" in numbered:
+                self.ask_secrets(feature, numbered["Secret files in ./secrets"])
+            ready = self.verify(key, numbered["Check"])
+        except BaseException:
+            self.roll_back(feature, before, switch_secret if not switch_secret_existed else None)
+            raise
+        if not ready:
+            self.roll_back(feature, before, switch_secret if not switch_secret_existed else None)
+        return ready
+
+    def roll_back(self, feature: dict, env_before: str | None, created_switch_secret: str | None) -> None:
+        """Put .env back as it was, and remove a secret file whose presence
+        alone would turn the feature on. Other secret files stay for the next
+        try: a key file by itself turns nothing on."""
+        env_path = self.root / ".env"
+        if env_before is None:
+            env_path.unlink(missing_ok=True)
+        else:
+            env_path.write_text(env_before, encoding="utf-8")
+        if created_switch_secret:
+            (self.secrets_dir / created_switch_secret).unlink(missing_ok=True)
+        if feature["enabled"]:
+            message = f"{feature['title']} keeps its previous settings: .env is back as it was."
+        else:
+            message = f"{feature['title']} is off again: .env is back as it was."
+        if created_switch_secret:
+            message += f" secrets/{created_switch_secret} is removed: by itself it would turn the feature on."
+        if any(secret["name"] != created_switch_secret for secret in feature["secrets"]):
+            message += " The other secret files you gave are kept for the next try."
+        self.console.wrap(message, "  ", "yellow")
 
     def external_services(self, feature: dict, heading: str) -> bool:
         sections = self.requirements()
@@ -507,8 +541,6 @@ class Setup:
         missing = Missing.of(feature)
         if not feature["enabled"] or missing.count:
             say(style(f"  {feature['title']} is not ready yet.", "red", "bold"))
-            if not feature["enabled"]:
-                wrap("It is still off; run this again.", "  ", "yellow")
             missing.show(self.console, "  ")
             say(f"  Fix {'it' if missing.count == 1 else 'them'}, then run: "
                 f"{style(f'python scripts/setup.py {key}', 'bold')}")

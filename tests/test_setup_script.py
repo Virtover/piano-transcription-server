@@ -172,9 +172,14 @@ def test_outsourcing_sets_up_object_storage_first(server):
 
 
 def test_an_unfinished_setup_says_what_is_missing(server):
+    before = (server[0] / ".env").read_text(encoding="utf-8")
     setup, script = make(server, answers=["", "audio", "https://storage.example", ""], hidden=["", ""])
 
     assert setup.set_up("object_storage") is False
+
+    # Turned back off: .env as it was before.
+    assert (server[0] / ".env").read_text(encoding="utf-8") == before
+    assert "Object storage is off again" in script.text
 
     # Each missing secret file by its place on the host, not in the container.
     assert "missing secret file  secrets/storage_access_key" in script.text
@@ -188,6 +193,62 @@ def test_a_required_setting_cannot_be_skipped(server):
 
     assert setup.set_up("object_storage") is True
     assert script.said.count("  It is needed; give a value.") == 1
+
+
+def test_a_failed_setup_keeps_the_secrets_given_but_not_a_switch_secret(server):
+    secrets_dir = server[0] / "secrets"
+    setup, _ = make(server, answers=["", "audio", "https://storage.example", ""], hidden=["access-key", ""])
+
+    setup.set_up("object_storage")
+
+    assert (secrets_dir / "storage_access_key").read_text(encoding="utf-8") == "access-key"
+
+    # A password too short: its file alone would turn the feature on.
+    setup, script = make(server, answers=["n"], hidden=["short"])
+    assert setup.set_up("password") is False
+    assert not (secrets_dir / "server_password").exists()
+    text = " ".join(script.text.split())
+    assert "must hold at least 12 characters" in text
+    assert "secrets/server_password is removed" in text and "other secret files" not in text
+
+
+def test_reconfiguring_a_feature_that_then_fails_keeps_its_previous_settings(server):
+    file = env(server)
+    file.set("STORAGE_BUCKET", "audio")
+    file.set("STORAGE_ENDPOINT", "https://storage.example")
+    file.save()
+    for name in ("storage_access_key", "storage_secret_key"):
+        (server[0] / "secrets" / name).write_text("key", encoding="utf-8")
+    before = (server[0] / ".env").read_text(encoding="utf-8")
+    # A new bucket, then the secret files deleted meanwhile: not ready.
+    setup, script = make(server, answers=["", "other-bucket", "", "", "n", "n"], hidden=["", ""])
+    original = setup.ask_secrets
+
+    def lose_the_keys(feature, heading):
+        for name in ("storage_access_key", "storage_secret_key"):
+            (server[0] / "secrets" / name).unlink()
+        feature = {**feature, "secrets": [{**secret, "present": False} for secret in feature["secrets"]]}
+        original(feature, heading)
+
+    setup.ask_secrets = lose_the_keys
+
+    assert setup.set_up("object_storage") is False
+    assert (server[0] / ".env").read_text(encoding="utf-8") == before
+    assert "keeps its previous settings" in script.text
+
+
+def test_stopping_with_ctrl_c_turns_it_back_off(server):
+    before = (server[0] / ".env").read_text(encoding="utf-8")
+    setup, _ = make(server, answers=["", "audio", "https://storage.example", ""])
+
+    def interrupted(prompt):
+        raise KeyboardInterrupt
+
+    setup.console.ask_hidden = interrupted
+
+    with pytest.raises(KeyboardInterrupt):
+        setup.set_up("object_storage")
+    assert (server[0] / ".env").read_text(encoding="utf-8") == before
 
 
 def test_stopping_at_the_external_services_changes_nothing(server):
