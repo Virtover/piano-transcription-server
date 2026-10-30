@@ -398,6 +398,25 @@ def test_check_says_which_lines_are_in_the_wrong_file(tmp_path):
     ]
 
 
+def test_compose_reads_only_variables_of_env():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    read = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*)", compose))
+
+    # Interpolation reads .env alone: a variable in server.env would be empty.
+    assert read <= config.COMPOSE_ONLY_VARIABLES, read - config.COMPOSE_ONLY_VARIABLES
+
+
+def test_builds_never_get_the_configuration_or_secrets():
+    ignored = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+
+    for path in (".env", "server.env", "secrets/", "billing-data/", "deploy/kubernetes/settings.env"):
+        assert path in ignored, path
+    for dockerfile in ROOT.glob("Dockerfile*"):
+        copies = [line for line in dockerfile.read_text(encoding="utf-8").splitlines() if line.startswith("COPY")]
+        assert not any(line.split()[1] in (".", "./") for line in copies), dockerfile.name
+
+
 def test_compose_gives_every_service_with_settings_both_files():
     import yaml
 

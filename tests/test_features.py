@@ -205,6 +205,10 @@ def test_env_example_has_a_block_for_every_feature():
         text = block.group(1)
         assert text.startswith("# On with:"), feature.title
         for name in feature.settings:
+            if name in app_config.COMPOSE_ONLY_VARIABLES:
+                # Docker Compose reads it, so it is in .env.
+                assert re.search(rf"^#? ?{name}=", (ROOT / ".env.example").read_text(encoding="utf-8"), re.M), name
+                continue
             assert re.search(rf"^#? ?{name}=", text, re.M), (feature.title, name)
         # A Compose profile is in .env, which says what it starts.
         for profile in feature.profiles:

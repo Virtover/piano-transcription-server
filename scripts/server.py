@@ -99,13 +99,17 @@ def remaining_text(seconds: float) -> str:
 
 
 # The variables Docker Compose itself reads, which go in .env; everything
-# else is the server's and goes in server.env. COMPOSE_ONLY_VARIABLES in
-# app/config.py, which a test compares.
+# else is the server's and goes in server.env. ADMIN_WEB_MODE is both: Compose
+# picks the admin service's roles by it, and the services get .env too.
+# COMPOSE_ONLY_VARIABLES in app/config.py, which a test compares; another
+# test fails if docker-compose.yml reads a variable missing here.
 COMPOSE_ONLY_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD",
-                          "COMPOSE_PROFILES"}
+                          "COMPOSE_PROFILES", "ADMIN_WEB_MODE"}
 COMPOSE_ENV, SERVER_ENV = ".env", "server.env"
 ADDED_HEADER = "# --- Added by scripts/setup.py or scripts/server.py"
-ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
+# A line that python-dotenv and Docker Compose read as a setting: also with
+# export, spaces around =, or indented.
+ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(.*)$")
 SPLIT_BACKUP = ".env.before-split"
 
 
@@ -114,30 +118,57 @@ SPLIT_BACKUP = ".env.before-split"
 class EnvFile:
     """An env file as lines, so comments and order survive. A setting is
     changed on its own line, or on its commented example line from the
-    template, which stays in its block; a new one goes at the end."""
+    template, which stays in its block; a new one goes at the end. Where a
+    setting is written twice, the last applies, as for dotenv and Compose."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, lines: list[str] | None = None):
         self.path = path
-        self.lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        if lines is not None:
+            self.lines = list(lines)
+        else:
+            # utf-8-sig: a BOM, as Windows editors write one, is not part of the first name.
+            self.lines = path.read_text(encoding="utf-8-sig").splitlines() if path.exists() else []
+
+    def copy(self, path: Path | None = None) -> "EnvFile":
+        return EnvFile(path or self.path, self.lines)
+
+    def indexes(self, name: str) -> list[int]:
+        return [index for index, line in enumerate(self.lines)
+                if (match := ASSIGNMENT.match(line)) and match.group(1) == name]
 
     def _find(self, name: str, commented: bool) -> int | None:
-        pattern = re.compile(rf"^#\s?{re.escape(name)}=" if commented else rf"^{re.escape(name)}=")
+        if not commented:
+            found = self.indexes(name)
+            return found[-1] if found else None
+        pattern = re.compile(rf"^#\s?(?:export\s+)?{re.escape(name)}\s*=")
         return next((index for index, line in enumerate(self.lines) if pattern.match(line)), None)
 
     def get(self, name: str) -> str | None:
         index = self._find(name, commented=False)
         if index is None:
             return None
-        return _unquote(self.lines[index].split("=", 1)[1].strip())
+        return _unquote(ASSIGNMENT.match(self.lines[index]).group(2).strip())
 
     def assignments(self) -> dict[str, int]:
-        """Each setting the file sets, by its line number."""
+        """Each setting the file sets, by the line that applies: its last."""
         found = {}
         for index, line in enumerate(self.lines):
             match = ASSIGNMENT.match(line)
-            if match and match.group(1) not in found:
+            if match:
                 found[match.group(1)] = index
         return found
+
+    def values(self) -> dict[str, str]:
+        """Each setting's value as written, quotes and all."""
+        return {name: ASSIGNMENT.match(self.lines[index]).group(2).strip() for name, index in self.assignments().items()}
+
+    def unfinished_value(self) -> str | None:
+        """A setting whose quoted value goes on over the next lines, which
+        moving single lines would break."""
+        for name, value in self.values().items():
+            if value[:1] in "'\"" and (len(value) < 2 or not value.rstrip().split(" #")[0].rstrip().endswith(value[0])):
+                return name
+        return None
 
     def set(self, name: str, value: str) -> None:
         self.set_line(name, f"{name}={_quote(value)}")
@@ -154,11 +185,18 @@ class EnvFile:
             self.lines += ["", ADDED_HEADER]
         self.lines.append(line)
 
-    def unset(self, name: str) -> None:
-        """Comment the setting out, so its default applies again."""
-        index = self._find(name, commented=False)
-        if index is not None:
-            self.lines[index] = f"# {self.lines[index]}"
+    def take(self, name: str) -> str:
+        """Remove every line of the setting, and return the one that applied."""
+        found = self.indexes(name)
+        line = self.lines[found[-1]]
+        for index in reversed(found):
+            del self.lines[index]
+        return line
+
+    def unset(self, name: str, note: str = "") -> None:
+        """Comment the setting out, every line of it, so its default applies again."""
+        for index in self.indexes(name):
+            self.lines[index] = f"# {self.lines[index]}{note}"
 
     def profiles(self) -> list[str]:
         return [profile.strip() for profile in (self.get("COMPOSE_PROFILES") or "").split(",") if profile.strip()]
@@ -175,8 +213,15 @@ class EnvFile:
         else:
             self.unset("COMPOSE_PROFILES")
 
-    def save(self) -> None:
-        self.path.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
+    def save(self, mode_from: Path | None = None) -> None:
+        """Written whole or not at all: to a file beside it, then swapped in,
+        keeping the file's permissions (or those of mode_from, for a new one)."""
+        partial = self.path.with_name(self.path.name + ".partial")
+        partial.write_text("\n".join(self.lines) + "\n", encoding="utf-8")
+        model = self.path if self.path.exists() else mode_from
+        if model is not None and model.exists():
+            shutil.copymode(model, partial)
+        os.replace(partial, self.path)
 
 
 def _quote(value: str) -> str:
@@ -192,58 +237,97 @@ def _unquote(value: str) -> str:
     return value
 
 
+def applying_values(compose: EnvFile, server: EnvFile) -> dict[str, str]:
+    """What each setting is, by the file it belongs to: .env for Compose's,
+    server.env for the server's; the other file's only when its own has none."""
+    compose_values, server_values = compose.values(), server.values()
+    values = {}
+    for name in compose_values.keys() | server_values.keys():
+        own, other = (compose_values, server_values) if name in COMPOSE_ONLY_VARIABLES else (server_values, compose_values)
+        values[name] = own[name] if name in own else other[name]
+    return values
+
+
 def separate_env_files(root: Path) -> list[str]:
     """Put every line in its file: Docker Compose's in .env, the server's in
-    server.env, and say what moved. A .env from before server.env existed,
-    which held everything, is split into both templates with its values,
-    and kept as .env.before-split. A value set in both files keeps the one
-    that applies: server.env's for the server, .env's for Compose."""
+    server.env, and say what moved, by name only. A .env from before
+    server.env existed, which held everything, is split into both templates
+    with its values, and kept as .env.before-split. A setting in both files
+    keeps the value of the file it belongs to; the other line becomes a
+    comment.
+
+    Nothing is written unless every setting keeps its value afterwards, and
+    each file is written whole, so a failure leaves the files as they were."""
     compose, server = EnvFile(root / COMPOSE_ENV), EnvFile(root / SERVER_ENV)
     first_split = not server.path.exists()
+    for file in (compose, server):
+        name = file.unfinished_value()
+        if name:
+            return [
+                f"{file.path.name} sets {name} over several lines, which the scripts do not move; put each "
+                f"setting in its file by hand (docs/configuration.md says which). Nothing was changed."
+            ]
     to_server = [name for name in compose.assignments() if name not in COMPOSE_ONLY_VARIABLES]
     to_compose = [name for name in server.assignments() if name in COMPOSE_ONLY_VARIABLES]
     if not to_server and not to_compose:
         if first_split:
-            shutil.copyfile(root / "server.env.example", server.path)
+            server = EnvFile(root / "server.env.example").copy(root / SERVER_ENV)
+            server.save(mode_from=compose.path)
             return [f"created {SERVER_ENV} from server.env.example: the server's settings"]
         return []
-    messages = []
+
+    before = applying_values(compose, server)
     if first_split:
-        shutil.copyfile(compose.path, root / SPLIT_BACKUP)
-        old = compose
-        compose = EnvFile(root / ".env.example")
-        compose.path = root / COMPOSE_ENV
-        server = EnvFile(root / "server.env.example")
-        server.path = root / SERVER_ENV
-        kept = old.assignments()
-        for name, index in kept.items():
-            (compose if name in COMPOSE_ONLY_VARIABLES else server).set_line(name, old.lines[index])
+        new_compose = EnvFile(root / ".env.example").copy(compose.path)
+        new_server = EnvFile(root / "server.env.example").copy(server.path)
+        for name, index in compose.assignments().items():
+            (new_compose if name in COMPOSE_ONLY_VARIABLES else new_server).set_line(name, compose.lines[index])
         # The templates' own active lines that the old file did not set stay
         # examples: a split changes no value.
-        for target in (compose, server):
-            for name, index in target.assignments().items():
-                if name not in kept:
-                    target.lines[index] = f"# {target.lines[index]}"
-        messages.append(
+        for target in (new_compose, new_server):
+            for name in target.assignments():
+                if name not in before:
+                    target.unset(name)
+    else:
+        new_compose, new_server = compose.copy(), server.copy()
+        for source, target, names in ((new_compose, new_server, to_server), (new_server, new_compose, to_compose)):
+            for name in names:
+                if target.indexes(name):
+                    # The value of the file it belongs to applies; keep the other as a comment.
+                    source.unset(name, note=f"  (moved: {target.path.name} sets it)")
+                else:
+                    target.set_line(name, source.take(name))
+
+    after_compose, after_server = new_compose.values(), new_server.values()
+    in_both = after_compose.keys() & after_server.keys()
+    if in_both or applying_values(new_compose, new_server) != before:
+        changed = sorted(in_both) or sorted(
+            name for name in before.keys() | applying_values(new_compose, new_server).keys()
+            if before.get(name) != applying_values(new_compose, new_server).get(name)
+        )
+        return [
+            f"could not move {', '.join(changed)} between .env and {SERVER_ENV} without changing a value; put each "
+            "setting in its file by hand (docs/configuration.md says which). Nothing was changed."
+        ]
+
+    if first_split:
+        shutil.copy2(compose.path, root / SPLIT_BACKUP)
+    # server.env first: should the second write fail, a setting is in both
+    # files rather than in neither, and the next run moves it again.
+    new_server.save(mode_from=compose.path)
+    new_compose.save()
+    if first_split:
+        return [
             f"split .env into .env, for Docker Compose, and {SERVER_ENV}, for the server's settings, "
             f"keeping your values; the old file is {SPLIT_BACKUP}"
-        )
-    else:
-        for source, target, names in ((compose, server, to_server), (server, compose, to_compose)):
-            for name in names:
-                index = source.assignments()[name]
-                if name in target.assignments():
-                    # The target's applies; keep the other as a comment.
-                    source.lines[index] = f"# {source.lines[index]}  (moved: {target.path.name} sets it)"
-                else:
-                    target.set_line(name, source.lines[index])
-                    del source.lines[index]
-        if to_server:
-            messages.append(f"moved {', '.join(to_server)} from .env to {SERVER_ENV}: they are the server's settings")
-        if to_compose:
-            messages.append(f"moved {', '.join(to_compose)} from {SERVER_ENV} to .env: Docker Compose reads them")
-    compose.save()
-    server.save()
+        ]
+    messages = []
+    if to_server:
+        what = "it is one of the server's settings" if len(to_server) == 1 else "they are the server's settings"
+        messages.append(f"moved {', '.join(to_server)} from .env to {SERVER_ENV}: {what}")
+    if to_compose:
+        what = "Docker Compose reads it" if len(to_compose) == 1 else "Docker Compose reads them"
+        messages.append(f"moved {', '.join(to_compose)} from {SERVER_ENV} to .env: {what}")
     return messages
 
 

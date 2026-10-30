@@ -288,10 +288,11 @@ def test_the_admin_page_offers_only_modes_that_turn_it_on(server):
     setup.set_up("admin_web")
 
     file = env(server)
-    assert file.get("ADMIN_WEB_MODE") == "read-write"
-    # The settings in server.env, the services to start in .env.
+    # The page's settings in server.env; what Compose reads in .env.
+    assert file.get("ADMIN_WEB_HOSTNAME") == "admin.example.com"
+    assert compose_env(server).get("ADMIN_WEB_MODE") == "read-write"
     assert compose_env(server).get("COMPOSE_PROFILES") == "cloudflare,admin"
-    assert file.get("COMPOSE_PROFILES") is None
+    assert file.get("COMPOSE_PROFILES") is None and file.get("ADMIN_WEB_MODE") is None
     assert "One of: read-only, read-write" in script.text
 
 

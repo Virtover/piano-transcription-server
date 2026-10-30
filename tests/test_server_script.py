@@ -552,8 +552,8 @@ def test_a_line_in_the_wrong_file_is_moved(checkout):
     messages = server.separate_env_files(checkout)
 
     assert messages == [
-        "moved RESULT_RETENTION from .env to server.env: they are the server's settings",
-        "moved COMPOSE_PROFILES from server.env to .env: Docker Compose reads them",
+        "moved RESULT_RETENTION from .env to server.env: it is one of the server's settings",
+        "moved COMPOSE_PROFILES from server.env to .env: Docker Compose reads it",
     ]
     assert (checkout / ".env").read_text(encoding="utf-8") == (
         "API_BIND_ADDRESS=127.0.0.1\n\n" + server.ADDED_HEADER + "\nCOMPOSE_PROFILES=cloudflare,admin\n"
@@ -579,6 +579,85 @@ def test_files_in_their_places_are_left_alone(checkout):
 
     assert server.separate_env_files(checkout) == []
     assert (checkout / ".env").read_text(encoding="utf-8") == "# mine\nAPI_BIND_ADDRESS=127.0.0.1\n"
+
+
+@pytest.mark.parametrize("line", [
+    "\ufeffMAX_ACTIVE_JOBS=5",          # the BOM of a file saved by Notepad
+    "export MAX_ACTIVE_JOBS=5",
+    "MAX_ACTIVE_JOBS = 5",
+    "  MAX_ACTIVE_JOBS=5",
+])
+def test_every_way_of_writing_a_setting_is_moved(checkout, line):
+    (checkout / ".env").write_text(f"{line}\nAPI_BIND_ADDRESS=0.0.0.0\n", encoding="utf-8")
+
+    server.separate_env_files(checkout)
+
+    assert server.EnvFile(checkout / "server.env").get("MAX_ACTIVE_JOBS") == "5"
+    assert server.EnvFile(checkout / ".env").get("API_BIND_ADDRESS") == "0.0.0.0"
+    assert "MAX_ACTIVE_JOBS" not in server.EnvFile(checkout / ".env").assignments()
+
+
+def test_the_last_of_a_setting_written_twice_is_the_one_kept(checkout):
+    (checkout / ".env").write_text("MAX_ACTIVE_JOBS=5\nMAX_ACTIVE_JOBS=9\n", encoding="utf-8")
+
+    server.separate_env_files(checkout)
+
+    assert server.EnvFile(checkout / "server.env").get("MAX_ACTIVE_JOBS") == "9"
+
+
+def test_a_value_over_several_lines_is_not_moved(checkout):
+    old = 'API_BIND_ADDRESS=127.0.0.1\nBILLING_PRODUCTS="{\n  \\"a\\": 5}"\n'
+    (checkout / ".env").write_text(old, encoding="utf-8")
+
+    [message] = server.separate_env_files(checkout)
+
+    assert "BILLING_PRODUCTS over several lines" in message and "Nothing was changed" in message
+    assert (checkout / ".env").read_text(encoding="utf-8") == old
+    assert not (checkout / "server.env").exists() and not (checkout / ".env.before-split").exists()
+
+
+def test_messages_name_settings_but_never_show_values(checkout):
+    (checkout / ".env").write_text("API_BIND_ADDRESS=127.0.0.1\n", encoding="utf-8")
+    (checkout / "server.env").write_text("ERROR_REPORT_URL=https://private.example/report\n", encoding="utf-8")
+    (checkout / ".env").write_text("API_BIND_ADDRESS=127.0.0.1\nRESULT_RETENTION=7h\n", encoding="utf-8")
+
+    messages = server.separate_env_files(checkout)
+
+    assert messages and not any("7h" in message or "private.example" in message for message in messages)
+
+
+def test_a_failed_write_leaves_the_files_as_they_were(checkout, monkeypatch):
+    old = "MAX_ACTIVE_JOBS=5\nAPI_BIND_ADDRESS=0.0.0.0\n"
+    (checkout / ".env").write_text(old, encoding="utf-8")
+
+    def full_disk(*args, **kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(server.os, "replace", full_disk)
+
+    with pytest.raises(OSError):
+        server.separate_env_files(checkout)
+    assert (checkout / ".env").read_text(encoding="utf-8") == old
+    assert not (checkout / "server.env").exists()
+
+
+def test_the_files_keep_their_permissions(checkout):
+    (checkout / ".env").write_text("MAX_ACTIVE_JOBS=5\n", encoding="utf-8")
+    (checkout / ".env").chmod(0o600)
+
+    server.separate_env_files(checkout)
+
+    for name in (".env", "server.env"):
+        assert (checkout / name).stat().st_mode & 0o777 == (checkout / ".env.before-split").stat().st_mode & 0o777
+
+
+def test_admin_web_mode_goes_where_compose_reads_it(checkout):
+    (checkout / ".env").write_text("ADMIN_WEB_MODE=read-only\nADMIN_WEB_HOSTNAME=admin.example.com\n", encoding="utf-8")
+
+    server.separate_env_files(checkout)
+
+    assert server.EnvFile(checkout / ".env").get("ADMIN_WEB_MODE") == "read-only"
+    assert server.EnvFile(checkout / "server.env").get("ADMIN_WEB_HOSTNAME") == "admin.example.com"
 
 
 def test_the_script_knows_what_compose_reads_as_the_server_does():

@@ -164,10 +164,9 @@ docker compose run --rm api python -m app.config requirements
 ```
 
 1. **In Cloudflare**, as `requirements` lists under **Admin web page**: a second public hostname on the tunnel, such as `admin.example.com`, sent to `http://admin:8100`, and an Access application that protects it, allowing only your addresses, with a second factor. Look up where each is set in Cloudflare's current documentation.
-2. **In `.env`**, `COMPOSE_PROFILES=cloudflare,admin`, which starts the page's service with the tunnel. **In `server.env`**, with the application's AUD tag and your team domain from Cloudflare:
+2. **In `.env`**, which Docker Compose reads: `COMPOSE_PROFILES=cloudflare,admin`, which starts the page's service with the tunnel, and `ADMIN_WEB_MODE=read-only`, by which Compose signs it in with its roles. **In `server.env`**, with the application's AUD tag and your team domain from Cloudflare:
 
    ```env
-   ADMIN_WEB_MODE=read-only
    ADMIN_WEB_HOSTNAME=admin.example.com
    ADMIN_WEB_EMAILS=["you@example.com"]
    CLOUDFLARE_ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com

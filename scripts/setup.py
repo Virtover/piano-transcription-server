@@ -53,6 +53,21 @@ ADDED_HEADER = SERVER_SCRIPT.ADDED_HEADER
 COMPOSE_ENV, SERVER_ENV = SERVER_SCRIPT.COMPOSE_ENV, SERVER_SCRIPT.SERVER_ENV
 
 
+class EnvFiles:
+    """server.env and .env, each setting in the one it belongs to."""
+
+    def __init__(self, root: Path):
+        self.server = EnvFile(root / SERVER_ENV)
+        self.compose = EnvFile(root / COMPOSE_ENV)
+
+    def of(self, name: str) -> "EnvFile":
+        return self.compose if name in SERVER_SCRIPT.COMPOSE_ONLY_VARIABLES else self.server
+
+    def save(self) -> None:
+        self.server.save(mode_from=self.compose.path)
+        self.compose.save()
+
+
 # --- Descriptions, from docs/configuration.md --------------------------------------------
 
 def setting_descriptions(path: Path = DOCS) -> dict[str, str]:
@@ -289,7 +304,7 @@ class Setup:
         steps = [
             step for step, wanted in (
                 ("External services", bool(feature["requirement_sections"])),
-                ("Settings in server.env", bool(feature["settings"])),
+                ("Settings", bool(feature["settings"])),
                 ("Secret files in ./secrets", bool(feature["secrets"])),
             ) if wanted
         ] + ["Check"]
@@ -303,17 +318,15 @@ class Setup:
         switch_secret = feature["off"]["delete_secret"]
         switch_secret_existed = bool(switch_secret) and (self.secrets_dir / switch_secret).exists()
         try:
-            env = EnvFile(self.root / SERVER_ENV)
-            compose = EnvFile(self.root / COMPOSE_ENV)
-            if "Settings in server.env" in numbered:
-                self.ask_settings(feature, env, numbered["Settings in server.env"])
+            files = EnvFiles(self.root)
+            if "Settings" in numbered:
+                self.ask_settings(feature, files, numbered["Settings"])
             for name, value in feature["turn_on"].items():
                 if name not in {setting["name"] for setting in feature["settings"]}:
-                    env.set(name, value)
+                    files.of(name).set(name, value)
             for profile in feature["profiles"]:
-                compose.add_profile(profile)
-            env.save()
-            compose.save()
+                files.compose.add_profile(profile)
+            files.save()
             if "Secret files in ./secrets" in numbered:
                 self.ask_secrets(feature, numbered["Secret files in ./secrets"])
             ready = self.verify(key, numbered["Check"])
@@ -375,13 +388,14 @@ class Setup:
         answer = self.console.ask("Press Enter when they are ready, or q to stop for now: ").strip().lower()
         return answer != "q"
 
-    def ask_settings(self, feature: dict, env: EnvFile, heading: str) -> None:
+    def ask_settings(self, feature: dict, files: "EnvFiles", heading: str) -> None:
         say, style = self.console.say, self.style
         self.console.heading(heading)
         self.console.wrap("Enter keeps the value shown; - goes back to the default.", "  ", "dim")
         off_values = set(feature["turn_off"].values())
         for setting in feature["settings"]:
             name = setting["name"]
+            env = files.of(name)
             choices = [choice for choice in setting["choices"] or [] if choice not in off_values]
             current = env.get(name)
             if current is None or current in off_values:
@@ -389,7 +403,8 @@ class Setup:
                     None if setting["value"] in (None, [], {}, "") else _shown(setting["value"])
                 )
             say("")
-            say(f"  {style(name, 'bold')}{style('  (required)', 'yellow') if setting['required'] else ''}")
+            place = style(f"  in {env.path.name}", "dim")
+            say(f"  {style(name, 'bold')}{style('  (required)', 'yellow') if setting['required'] else ''}{place}")
             if name in self.descriptions:
                 self.console.wrap(self.descriptions[name], "  ", "dim")
             if choices:
@@ -514,16 +529,15 @@ class Setup:
             return False
         if confirm and not self.console.yes(f"Turn {feature['title']} off?", default=False):
             return False
-        env, compose = EnvFile(self.root / SERVER_ENV), EnvFile(self.root / COMPOSE_ENV)
+        files = EnvFiles(self.root)
         actions = feature["off"]
         for name, value in actions["set"].items():
-            env.set(name, value)
+            files.of(name).set(name, value)
         for name in actions["unset"]:
-            env.unset(name)
+            files.of(name).unset(name)
         for profile in actions["remove_profiles"]:
-            compose.remove_profile(profile)
-        env.save()
-        compose.save()
+            files.compose.remove_profile(profile)
+        files.save()
         secret = actions["delete_secret"]
         if secret and self.console.yes(f"Delete secrets/{secret}? It cannot be undone.", default=False):
             (self.secrets_dir / secret).unlink(missing_ok=True)

@@ -101,7 +101,7 @@ kubectl -n piano-transcription exec -it deploy/api -- python -m app.admin jobs -
 
 ## 🔐 The admin web page
 
-Uncomment `components` in `kustomization.yaml`. The page signs in to Redis and PostgreSQL with roles of its own, as in Compose: create at the providers the Redis user `admin-read-only` (or `admin-read-write`) with the rules of `redis/users.acl`, and the PostgreSQL role that the API creates for `ADMIN_WEB_MODE`. Then their Secret:
+Uncomment `components` in `kustomization.yaml`, and add `ADMIN_WEB_MODE=read-only` (or `read-write`) to `settings.env`: with Compose it is in `.env`, which a copy of `server.env` does not have. The page signs in to Redis and PostgreSQL with roles of its own, as in Compose: create at the providers the Redis user `admin-read-only` (or `admin-read-write`) with the rules of `redis/users.acl`, and the PostgreSQL role that the API creates for `ADMIN_WEB_MODE`. Then their Secret:
 
 ```shell
 kubectl -n piano-transcription create secret generic piano-admin-web --from-literal=redis_url=rediss://admin-read-only@<host>:<port>/0 --from-file=redis_password=<file with its Redis password> --from-file=database_url=<file with its database URL>

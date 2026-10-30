@@ -40,13 +40,14 @@ MIN_SERVER_PASSWORD_LENGTH = 12
 # Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
 COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD"}
 # The two files: .env holds what Docker Compose reads, server.env the
-# server's settings, the same on every deployment. COMPOSE_PROFILES is both:
-# Compose starts services by it, and the server learns from it whether the
-# tunnel and the admin web page run. Later files win, as in docker-compose.yml.
+# server's settings, the same on every deployment. COMPOSE_PROFILES and
+# ADMIN_WEB_MODE are both: Compose starts services by the one and picks the
+# admin service's roles by the other, and the services read both, as they
+# get .env too. Later files win, as in docker-compose.yml.
 COMPOSE_ENV_FILE = ".env"
 SERVER_ENV_FILE = "server.env"
 ENV_FILES = (COMPOSE_ENV_FILE, SERVER_ENV_FILE)
-COMPOSE_ONLY_VARIABLES = COMPOSE_VARIABLES | {"COMPOSE_PROFILES"}
+COMPOSE_ONLY_VARIABLES = COMPOSE_VARIABLES | {"COMPOSE_PROFILES", "ADMIN_WEB_MODE"}
 # The Compose profile that starts the cloudflared service.
 TUNNEL_PROFILE = "cloudflare"
 # The admin web page: its Compose profile, and its modes from least to most access.

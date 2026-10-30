@@ -1,0 +1,13 @@
+# Never sent to a Docker build: the images copy only app/, the requirements,
+# and the RunPod handler, and a build context can go to a remote builder.
+.env
+.env.*
+!.env.example
+server.env
+secrets/
+billing-data/
+deploy/kubernetes/settings.env
+.git/
+.venv/
+**/__pycache__/
+.pytest_cache/
