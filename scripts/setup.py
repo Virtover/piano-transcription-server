@@ -252,11 +252,24 @@ class Setup:
 
     # --- Status -------------------------------------------------------------------------
 
+    # How each feature's role on Kubernetes reads, and in which color.
+    KUBERNETES_USES = {
+        "needed": ("needed", ("cyan", "bold")),
+        "optional": ("optional", ("dim",)),
+        "unavailable": ("not available", ("red",)),
+    }
+
+    def kubernetes_tag(self, feature: dict) -> str:
+        use = feature.get("kubernetes", {}).get("use", "optional")
+        text, styles = self.KUBERNETES_USES.get(use, (use, ()))
+        return self.style(text.ljust(13), *styles)
+
     def status(self) -> int:
         features = self.features()
         say, style = self.console.say, self.style
         say(style("Optional features", "bold") + style("  (a basic server needs none)", "dim"))
         width = max(len(feature["title"]) for feature in features.values())
+        say(style(f"  {'':4}{'here':5}{'':{width}}  {'name':16} {'on Kubernetes':13}", "dim"))
         for number, feature in enumerate(features.values(), 1):
             missing = Missing.of(feature)
             if not feature["enabled"]:
@@ -267,10 +280,13 @@ class Setup:
                 state, tag = style("on ", "green"), style("ready", "green")
             title = feature["title"].ljust(width)
             title = style(title, "dim") if not feature["enabled"] else title
-            say(f"  {number:2}. {state}  {title}  {style(feature['key'].ljust(16), 'cyan')} {tag}".rstrip())
+            say(f"  {number:2}. {state}  {title}  {style(feature['key'].ljust(16), 'cyan')} "
+                f"{self.kubernetes_tag(feature)} {tag}".rstrip())
             missing.show(self.console, " " * 12)
         say(style("  Set one up: python scripts/setup.py <name>; turn one off: python scripts/setup.py off <name>",
                   "dim"))
+        say(style("  On Kubernetes: needed ones must be on there, not available ones off; "
+                  "python scripts/kube.py status checks the cluster.", "dim"))
         return 0
 
     # --- Setting a feature up --------------------------------------------------------------

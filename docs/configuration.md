@@ -8,7 +8,7 @@ Each place holds one kind of thing, so the server's settings are the same on eve
 | --- | --- | --- |
 | `server.env`, from [server.env.example](../server.env.example) | **The server's settings**: limits, workers, the database's backups, and the optional features. Every setting below unless it says otherwise. | the server, on every deployment |
 | `.env`, from [.env.example](../.env.example) | **What Docker Compose itself reads**: `COMPOSE_PROFILES`, `ADMIN_WEB_MODE`, `API_BIND_ADDRESS`, `POSTGRES_DATA_LOCATION`, `WORKER_GPU_BUILD`. The services get it too, so the server reads `COMPOSE_PROFILES` and `ADMIN_WEB_MODE` from it. | Docker Compose |
-| `docker-compose.yml`, `deploy/kubernetes/wiring.yaml` | **Wiring**: container paths and service addresses (`REDIS_URL`, `DATA_DIR`, `DATABASE_PATH`, `DATABASE_BACKUP_DIR`, `DEPLOYMENT`), fixed per deployment. The code defaults suit local development outside containers. | the server |
+| `docker-compose.yml`, `deploy/kubernetes/base/wiring.yaml` | **Wiring**: container paths and service addresses (`REDIS_URL`, `DATA_DIR`, `DATABASE_PATH`, `DATABASE_BACKUP_DIR`, `DEPLOYMENT`), fixed per deployment. The code defaults suit local development outside containers. | the server |
 | `deploy/kubernetes/` | **Kubernetes only**: images, replicas, scaling, and `settings.env`, a copy of `server.env` | Kubernetes |
 | `./secrets` | **Secrets**, one file each, mounted read-only at `/run/secrets`. Never read from an env file or the environment, and never in logs or error messages. See [Secrets](#-secrets). | the server |
 
@@ -275,7 +275,8 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 | --- | --- | --- | --- |
 | `REDIS_URL` | `redis://localhost:6379/0` | `redis://app@redis:6379/0` | Redis connection URL, with the Redis user the services sign in as. |
 | `REDIS_PASSWORD_FILE` | empty | `/run/redis/password` | The file with that user's password, from `secrets/redis/app`. Empty for a Redis without users, such as one for local development. See [Redis users](architecture.md#-redis-users). |
-| `DEPLOYMENT` | `local` | `compose` | Where the services run: `local` outside containers, `compose`, or `kubernetes` (set in `deploy/kubernetes/wiring.yaml`). Checks of one deployment apply only to it: Compose's profiles and the bind address only with Compose, and on Kubernetes the tunnel always counts as on, because `cloudflared` always runs there. |
+| `DEPLOYMENT` | `local` | `compose` | Where the services run: `local` outside containers, `compose`, or `kubernetes` (set in `deploy/kubernetes/base/wiring.yaml`). Checks of one deployment apply only to it: Compose's profiles and the bind address only with Compose, and on Kubernetes the features it needs, and the tunnel, as `CLOUDFLARE_TUNNEL_DEPLOYED` says. |
+| `CLOUDFLARE_TUNNEL_DEPLOYED` | unset | unset | Whether the deployment itself runs `cloudflared`: `true` in `deploy/kubernetes/base/wiring.yaml`, `false` on the test cluster that `scripts/kube.py local up` starts. Unset, as with Compose, `COMPOSE_PROFILES` says. |
 | `REDIS_CA_FILE` | empty | unset | For a `rediss://` `REDIS_URL` whose certificate is signed by the provider's own CA: that CA's certificate file. Empty trusts the public CAs. See [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). |
 | `DATA_DIR` | `/data` | `/data` | Shared directory for job files; with `JOB_STORAGE=s3`, for scratch files only. |
 | `DATABASE_URL` | `postgresql://billing@postgres:5432/billing` | same | Production PostgreSQL URL for balances, purchases, and reservations. Keep passwords in `secrets/database_url` (or use Compose's PostgreSQL password file). |

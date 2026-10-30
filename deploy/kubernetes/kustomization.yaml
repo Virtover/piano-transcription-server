@@ -1,26 +1,21 @@
-# The server on Kubernetes, for several machines: API replicas behind one
-# Service, GPU workers that KEDA adds as the queue grows, and Redis and
-# PostgreSQL as managed services. See docs/kubernetes.md.
+# The server on a real Kubernetes cluster, for several machines: API
+# replicas behind one Service, GPU workers that KEDA adds as the queue grows,
+# and Redis and PostgreSQL as managed services. See docs/kubernetes.md.
 #
-#   kubectl apply -k deploy/kubernetes
+#   python scripts/kube.py up       # or: kubectl apply -k deploy/kubernetes
 #
-# Before the first apply: settings.env next to this file, the Secrets in
-# docs/kubernetes.md, and the image names below.
+# scripts/kube.py writes settings.env and the Secrets, and sets the images;
+# by hand, see docs/kubernetes.md. A test cluster on this PC is ./local.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Also in the metrics URL of worker.yaml, which KEDA reads from its own
+# Also in the metrics URL of base/worker.yaml, which KEDA reads from its own
 # namespace; change both together.
 namespace: piano-transcription
 
 resources:
   - namespace.yaml
-  - wiring.yaml
-  - api.yaml
-  - worker.yaml
-  - remote-worker.yaml
-  - cleanup.yaml
-  - cloudflared.yaml
+  - base
 
 # The admin web page; uncomment to deploy it. See docs/kubernetes.md.
 # components:

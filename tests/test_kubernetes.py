@@ -18,11 +18,11 @@ COMPOSE = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8
 # deployed: managed services replace the first two, and pods have no host
 # folders to prepare.
 DEPLOYED = {
-    "api": "api.yaml",
-    "worker": "worker.yaml",
-    "remote-worker": "remote-worker.yaml",
-    "cleanup": "cleanup.yaml",
-    "cloudflared": "cloudflared.yaml",
+    "api": "base/api.yaml",
+    "worker": "base/worker.yaml",
+    "remote-worker": "base/remote-worker.yaml",
+    "cleanup": "base/cleanup.yaml",
+    "cloudflared": "base/cloudflared.yaml",
     "admin": "components/admin-web/admin.yaml",
 }
 IMAGES = {"Dockerfile.api": "piano-api", "Dockerfile.worker": "piano-worker"}
@@ -49,18 +49,58 @@ def mounts(service: str) -> dict[str, dict]:
     return {mount["mountPath"]: mount for mount in container(service).get("volumeMounts", [])}
 
 
-def test_every_file_is_listed_in_the_kustomization():
-    kustomization = yaml.safe_load((KUBERNETES / "kustomization.yaml").read_text(encoding="utf-8"))
-    files = {path.name for path in KUBERNETES.glob("*.yaml")} - {"kustomization.yaml"}
+def kustomization(folder: str = "") -> dict:
+    return yaml.safe_load((KUBERNETES / folder / "kustomization.yaml").read_text(encoding="utf-8"))
 
-    assert set(kustomization["resources"]) == files
-    assert {image["name"] for image in kustomization["images"]} == set(IMAGES.values())
+
+def test_every_file_is_listed_in_the_kustomization():
+    base = {path.name for path in (KUBERNETES / "base").glob("*.yaml")} - {"kustomization.yaml"}
+
+    assert set(kustomization("base")["resources"]) == base
+    # The real cluster and the test cluster: each its namespace, the base, settings, images.
+    assert kustomization()["resources"] == ["namespace.yaml", "base"]
+    assert kustomization("local")["resources"] == ["namespace.yaml", "../base", "services.yaml"]
+    for folder in ("", "local"):
+        assert {image["name"] for image in kustomization(folder)["images"]} == set(IMAGES.values())
+        assert kustomization(folder)["configMapGenerator"] == [{"name": "settings", "envs": ["settings.env"]}]
+
+
+def test_the_test_cluster_drops_only_what_a_pc_lacks():
+    local = kustomization("local")
+    deleted = {
+        (patch_document["kind"], patch_document["metadata"]["name"])
+        for patch in local["patches"]
+        if "$patch: delete" in patch["patch"]
+        for patch_document in [yaml.safe_load(patch["patch"])]
+    }
+
+    # KEDA's scaling stays: it scales the test cluster's workers too.
+    assert deleted == {
+        ("Deployment", "cloudflared"), ("PodDisruptionBudget", "cloudflared"), ("HorizontalPodAutoscaler", "api"),
+    }
+    assert local["namespace"] != kustomization()["namespace"]
+    wiring = next(yaml.safe_load(patch["patch"]) for patch in local["patches"] if "name: wiring" in patch["patch"])
+    assert wiring["data"] == {"DATABASE_BACKUPS": "server", "CLOUDFLARE_TUNNEL_DEPLOYED": "false"}
+
+
+def test_the_test_clusters_services_are_the_names_the_settings_use():
+    import importlib.util
+
+    services = [document for document in yaml.safe_load_all(
+        (KUBERNETES / "local" / "services.yaml").read_text(encoding="utf-8")) if document]
+    names = {document["metadata"]["name"] for document in services if document["kind"] == "Service"}
+    spec = importlib.util.spec_from_file_location("kube_script", ROOT / "scripts" / "kube.py")
+    kube = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kube)
+
+    assert names == {"redis", "postgres", "seaweed"}
+    assert "@redis:6379" in kube.LOCAL_SETTINGS["REDIS_URL"]
+    assert kube.LOCAL_SETTINGS["STORAGE_ENDPOINT"].endswith(":8333")
 
 
 def test_the_namespace_is_the_one_keda_scrapes():
-    kustomization = yaml.safe_load((KUBERNETES / "kustomization.yaml").read_text(encoding="utf-8"))
-    namespace = kustomization["namespace"]
-    [scaled] = [document for document in documents("worker.yaml") if document["kind"] == "ScaledObject"]
+    namespace = kustomization()["namespace"]
+    [scaled] = [document for document in documents("base/worker.yaml") if document["kind"] == "ScaledObject"]
 
     for trigger in scaled["spec"]["triggers"]:
         assert trigger["metadata"]["url"] == f"http://api.{namespace}.svc.cluster.local:8000/metrics"
@@ -97,7 +137,7 @@ def test_every_pod_is_unprivileged(service):
 
 
 def test_the_wiring_is_composes_with_the_choices_several_machines_need():
-    [wiring] = documents("wiring.yaml")
+    [wiring] = documents("base/wiring.yaml")
 
     assert wiring["data"]["REDIS_PASSWORD_FILE"] == COMPOSE["x-wiring"]["REDIS_PASSWORD_FILE"]
     assert wiring["data"]["DATA_DIR"] == COMPOSE["x-wiring"]["DATA_DIR"]
@@ -158,7 +198,7 @@ def test_services_keep_composes_names_and_ports():
 
 
 def test_the_workers_scale_on_metrics_the_api_reports():
-    [scaled] = [document for document in documents("worker.yaml") if document["kind"] == "ScaledObject"]
+    [scaled] = [document for document in documents("base/worker.yaml") if document["kind"] == "ScaledObject"]
 
     for trigger in scaled["spec"]["triggers"]:
         location = trigger["metadata"]["valueLocation"]
@@ -169,7 +209,7 @@ def test_the_workers_scale_on_metrics_the_api_reports():
 
 
 def test_the_metrics_token_is_the_secret_the_api_reads():
-    [authentication] = [document for document in documents("worker.yaml") if document["kind"] == "TriggerAuthentication"]
+    [authentication] = [document for document in documents("base/worker.yaml") if document["kind"] == "TriggerAuthentication"]
     [reference] = authentication["spec"]["secretTargetRef"]
 
     assert reference == {"parameter": "token", "name": "piano-secrets", "key": "metrics_token"}

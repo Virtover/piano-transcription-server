@@ -15,6 +15,7 @@ docker compose up -d --build                                     # the stack; OU
 python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start (also first start), status, cancel
 python scripts/server.py restore 2                               # billing database from a backup: latest, a name, or Nth newest; --from local, --fallback
 python scripts/admin.py status                                  # live picture; also jobs, user, users find, billing, limits, audit
+python scripts/kube.py local up                                 # Kubernetes: a test cluster on this PC; up, update, status, down for a real one
 ```
 
 `check --online` is the way to confirm a setup step worked. Code changes reach the containers only after a rebuild, for example `docker compose build api`.
@@ -38,13 +39,14 @@ python scripts/admin.py status                                  # live picture; 
 | `runpod/handler.py` | The RunPod Serverless handler, built with `Dockerfile.runpod` |
 | `app/admin_web/` | The optional admin web page behind Cloudflare Access: token checks, read-only routes, lowering its own access |
 | `app/admin/`, `app/controls.py`, `scripts/admin.py` | `python -m app.admin`: status, jobs, users, the billing report, and temporary limits the API reads from Redis; the host script runs it in the API container |
-| `deploy/kubernetes/` | The Kubernetes deployment for several machines; `tests/test_kubernetes.py` keeps it in step with `docker-compose.yml` |
+| `deploy/kubernetes/` | The Kubernetes deployment: `base/`, the real cluster's overlay, and `local/`, a test cluster on this PC; `tests/test_kubernetes.py` keeps it in step with `docker-compose.yml` |
+| `scripts/kube.py` | Kubernetes from the host: up, update, status, down, for a real cluster and, with `local`, the test cluster |
 | `scripts/setup.py` | Guided setup of the optional features on the host, from `features --json` and `requirements --json` |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
 
 ## Conventions
 
-- **Secrets are files** in `secrets/` (mounted at `/run/secrets`), never env file values. **Choices are in two files:** `server.env`, the server's settings, the same on every deployment, and `.env`, only what Docker Compose itself reads (`COMPOSE_ONLY_VARIABLES` in `app/config.py`). Container paths are wiring, in `docker-compose.yml` and `deploy/kubernetes/wiring.yaml`. A check that applies to one deployment is gated on `DEPLOYMENT` (`uses_compose_profiles`, `tunnel_enabled`).
+- **Secrets are files** in `secrets/` (mounted at `/run/secrets`), never env file values. **Choices are in two files:** `server.env`, the server's settings, the same on every deployment, and `.env`, only what Docker Compose itself reads (`COMPOSE_ONLY_VARIABLES` in `app/config.py`). Container paths are wiring, in `docker-compose.yml` and `deploy/kubernetes/base/wiring.yaml`. A check that applies to one deployment is gated on `DEPLOYMENT` (`uses_compose_profiles`, `tunnel_enabled`).
 - **Every setting is documented** in `docs/configuration.md`; a test fails otherwise. Durations use units (`30s`, `2m`, `1d`).
 - **An optional feature is a row of `FEATURES`** in `app/features.py`: its switch, needs, exclusions, settings, and secrets. Add a rule there, not in `validate_settings`, and give the feature a block in `.env.example` and a row in "Optional features" in `docs/configuration.md`; tests keep the three in step.
 - **Docs and skills describe only this project.** What a provider must offer lives in `app/requirements.py`, stated as an intent with its reason ("signed links must work from any IP address"), with values calculated from settings and code. Never add provider menu paths or setting names to docs or skills: they go stale. Where a provider's API can read a setting, verify it in `app/online_check.py`.

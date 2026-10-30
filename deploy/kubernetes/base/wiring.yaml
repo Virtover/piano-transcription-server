@@ -8,6 +8,8 @@ metadata:
   name: wiring
 data:
   DEPLOYMENT: kubernetes
+  # cloudflared.yaml runs it; the test cluster on a PC does not.
+  CLOUDFLARE_TUNNEL_DEPLOYED: "true"
   REDIS_PASSWORD_FILE: /run/redis/password
   DATA_DIR: /data
   # Several machines share no data volume, and no folder outlives a pod.

@@ -1,0 +1,12 @@
+# What every Kubernetes deployment runs: the real cluster (..) and the test
+# cluster on this PC (../local) add their namespace, settings, and images.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - wiring.yaml
+  - api.yaml
+  - worker.yaml
+  - remote-worker.yaml
+  - cleanup.yaml
+  - cloudflared.yaml

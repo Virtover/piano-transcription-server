@@ -41,6 +41,48 @@ def test_a_basic_server_has_every_feature_off_and_no_problem(default_settings):
     assert all_problems(default_settings, "all") == []
 
 
+def test_every_feature_says_what_kubernetes_makes_of_it():
+    uses = {feature.key: feature.kubernetes[0] for feature in FEATURES}
+
+    assert set(uses.values()) <= {"needed", "optional", "unavailable"}
+    # What the manifests set, and what their scaling and tunnel need.
+    assert {key for key, use in uses.items() if use == "needed"} == {
+        "tunnel", "provider_backups", "object_storage", "job_storage", "metrics",
+    }
+    assert uses["offsite"] == "unavailable"
+    for feature in FEATURES:
+        if feature.kubernetes[0] != "optional":
+            assert feature.kubernetes[1], feature.key
+
+
+def test_on_kubernetes_what_is_needed_must_be_on(default_settings):
+    default_settings.service.deployment = "kubernetes"
+    default_settings.offsite.bucket = "backups"
+
+    problems = validate_settings(default_settings, "all")
+
+    assert any(problem.startswith("On Kubernetes, metrics for scaling is needed: KEDA") for problem in problems)
+    assert any(problem.startswith("On Kubernetes, off-site backups cannot be on") for problem in problems)
+    # The tunnel runs there by itself, and its token is not a file of the API.
+    assert not any("tunnel token" in problem for problem in problems)
+
+
+def test_a_test_cluster_needs_neither_a_tunnel_nor_a_database_provider(default_settings):
+    default_settings.service.deployment = "kubernetes"
+    default_settings.tunnel.deployed = False
+    default_settings.secrets.metrics_token = "token"
+
+    problems = validate_settings(default_settings, "all")
+
+    assert not any("tunnel" in problem.lower() or "provider" in problem for problem in problems
+                   if problem.startswith("On Kubernetes")), problems
+    assert not app_config.tunnel_enabled(default_settings)
+
+
+def test_the_kubernetes_checks_are_only_for_kubernetes(default_settings):
+    assert not any(problem.startswith("On Kubernetes") for problem in validate_settings(default_settings, "all"))
+
+
 def test_needs_come_before_what_needs_them():
     order = [feature.key for feature in FEATURES]
     for feature in FEATURES:
@@ -164,6 +206,7 @@ def test_features_json_lists_state_settings_and_secrets(default_settings):
     }
     assert listed["metrics"]["off"]["delete_secret"] == "metrics_token"
     assert listed["tunnel"]["off"]["remove_profiles"] == ["cloudflare"]
+    assert listed["metrics"]["kubernetes"] == {"use": "needed", "why": "KEDA adds and removes the GPU workers on /metrics"}
     routing = next(item for item in outsourcing["settings"] if item["name"] == "OUTSOURCE_ROUTING")
     assert routing["choices"] == ["local_first", "remote_first_overflow", "remote_first_fallback"]
     timeout = next(item for item in outsourcing["settings"] if item["name"] == "OUTSOURCE_TIMEOUT")

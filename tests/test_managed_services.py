@@ -125,7 +125,7 @@ def test_each_deployment_names_itself_in_its_wiring():
     import yaml
 
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
-    [wiring] = yaml.safe_load_all((ROOT / "deploy" / "kubernetes" / "wiring.yaml").read_text(encoding="utf-8"))
+    [wiring] = yaml.safe_load_all((ROOT / "deploy" / "kubernetes" / "base" / "wiring.yaml").read_text(encoding="utf-8"))
 
     assert compose["x-wiring"]["DEPLOYMENT"] == "compose"
     assert wiring["data"]["DEPLOYMENT"] == "kubernetes"

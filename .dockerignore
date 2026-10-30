@@ -11,3 +11,4 @@ deploy/kubernetes/settings.env
 .venv/
 **/__pycache__/
 .pytest_cache/
+deploy/kubernetes/local/settings.env

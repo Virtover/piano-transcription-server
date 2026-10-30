@@ -1,0 +1,188 @@
+# The services a real cluster has managed, here inside the test cluster:
+# Redis, PostgreSQL, and S3-compatible storage. Their passwords are the
+# Secrets piano-redis, piano-postgres, and piano-seaweed, which
+# scripts/kube.py generates.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      securityContext:
+        # The image's redis user.
+        runAsUser: 999
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          # The users of redis/users.acl that the services need, with their
+          # rules and the password as a hash, as redis/start.sh gives them to
+          # Compose's Redis; scripts/kube.py writes the file.
+          command: [redis-server, --aclfile, /etc/redis/users.acl, --appendonly, "yes", --appendfsync, everysec,
+                    --dir, /data]
+          ports:
+            - containerPort: 6379
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: users
+              mountPath: /etc/redis
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: users
+          secret:
+            secretName: piano-redis
+            items:
+              - key: users.acl
+                path: users.acl
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - name: POSTGRES_DB
+              value: billing
+            - name: POSTGRES_USER
+              value: billing
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: piano-postgres
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, billing, -d, billing]
+            periodSeconds: 5
+          # As in Compose: root only until it switches to the postgres user.
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seaweed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: seaweed
+  template:
+    metadata:
+      labels:
+        app: seaweed
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: seaweed
+          # As the local test in docs/runpod.md.
+          image: chrislusf/seaweedfs
+          args: [server, -dir=/data, -s3, -s3.port=8333, -s3.config=/etc/seaweed/s3.json]
+          ports:
+            - containerPort: 8333
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/seaweed
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: config
+          secret:
+            secretName: piano-seaweed
+---
+# On localhost:8333 of this PC, which pods reach as host.docker.internal:8333:
+# the signed links to results work from the pods and from a browser alike.
+apiVersion: v1
+kind: Service
+metadata:
+  name: seaweed
+spec:
+  type: LoadBalancer
+  selector:
+    app: seaweed
+  ports:
+    - port: 8333

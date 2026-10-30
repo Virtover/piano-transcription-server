@@ -9,6 +9,41 @@ The Compose stack runs everything on one machine. For more than one machine, `de
 
 The manifests set `JOB_STORAGE=s3` and `DATABASE_BACKUPS=provider` themselves, because several machines share no folder: see [Job storage](architecture.md#job-storage) and [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). `tests/test_kubernetes.py` keeps them in step with `docker-compose.yml`: the same commands, wiring, secret paths, user, and hardening.
 
+| Folder | What |
+| --- | --- |
+| `deploy/kubernetes/base` | What every Kubernetes deployment runs |
+| `deploy/kubernetes` | A real cluster: its namespace, `settings.env`, and images, on top of `base` |
+| `deploy/kubernetes/local` | A test cluster on this PC: `base`, with Redis, PostgreSQL, and S3-compatible storage inside it |
+
+## 🧰 `scripts/kube.py`
+
+```shell
+python scripts/kube.py local up       # a test cluster on this PC, everything inside it
+python scripts/kube.py up             # a real cluster: managed Redis, PostgreSQL, bucket
+python scripts/kube.py status         # pods, KEDA, queue, leader, problems
+python scripts/kube.py update         # new images, rolling update
+python scripts/kube.py down
+```
+
+`local` before a command acts on the test cluster instead of the real one. Also `check` (`check --online` inside the cluster), `admin <command>` (the commands of [Administration](administration.md), in an API pod), and `logs <deployment>`.
+
+* **`up` and `update` do every step**: `settings.env` from `server.env`; the Secrets, from the files in `secrets`, created or updated; the images, built and, for a real cluster, pushed under a new tag; `kubectl apply`, waiting for every Deployment; and `check --online` in the cluster. They ask once, naming the kubectl context, before they change the cluster or push an image.
+* **Secrets are never shown.** Each is made from its files with `kubectl --dry-run` and applied from memory. Files only a real cluster uses, such as the managed database's URL, are in `secrets/kubernetes`, so the Compose stack on this machine never reads them; `up` asks for a missing one without showing it, and generates `metrics_token`.
+* **`down`** deletes the namespace, with every pod and Secret. For a real cluster you type its name; the managed Redis, PostgreSQL, and bucket are not touched.
+* **`status`** shows every Deployment's ready pods, KEDA's workers, the queue and its oldest wait, the leading API, the Secrets by name, and every problem the API reports, including features Kubernetes needs that are off. `python scripts/setup.py status` shows, for each feature, whether Kubernetes needs it.
+
+## 🧪 A test cluster on this PC
+
+`python scripts/kube.py local up` runs the server on Docker Desktop's Kubernetes (turn it on in Docker Desktop's settings; kubectl's context is then `docker-desktop`), as a real cluster runs it, with what a cluster gets from providers inside it instead:
+
+* **Redis, PostgreSQL, and SeaweedFS** for the bucket, with random passwords in `secrets/kubernetes-local`, kept from one `up` to the next. Redis has the users and rules of `redis/users.acl`.
+* **The images built here**, which Docker Desktop's Kubernetes uses without a registry.
+* **Two API replicas**, on `http://localhost:8080`, beside a Compose stack on `8000`.
+* **CPU workers, added by KEDA** as the queue grows, one job each and up to 3, as GPU workers on a real cluster; `local up` installs KEDA when it is missing.
+* **No tunnel, billing, outsourcing, or error reports:** `settings.env` is `server.env` with those off, and the services above. Storage is at `host.docker.internal:8333`, so signed links to results work from the pods and from a browser.
+
+`python scripts/kube.py local down` removes it, with its database; KEDA stays installed. To see the scaling, submit a few uploads and watch `python scripts/kube.py local status`.
+
 ## 📋 What you need
 
 * A Kubernetes cluster with GPU nodes that offer `nvidia.com/gpu`, through NVIDIA's device plugin or GPU operator.
@@ -22,9 +57,9 @@ The manifests set `JOB_STORAGE=s3` and `DATABASE_BACKUPS=provider` themselves, b
 
   and see the sections Redis, PostgreSQL, and Storage.
 
-## 🚀 First deployment
+## 🚀 First deployment by hand
 
-The commands run from the repository's folder, with `kubectl` signed in to the cluster.
+`python scripts/kube.py up` does this; by hand, the commands run from the repository's folder, with `kubectl` signed in to the cluster.
 
 1. **Build and push the images.** Use a new tag for every version:
 
@@ -63,7 +98,7 @@ The commands run from the repository's folder, with `kubectl` signed in to the c
 
    `metrics_token` is needed: KEDA reads the queue with it. Create one with the commands in [Secrets](configuration.md#-secrets).
 
-5. **GPU nodes.** In `deploy/kubernetes/worker.yaml`, uncomment `nodeSelector` and `tolerations` and give them your cluster's GPU node label and taint. Set the first trigger's `targetValue` to the jobs one worker runs at once, which the worker's log shows at startup (`kubectl -n piano-transcription logs deploy/worker`), and `maxReplicaCount` to the most GPUs you want to pay for.
+5. **GPU nodes.** In `deploy/kubernetes/base/worker.yaml`, uncomment `nodeSelector` and `tolerations` and give them your cluster's GPU node label and taint. Set the first trigger's `targetValue` to the jobs one worker runs at once, which the worker's log shows at startup (`kubectl -n piano-transcription logs deploy/worker`), and `maxReplicaCount` to the most GPUs you want to pay for.
 
 6. **Apply** and wait for the API:
 
@@ -86,7 +121,7 @@ The commands run from the repository's folder, with `kubectl` signed in to the c
 Build and push the new version under a new tag, change the tag in `kustomization.yaml`, and apply again. Kubernetes replaces the pods one at a time:
 
 * An API replica that stops hands the lead to another at once; the new replicas join without recovering anything.
-* A worker that stops takes no new job and gets 15 minutes to finish the ones it runs (`terminationGracePeriodSeconds` in `worker.yaml`). A job still running then fails and is refunded.
+* A worker that stops takes no new job and gets 15 minutes to finish the ones it runs (`terminationGracePeriodSeconds` in `base/worker.yaml`). A job still running then fails and is refunded.
 
 `scripts/server.py`, which announces a restart to clients and drains the stack, is for Compose; a rolling update interrupts nothing, so it needs no notice. To change settings, edit `settings.env` and apply: the settings' ConfigMap gets a new name, which restarts the pods that use it.
 

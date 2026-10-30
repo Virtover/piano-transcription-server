@@ -73,13 +73,20 @@ def monitor_backup_health(leader: Leadership | None = None) -> None:
         wait_for_lead(leader)
         try:
             state = backups.offsite_status(Billing())
-            now = int(time.time())
             if state is None:
                 continue
             if state["error"]:
                 logger.error("Off-site backup copying is failing: %s", state["error"])
-            elif state["succeeded_at"] is None or now - state["succeeded_at"] > interval * 2:
-                logger.error("Off-site backup copying has not succeeded for %.0f seconds", now - (state["succeeded_at"] or 0))
+                continue
+            # Measured from the newest local backup, not the clock: a machine
+            # that slept made neither, and copies them again when it wakes.
+            local = backups.local_backups(settings.database.backup_dir)
+            newest = max(local) if local else None
+            behind = None if newest is None else newest - (state["succeeded_at"] or 0)
+            if behind is not None and behind > interval * 2:
+                logger.error(
+                    "Off-site backup copying has not succeeded for %.0f seconds of local backups", behind
+                )
         except Exception:
             logger.exception("Could not monitor off-site backup health")
 

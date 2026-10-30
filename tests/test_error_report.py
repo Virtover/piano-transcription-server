@@ -317,3 +317,20 @@ def test_online_check_refuses_a_redirect(tmp_path):
     assert result.status == "fail"
     assert "redirected" in result.detail
     assert http.calls[0][1]["allow_redirects"] is False
+
+
+def test_errors_still_reach_the_containers_log(monkeypatch, capsys, default_settings):
+    import logging
+
+    root = logging.getLogger()
+    saved = list(root.handlers)
+    monkeypatch.setattr(error_report, "_reporter", None)
+    default_settings.error_report.url = "https://monitor.example/errors"
+    default_settings.secrets.error_report_token = "token"
+    root.handlers = []
+    try:
+        error_report.install("api", default_settings)
+        logging.getLogger("app.main").error("Off-site backup copying is failing")
+        assert "Off-site backup copying is failing" in capsys.readouterr().err
+    finally:
+        root.handlers = saved

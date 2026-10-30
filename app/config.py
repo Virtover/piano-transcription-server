@@ -440,6 +440,10 @@ class TunnelSettings(BaseSettings):
     # The public hostname, such as piano.example.com. Only check --online
     # and the requirements use it.
     hostname: str | None = None
+    # Wiring: whether the deployment runs cloudflared itself, as the
+    # Kubernetes manifests do, and the test cluster does not. Unset with
+    # Compose, where COMPOSE_PROFILES says.
+    deployed: bool | None = None
 
     @field_validator("hostname")
     @classmethod
@@ -811,9 +815,11 @@ ENCRYPTED_SSLMODES = {"require", "verify-ca", "verify-full"}
 
 
 def tunnel_enabled(config: "Settings | None" = None) -> bool:
-    """Whether cloudflared runs: with Compose when its profile is listed;
-    with Kubernetes always, as its own Deployment."""
+    """Whether cloudflared runs: as the deployment's wiring says, or with
+    Compose when its profile is listed."""
     config = config or settings
+    if config.tunnel.deployed is not None:
+        return config.tunnel.deployed
     return config.service.deployment == "kubernetes" or config.tunnel.enabled
 
 

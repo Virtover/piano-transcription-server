@@ -217,6 +217,14 @@ def install(service: str, config=None) -> bool:
     if _reporter is None and url and token is not None:
         _reporter = Reporter(url, token.get_secret_value(), service, secrets=secret_values(config))
         handler = ReportHandler(_reporter)
+        root = logging.getLogger()
+        # Without a handler of its own, the root logger prints warnings and
+        # errors to stderr through Python's last resort, which a first handler
+        # turns off: they keep going to the container's log too.
+        if not root.handlers:
+            console = logging.StreamHandler()
+            console.setLevel(logging.WARNING)
+            root.addHandler(console)
         # uvicorn's loggers do not propagate to the root logger.
         for name in ("", "uvicorn"):
             logging.getLogger(name).addHandler(handler)

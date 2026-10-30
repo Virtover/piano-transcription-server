@@ -7,3 +7,4 @@ __pycache__/
 /deploy/kubernetes/settings.env
 /server.env
 /.env.before-split
+/deploy/kubernetes/local/settings.env

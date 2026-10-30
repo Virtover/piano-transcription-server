@@ -70,6 +70,10 @@ class Feature:
     serves: tuple[str, ...] = ()
     # The secret file whose presence turns it on, for features without a setting.
     switch_secret: str | None = None
+    # On Kubernetes: needed, optional, or unavailable, and why; and when a
+    # need applies, if not always.
+    kubernetes: tuple[str, str] = ("optional", "")
+    kubernetes_applies: Callable[[Settings], bool] | None = None
 
     def switch_text(self, config: Settings) -> str:
         return self.switch(config) if callable(self.switch) else self.switch
@@ -171,6 +175,9 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="tunnel",
+        kubernetes=('needed', 'cloudflared runs there, with the token in its own Secret'),
+        # Not on the test cluster on a PC, which runs no tunnel.
+        kubernetes_applies=lambda config: config.tunnel.deployed is not False,
         title="HTTPS through a Cloudflare Tunnel",
         summary="An HTTPS address for the server on the internet, without opening a port.",
         switch=f"COMPOSE_PROFILES={app_config.TUNNEL_PROFILE}",
@@ -182,7 +189,9 @@ FEATURES: tuple[Feature, ...] = (
         # Only cloudflared reads the token, so only `check` looks for it.
         roles=("all",),
         requirement_sections=("Cloudflare Tunnel",),
-        problems=lambda config, role: [] if _tunnel_token_present(config) else [
+        # On Kubernetes the token is the Secret piano-cloudflare, which
+        # scripts/kube.py checks; no other pod mounts it.
+        problems=lambda config, role: [] if _tunnel_token_present(config) or not app_config.uses_compose_profiles(config) else [
             f"COMPOSE_PROFILES={app_config.TUNNEL_PROFILE} needs the tunnel token in the secret file "
             f"{config.secrets_dir}/{app_config.TUNNEL_TOKEN_FILE}"
         ],
@@ -190,6 +199,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="admin_web",
+        kubernetes=('optional', 'its component in deploy/kubernetes/kustomization.yaml'),
         title="Admin web page",
         summary="The admin commands as a web page, on a hostname of its own behind Cloudflare Access.",
         switch=_admin_switch,
@@ -226,6 +236,9 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="provider_backups",
+        kubernetes=('needed', 'set by deploy/kubernetes/base/wiring.yaml: no folder outlives a pod'),
+        # A test cluster's own database has no provider; the API backs it up.
+        kubernetes_applies=lambda config: app_config.runs_elsewhere(app_config.effective_database_url(config)),
         title="Backups by the database's provider",
         summary="A managed PostgreSQL's provider backs the billing database up, instead of the server.",
         switch="DATABASE_BACKUPS=provider",
@@ -238,6 +251,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="offsite",
+        kubernetes=('unavailable', "it copies the server's backups, which Kubernetes leaves to the provider"),
         title="Off-site backups",
         summary="Encrypted copies of the server's billing backups in a bucket away from this machine.",
         switch="OFFSITE_BACKUP_BUCKET",
@@ -258,6 +272,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="object_storage",
+        kubernetes=('needed', 'job files in object storage need it'),
         title="Object storage",
         summary="An S3-compatible bucket, which outsourcing and JOB_STORAGE=s3 use.",
         switch="STORAGE_BUCKET",
@@ -274,6 +289,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="job_storage",
+        kubernetes=('needed', 'set by deploy/kubernetes/base/wiring.yaml: several machines share no folder'),
         title="Job files in object storage",
         summary="Uploads and results in the bucket, for API replicas and workers on several machines.",
         switch="JOB_STORAGE=s3",
@@ -322,6 +338,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="metrics",
+        kubernetes=('needed', 'KEDA adds and removes the GPU workers on /metrics'),
         title="Metrics for scaling",
         summary="GET /metrics reports queue depth and waits, for an autoscaler.",
         switch="the secret file metrics_token",
@@ -381,8 +398,24 @@ def feature_problems(feature: Feature, config: Settings, role: str = "all") -> l
     return problems
 
 
-def all_problems(config: Settings, role: str) -> list[str]:
+def kubernetes_problems(config: Settings, role: str) -> list[str]:
+    """On Kubernetes, the features its deployment needs, and those it cannot run."""
+    if config.service.deployment != "kubernetes" or role != "all":
+        return []
     problems = []
+    for feature in FEATURES:
+        use, why = feature.kubernetes
+        if feature.kubernetes_applies and not feature.kubernetes_applies(config):
+            continue
+        if use == "needed" and not feature.enabled(config):
+            problems.append(f"On Kubernetes, {in_sentence(feature.title)} is needed: {why}; {feature.how_text()}")
+        elif use == "unavailable" and feature.enabled(config):
+            problems.append(f"On Kubernetes, {in_sentence(feature.title)} cannot be on: {why}")
+    return problems
+
+
+def all_problems(config: Settings, role: str) -> list[str]:
+    problems = kubernetes_problems(config, role)
     for feature in FEATURES:
         for problem in feature_problems(feature, config, role):
             if problem not in problems:
@@ -482,6 +515,7 @@ def describe_features(config: Settings) -> list[dict]:
             "problems": feature_problems(feature, config, "all"),
             "docs": feature.docs,
             "requirement_sections": list(feature.requirement_sections),
+            "kubernetes": {"use": feature.kubernetes[0], "why": feature.kubernetes[1]},
         })
     return listed
 

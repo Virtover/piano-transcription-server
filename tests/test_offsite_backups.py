@@ -302,3 +302,62 @@ def test_offsite_key_names():
     assert offsite_key(123) == "billing-backups/billing-123.dump.age"
     assert offsite_key(123, "sqlite3") == "billing-backups/billing-123.sqlite3.age"
     assert backups.OFFSITE_KEY_PATTERN.match(offsite_key(int(time.time())))
+
+
+# --- The health check after sleep ---------------------------------------------------------------
+
+class StopMonitor(Exception):
+    pass
+
+
+def monitor_once(monkeypatch, settings, state, local_times):
+    """One round of the off-site health check, with the backups given."""
+    import logging
+
+    from app import main as app_main
+
+    settings.offsite.bucket = "backups"
+    settings.database.backup_interval = 900
+    calls = []
+
+    def sleep(seconds):
+        # The first wait, then stop at the second: one round.
+        if calls:
+            raise StopMonitor
+        calls.append(seconds)
+
+    monkeypatch.setattr(app_main.time, "sleep", sleep)
+    monkeypatch.setattr(app_main.backups, "offsite_status", lambda billing: state)
+    monkeypatch.setattr(app_main.backups, "local_backups", lambda directory: {stamp: None for stamp in local_times})
+    monkeypatch.setattr(app_main, "Billing", lambda: None)
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    app_main.logger.addHandler(handler)
+    try:
+        with pytest.raises(StopMonitor):
+            app_main.monitor_backup_health()
+    finally:
+        app_main.logger.removeHandler(handler)
+    return [record.getMessage() for record in records]
+
+
+def test_a_machine_that_slept_is_not_an_off_site_failure(api_context, monkeypatch):
+    _, settings, _ = api_context
+    # The last copy and the last local backup were before a 9-hour sleep.
+    asleep = 1_000_000
+
+    messages = monitor_once(monkeypatch, settings, {"error": None, "succeeded_at": asleep, "failed_at": None},
+                            [asleep - 5, asleep])
+
+    assert messages == []
+
+
+def test_local_backups_without_off_site_copies_are(api_context, monkeypatch):
+    _, settings, _ = api_context
+    last_copy = 1_000_000
+
+    messages = monitor_once(monkeypatch, settings, {"error": None, "succeeded_at": last_copy, "failed_at": None},
+                            [last_copy, last_copy + 900, last_copy + 1800, last_copy + 2700])
+
+    assert messages == ["Off-site backup copying has not succeeded for 2700 seconds of local backups"]

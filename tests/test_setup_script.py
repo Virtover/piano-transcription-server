@@ -372,6 +372,17 @@ def test_status_lists_every_feature_and_its_problems(server):
     assert ready.split()[1] == "off" and "missing" not in ready
 
 
+def test_status_says_what_kubernetes_needs(server):
+    setup, script = make(server)
+
+    setup.status()
+
+    metrics = next(line for line in script.said if "Metrics for scaling" in line)
+    offsite = next(line for line in script.said if "Off-site backups" in line)
+    billing = next(line for line in script.said if "Billing with Google Play" in line)
+    assert "needed" in metrics and "not available" in offsite and "optional" in billing
+
+
 def test_a_missing_setting_is_named(server):
     file = env(server)
     file.set("OUTSOURCE_PROVIDER", "runpod")

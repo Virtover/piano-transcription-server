@@ -1,0 +1,110 @@
+# A test cluster on this PC, with everything inside it: Docker Desktop's
+# Kubernetes, the images built here, and Redis, PostgreSQL, and S3-compatible
+# storage (SeaweedFS) as services of its own, with random passwords. Workers
+# run on the CPU, and KEDA adds them as the queue grows, as on a real cluster;
+# there is no tunnel. The API answers on http://localhost:8080.
+#
+#   python scripts/kube.py local up      # writes settings.env and the Secrets
+#   python scripts/kube.py local down
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: piano-local
+
+resources:
+  - namespace.yaml
+  - ../base
+  - services.yaml
+
+# Written by scripts/kube.py from server.env, with the services above.
+configMapGenerator:
+  - name: settings
+    envs:
+      - settings.env
+
+# Built here; Docker Desktop's Kubernetes uses the local images. Each local
+# up and update sets a new tag, so the pods are replaced.
+images:
+  - name: piano-api
+    newName: piano-transcription-api
+    newTag: local
+  - name: piano-worker
+    newName: piano-transcription-worker
+    newTag: local
+
+patches:
+  # KEDA reads this namespace's /metrics; a CPU worker runs one job at a time.
+  - target:
+      kind: ScaledObject
+      name: worker
+    patch: |-
+      - op: replace
+        path: /spec/triggers/0/metadata/url
+        value: http://api.piano-local.svc.cluster.local:8000/metrics
+      - op: replace
+        path: /spec/triggers/1/metadata/url
+        value: http://api.piano-local.svc.cluster.local:8000/metrics
+      - op: replace
+        path: /spec/triggers/0/metadata/targetValue
+        value: "1"
+      - op: replace
+        path: /spec/maxReplicaCount
+        value: 3
+  # No tunnel or metrics server on a test cluster.
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: cloudflared
+  - patch: |-
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: cloudflared
+  - patch: |-
+      $patch: delete
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: api
+  # Its database has no provider to back it up: the API does, inside its pod,
+  # and a test cluster's data does not outlive it.
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: wiring
+      data:
+        DATABASE_BACKUPS: server
+        CLOUDFLARE_TUNNEL_DEPLOYED: "false"
+  # The API on localhost:8080, beside a Compose stack on 8000.
+  - target:
+      kind: Service
+      name: api
+    patch: |-
+      - op: add
+        path: /spec/type
+        value: LoadBalancer
+      - op: replace
+        path: /spec/ports/0/port
+        value: 8080
+  # Workers on the CPU, with what a PC can spare.
+  - target:
+      kind: Deployment
+      name: worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            memory: 6Gi
+      - op: add
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: WORKER_ENFORCE_CPU
+            value: "true"
