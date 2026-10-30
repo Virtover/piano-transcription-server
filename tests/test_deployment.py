@@ -59,6 +59,13 @@ def test_runpod_torch_is_pinned():
     assert re.search(r"torch==[\d.]+ torchaudio==[\d.]+", (ROOT / "Dockerfile.runpod").read_text(encoding="utf-8"))
 
 
+def test_images_with_transkun_can_compile_its_dependencies():
+    # ncls, a transkun dependency, is built from source.
+    for name in ("Dockerfile.worker", "Dockerfile.runpod"):
+        dockerfile = (ROOT / name).read_text(encoding="utf-8")
+        assert "build-essential" in dockerfile and "python3-dev" in dockerfile, name
+
+
 def test_legacy_worker_build_matches_the_compose_switch():
     import yaml
 
