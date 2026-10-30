@@ -72,7 +72,7 @@ For a feature, it:
 4. **asks for the secrets** without showing them, or generates a random one where any value works, and writes them to `secrets`;
 5. **checks the result** with the server's own validation, and offers `check --online` for the external services.
 
-Apply the changes with `python scripts/server.py restart 1m`, or `start` when the stack is stopped: settings and secrets are read when the services start. The script needs only Python 3 and the docker CLI, and asks the server itself what the features are, so it changes with the code.
+Apply the changes with `python scripts/server.py restart 1m`, or `start` when the stack is stopped: settings and secrets are read when the services start. The script needs only Python 3 and the docker CLI. It asks the server itself what the features are, after bringing the API image up to the code, which takes seconds when nothing changed, so it changes with the code. `status` names what each feature that is on still misses: a secret file by its place in `secrets`, a setting by its name in `.env`, or another problem. In a terminal it shows them in color; `NO_COLOR=1` turns colors off.
 
 ## 🔒 Password protection
 

@@ -473,6 +473,8 @@ def describe_features(config: Settings) -> list[dict]:
                     "description": secret.description,
                     "kind": secret.kind,
                     "optional": secret.optional,
+                    # False: the feature's own rules check it, as when it has an alternative.
+                    "checked": secret.checked,
                     "present": secret_present(config, secret.name),
                 }
                 for secret in feature.secrets

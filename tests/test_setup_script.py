@@ -176,7 +176,9 @@ def test_an_unfinished_setup_says_what_is_missing(server):
 
     assert setup.set_up("object_storage") is False
 
-    assert "STORAGE_BUCKET needs the secret file" in script.text
+    # Each missing secret file by its place on the host, not in the container.
+    assert "missing secret file  secrets/storage_access_key" in script.text
+    assert "/run/secrets" not in script.text
     assert "python scripts/setup.py object_storage" in script.text
 
 
@@ -293,8 +295,75 @@ def test_status_lists_every_feature_and_its_problems(server):
 
     setup.status()
 
-    assert "on   Job files in object storage  [job_storage]" in script.text
-    assert "! JOB_STORAGE=s3 needs object storage" in script.text
+    line = next(line for line in script.said if "Job files in object storage" in line)
+    assert line.split()[1] == "on" and "job_storage" in line and line.endswith("1 missing")
+    assert any(line.strip().startswith("! JOB_STORAGE=s3 needs object storage") for line in script.said)
+    ready = next(line for line in script.said if "Password protection" in line)
+    assert ready.split()[1] == "off" and "missing" not in ready
+
+
+def test_a_missing_setting_is_named(server):
+    file = env(server)
+    file.set("OUTSOURCE_PROVIDER", "runpod")
+    file.save()
+    setup, script = make(server)
+
+    setup.status()
+
+    assert any("missing setting" in line and "RUNPOD_ENDPOINT_ID" in line for line in script.said)
+    # Said once, as a missing setting, not again as a problem.
+    assert not any("RUNPOD_ENDPOINT_ID is required" in line for line in script.said)
+
+
+def test_a_secret_with_an_alternative_is_missing_only_when_the_server_says_so():
+    feature = {
+        "enabled": True, "settings": [], "problems": [],
+        "secrets": [{"name": "google_play_service_account.json", "description": "", "optional": False,
+                     "checked": False, "present": False}],
+    }
+
+    assert setup_script.Missing.of(feature).count == 0
+
+    feature["problems"] = ["needs a Google Play service account: the secret file "
+                           "/run/secrets/google_play_service_account.json is missing"]
+    missing = setup_script.Missing.of(feature)
+    assert [secret["name"] for secret in missing.secrets] == ["google_play_service_account.json"]
+    assert missing.problems == []
+
+
+# --- Colors ---------------------------------------------------------------------------------------
+
+def test_no_colors_unless_turned_on():
+    assert setup_script.Style()("text", "red") == "text"
+    assert setup_script.Style(True)("text", "red", "bold") == "[31;1mtext[0m"
+
+
+def test_no_colors_with_no_color_or_without_a_terminal(monkeypatch):
+    class Terminal:
+        def isatty(self):
+            return True
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert not setup_script.Style.for_terminal(Terminal()).enabled
+    monkeypatch.delenv("NO_COLOR")
+    assert not setup_script.Style.for_terminal(object()).enabled
+
+
+def test_colors_do_not_count_as_width():
+    said = []
+    console = setup_script.Console(say=said.append, style=setup_script.Style(True))
+
+    console.wrap("word " * 30, "  ", "dim")
+
+    plain = [line.replace("[2m", "").replace("[0m", "") for line in said]
+    assert all(len(line) <= setup_script.WIDTH for line in plain)
+    assert len(said) == 2
+
+
+def test_container_paths_are_shown_as_on_the_host():
+    assert setup_script.host_paths("needs the secret file /run/secrets/runpod_api_key") == (
+        "needs the secret file secrets/runpod_api_key"
+    )
 
 
 def test_an_unknown_feature_lists_the_known_ones(server):
@@ -302,28 +371,6 @@ def test_an_unknown_feature_lists_the_known_ones(server):
 
     assert setup.set_up("nonsense") is False
     assert "outsourcing" in script.text
-
-
-def test_an_image_older_than_the_code_is_built_first(server):
-    root, config = server
-    calls = []
-
-    def old_then_new(*arguments, capture=True):
-        if not calls:
-            calls.append("old")
-            return subprocess.CompletedProcess(arguments, 2, "", "error: argument command: invalid choice: 'features'")
-        return config(*arguments, capture=capture)
-
-    script = Script()
-    setup = setup_script.Setup(
-        console=setup_script.Console(ask=script.ask, ask_hidden=script.ask_hidden, say=script.say),
-        root=root, config=old_then_new, build=lambda: calls.append("built"),
-    )
-
-    setup.status()
-
-    assert calls == ["old", "built"]
-    assert "Optional features" in script.text
 
 
 def test_the_command_line(server):

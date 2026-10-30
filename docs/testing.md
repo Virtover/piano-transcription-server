@@ -144,7 +144,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_kubernetes.py` | `deploy/kubernetes` against `docker-compose.yml`: images, commands, wiring, secret mounts, the tunnel token's isolation, the non-root user and hardening, and scaling on metrics the API reports. |
 | `test_copy_to.py` | `python -m app.backups copy-to`: the newest backup restored in one transaction, the password kept out of the command line, and refusals. |
 | `test_features.py` | The optional features' table: references, needs and exclusions, required settings and secrets per role, unused settings, `features --json`, and `.env.example` and the docs in step with it. |
-| `test_setup_script.py` | `scripts/setup.py`: editing `.env` in place, descriptions from the docs, setting features up with what they need, secrets never shown, turning features off, and an outdated API image. |
+| `test_setup_script.py` | `scripts/setup.py`: editing `.env` in place, descriptions from the docs, setting features up with what they need, secrets never shown, what is missing named by its file or setting, colors only in a terminal, and turning features off. |
 | `test_leader.py` | Which API replica leads: one at a time, handover on shutdown and after a crash, periodic tasks waiting for the lead, and startup recovery only when no other API runs. |
 | `test_batching.py` | Batch size rules (`auto` per GPU, clamping, CPU default) and splitting a batch in half on GPU out-of-memory. |
 | `test_gpu_batcher.py` | The real batcher and batch loop with a fake model that runs out of memory. Needs the worker image. |
