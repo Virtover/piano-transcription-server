@@ -7,7 +7,27 @@
 * **Secrets are files in `./secrets`.** Compose mounts the folder read-only at `/run/secrets`. The file name is the setting name. Secrets are never read from `.env` or the environment, and never appear in logs or error messages. See [Secrets](#-secrets).
 * **The process environment overrides `.env`.** Empty values count as unset.
 
-All settings are validated when a service starts. An invalid value stops the service with a message that names the variable. A variable that starts with `WORKER_`, `BILLING_`, `OUTSOURCE_`, `RUNPOD_`, `GOOGLE_PLAY_`, `CLOUDFLARE_`, `OFFSITE_`, or `ERROR_REPORT_` but is not a known setting is reported as a warning with the closest known name, for example `Unknown setting WORKER_BATCHSIZE; did you mean WORKER_BATCH_SIZE?`.
+All settings are validated when a service starts. An invalid value stops the service with a message that names the variable. A variable that starts with `WORKER_`, `BILLING_`, `OUTSOURCE_`, `STORAGE_`, `RUNPOD_`, `GOOGLE_PLAY_`, `CLOUDFLARE_`, `OFFSITE_`, or `ERROR_REPORT_` but is not a known setting is reported as a warning with the closest known name, for example `Unknown setting WORKER_BATCHSIZE; did you mean WORKER_BATCH_SIZE?`.
+
+### 🧩 Optional features
+
+A basic server needs no setting: `python scripts/server.py start` runs it with every feature below off. Each feature is turned on in one way, needs what its row says, and cannot be on with what it excludes. `check` lists which are on, refuses a feature that misses something, and warns about settings of a feature that is off, because they do nothing.
+
+| Feature | On with | Needs | Secrets | Guide |
+| --- | --- | --- | --- | --- |
+| Password protection | the secret file `server_password` | | `server_password` | [Password protection](setup.md#-password-protection) |
+| HTTPS through a Cloudflare Tunnel | `cloudflare` in `COMPOSE_PROFILES` | | `cloudflare/tunnel_token` | [Cloudflare Tunnel](cloudflare-tunnel.md) |
+| Admin web page | `ADMIN_WEB_MODE=read-only` or `read-write`, and `admin` in `COMPOSE_PROFILES` | the tunnel | created by `scripts/server.py` | [Admin web page](administration.md#-admin-web-page) |
+| Billing with Google Play and Google sign-in | `BILLING_PROVIDER=google_play` | | `google_play_service_account.json` | [Google Play billing](google-play-billing.md) |
+| Backups by the database's provider | `BILLING_BACKUPS=provider` | a managed PostgreSQL | | [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql) |
+| Off-site backups | `OFFSITE_BACKUP_BUCKET` | the server's own backups: not with `BILLING_BACKUPS=provider` | `offsite_backup_access_key`, `offsite_backup_secret_key` | [Off-site copies](#off-site-copies) |
+| Object storage | `STORAGE_BUCKET` | | `storage_access_key`, `storage_secret_key` | [Object storage](#object-storage) |
+| Job files in object storage | `JOB_STORAGE=s3` | object storage, for this server alone | | [Job storage](architecture.md#job-storage) |
+| Outsourcing to RunPod | `OUTSOURCE_PROVIDER=runpod` | object storage | `runpod_api_key`, optionally `runpod_read_api_key` | [Outsourcing to RunPod](runpod.md) |
+| Error reports | `ERROR_REPORT_URL` | | `error_report_token` | [Error reports](#error-reports) |
+| Metrics for scaling | the secret file `metrics_token` | | `metrics_token` | [Metrics for scaling](architecture.md#-metrics-for-scaling) |
+
+`python scripts/setup.py` sets features up and turns them off; see [Setting up features](setup.md#-setting-up-optional-features). `python -m app.config features --json` lists them with their state and what is missing, for scripts and agents. The table is `FEATURES` in `app/features.py`, which validation reads, and a test keeps this list and the blocks of `.env.example` in step with it.
 
 ### ✅ Checking the configuration
 
@@ -25,7 +45,7 @@ docker compose run --rm api python -m app.config check --online
 
 | Service | Tested when | What is tested |
 | --- | --- | --- |
-| Storage | `OUTSOURCE_PROVIDER=runpod` | Uploads a small object, downloads it through a presigned URL like the RunPod handler, and deletes it. |
+| Storage | `OUTSOURCE_PROVIDER=runpod` or `JOB_STORAGE=s3` | Uploads a small object, downloads it through a presigned URL like the RunPod handler, and deletes it. |
 | RunPod | `OUTSOURCE_PROVIDER=runpod` | The endpoint's health, and its settings against the requirements below: image, `STORAGE_ENDPOINT`, allowed CUDA versions, execution timeout, workers, scaling, and idle timeout. |
 | Google sign-in | `BILLING_PROVIDER=google_play` | The format of `GOOGLE_OAUTH_CLIENT_IDS`. Google can only confirm a client ID with a signed-in user's token. |
 | Google Play | `BILLING_PROVIDER=google_play` | Lists the products with the service account and compares them with `BILLING_PRODUCTS`. |

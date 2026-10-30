@@ -9,6 +9,8 @@ Piano Transcription Server: a FastAPI API, Dramatiq workers, and Redis, run with
 docker compose run --rm api python -m app.config check           # validate .env and secrets, offline
 docker compose run --rm api python -m app.config check --online  # also test storage, RunPod, Google Play for real
 docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents
+docker compose run --rm api python -m app.config features --json # the optional features: on or off, what each needs, what is missing
+python scripts/setup.py status                                  # the same for people; python scripts/setup.py <feature> sets one up
 docker compose up -d --build                                     # the stack; OUTSOURCE_PROVIDER in .env switches RunPod on
 python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start (also first start), status, cancel
 python scripts/server.py restore 2                               # billing database from a backup: latest, a name, or Nth newest; --from local, --fallback
@@ -21,7 +23,8 @@ python scripts/admin.py status                                  # live picture; 
 
 | Path | What |
 | --- | --- |
-| `app/config.py` | All settings (typed, grouped by prefix), validation, and the `check` and `requirements` commands |
+| `app/config.py` | All settings (typed, grouped by prefix), validation, and the `check`, `features`, and `requirements` commands |
+| `app/features.py` | The optional features in one table: what turns each on, what it needs and excludes, its settings and secrets; validation reads it |
 | `app/requirements.py` | What external services must provide, derived from the configuration |
 | `app/online_check.py` | The `check --online` service checks |
 | `app/api/routes/` | HTTP endpoints |
@@ -36,19 +39,21 @@ python scripts/admin.py status                                  # live picture; 
 | `app/admin_web/` | The optional admin web page behind Cloudflare Access: token checks, read-only routes, lowering its own access |
 | `app/admin/`, `app/controls.py`, `scripts/admin.py` | `python -m app.admin`: status, jobs, users, the billing report, and temporary limits the API reads from Redis; the host script runs it in the API container |
 | `deploy/kubernetes/` | The Kubernetes deployment for several machines; `tests/test_kubernetes.py` keeps it in step with `docker-compose.yml` |
+| `scripts/setup.py` | Guided setup of the optional features on the host, from `features --json` and `requirements --json` |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
 
 ## Conventions
 
 - **Secrets are files** in `secrets/` (mounted at `/run/secrets`), never `.env` values. `.env` holds only choices; container paths are in `docker-compose.yml`.
 - **Every setting is documented** in `docs/configuration.md`; a test fails otherwise. Durations use units (`30s`, `2m`, `1d`).
+- **An optional feature is a row of `FEATURES`** in `app/features.py`: its switch, needs, exclusions, settings, and secrets. Add a rule there, not in `validate_settings`, and give the feature a block in `.env.example` and a row in "Optional features" in `docs/configuration.md`; tests keep the three in step.
 - **Docs and skills describe only this project.** What a provider must offer lives in `app/requirements.py`, stated as an intent with its reason ("signed links must work from any IP address"), with values calculated from settings and code. Never add provider menu paths or setting names to docs or skills: they go stale. Where a provider's API can read a setting, verify it in `app/online_check.py`.
 - **Docs serve every OS.** A command that runs the same everywhere (`docker`, `python`, `curl`) goes in one ```` ```shell ```` block. One that differs gets a `**Windows (PowerShell)**` block followed by a `**macOS and Linux**` block (bash, also valid in zsh). Give the user the commands for their OS.
 - Match the surrounding code's style and comment density. Add or update tests with every change.
 
 ## Setup tasks
 
-For guided setup, use the skills in `.claude/skills/`: `setup-runpod` for outsourcing, `setup-google` for sign-in and billing. The Cloudflare Tunnel has no skill; follow `docs/cloudflare-tunnel.md`. These rules apply to any agent:
+People can run `python scripts/setup.py`. For guided setup by an agent, use the skills in `.claude/skills/`: `setup-runpod` for outsourcing, `setup-google` for sign-in and billing. The Cloudflare Tunnel has no skill; follow `docs/cloudflare-tunnel.md`. These rules apply to any agent:
 
 - Take the requirements from `requirements --json`, and look up the providers' current documentation for where each is set.
 - Never ask for a secret in the chat or read secret files; give the user the command to write it, then check the file exists.

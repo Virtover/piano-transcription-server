@@ -53,6 +53,27 @@ Do not commit `.env`, the `secrets` folder, or any machine-specific values.
 
 To update a running server, use `python scripts/server.py restart 5m`: it announces the restart to clients, builds while the current version keeps serving, and lets running jobs finish. `python scripts/server.py stop 10m` shuts the server down the same way. See [Planned restarts and shutdowns](architecture.md#-planned-restarts-and-shutdowns).
 
+## 🧩 Setting up optional features
+
+The stack runs as above with every optional feature off: no sign-in, no billing, job files on this machine. Features such as HTTPS through a Cloudflare Tunnel, Google Play billing, or outsourcing to RunPod are turned on in `.env` and `secrets`; [Optional features](configuration.md#-optional-features) lists them, with what each needs. A guided setup does it step by step:
+
+```shell
+python scripts/setup.py                   # what is on, then a menu
+python scripts/setup.py status            # what is on and what is missing
+python scripts/setup.py outsourcing       # set one feature up
+python scripts/setup.py off outsourcing   # turn one off
+```
+
+For a feature, it:
+
+1. **sets up what it needs first**, such as object storage for outsourcing, and offers to turn off what it cannot be on with;
+2. **lists what external services must provide**, from `python -m app.config requirements`, as what is needed and why. Where each is set at a provider changes, so look it up in the provider's current documentation, or give the list to an AI agent;
+3. **asks for the settings** with their descriptions from [Configuration](configuration.md), and writes them into `.env`, where `.env.example` has them, keeping the comments;
+4. **asks for the secrets** without showing them, or generates a random one where any value works, and writes them to `secrets`;
+5. **checks the result** with the server's own validation, and offers `check --online` for the external services.
+
+Apply the changes with `python scripts/server.py restart 1m`, or `start` when the stack is stopped: settings and secrets are read when the services start. The script needs only Python 3 and the docker CLI, and asks the server itself what the features are, so it changes with the code.
+
 ## 🔒 Password protection
 
 Optional. Without it, anyone who can reach port 8000 can use the server. For a server that only you, or people you share a password with, use from the internet, create one password and restart the API:

@@ -162,7 +162,11 @@ def test_check_reminds_that_the_provider_must_back_up(default_settings):
 def test_offsite_copies_need_the_backups(default_settings):
     default_settings.billing.backups = "provider"
 
-    assert any("BILLING_BACKUPS=provider" in problem for problem in app_config.offsite_problems(default_settings))
+    default_settings.offsite.bucket = "backups"
+
+    assert "OFFSITE_BACKUP_BUCKET copies the server's backups, which BILLING_BACKUPS=provider turns off" in (
+        validate_settings(default_settings, "api")
+    )
 
 
 # --- Requirements -------------------------------------------------------------------------

@@ -19,6 +19,8 @@ The API is available at `http://localhost:8000`; interactive documentation is at
 
 See [Local setup](docs/setup.md) for requirements, GPU checks, health checks, and worker scaling.
 
+Optional features, such as HTTPS, Google Play billing, or outsourcing to RunPod, are set up step by step with `python scripts/setup.py`; see [Setting up optional features](docs/setup.md#-setting-up-optional-features).
+
 > [!NOTE]
 > Production billing uses PostgreSQL in `billing-data/postgres` and is backed up every 15 minutes with verified `pg_dump` files in `billing-data/backups`, optionally copied and encrypted off-site. Existing SQLite installations must be migrated explicitly; startup never performs a data migration. See [Billing database backups](docs/configuration.md#-billing-database-backups).
 

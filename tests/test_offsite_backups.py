@@ -253,7 +253,7 @@ def test_sharing_the_outsourcing_bucket_is_warned_about(api_context):
 
     warnings = config.configuration_warnings(settings, {})
 
-    assert any("outsourcing bucket" in warning for warning in warnings)
+    assert any("object storage bucket" in warning for warning in warnings)
 
 
 def test_requirements_follow_the_retention(api_context):

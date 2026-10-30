@@ -326,8 +326,13 @@ def test_s3_job_storage_needs_the_bucket_and_its_keys(default_settings):
 
     problems = validate_settings(default_settings, "worker")
 
-    assert any("STORAGE_BUCKET is required when JOB_STORAGE=s3" in problem for problem in problems)
-    assert any("JOB_STORAGE=s3 needs the secret file" in problem for problem in problems)
+    assert any(problem.startswith("JOB_STORAGE=s3 needs object storage: set STORAGE_BUCKET") for problem in problems)
+
+    default_settings.storage.bucket = "jobs"
+    problems = validate_settings(default_settings, "worker")
+
+    assert "STORAGE_ENDPOINT is required when STORAGE_BUCKET is set" in problems
+    assert any("STORAGE_BUCKET needs the secret file" in problem for problem in problems)
 
 
 def test_local_job_storage_needs_no_bucket(default_settings):

@@ -552,7 +552,7 @@ def test_complete_settings_pass(default_settings):
         (lambda s: setattr(s.admin_web, "access_team_domain", "example.com"), "your team domain"),
         (lambda s: setattr(s.admin_web, "hostname", "piano.example.com"), "must differ from CLOUDFLARE_TUNNEL_HOSTNAME"),
         (lambda s: setattr(s.tunnel, "compose_profiles", "cloudflare"), "needs admin in COMPOSE_PROFILES"),
-        (lambda s: setattr(s.tunnel, "compose_profiles", "admin"), "needs the Cloudflare Tunnel"),
+        (lambda s: setattr(s.tunnel, "compose_profiles", "admin"), "needs HTTPS through a Cloudflare Tunnel"),
         (lambda s: setattr(s.billing, "database_url", ""), "needs the PostgreSQL billing database"),
         (lambda s: setattr(s.admin_web, "mode", "disabled"), "remove it from COMPOSE_PROFILES"),
     ],
@@ -563,7 +563,8 @@ def test_incomplete_or_unsafe_settings_are_refused(default_settings, change, pro
     complete(default_settings)
     change(default_settings)
 
-    assert any(problem in text for text in config.admin_web_problems(default_settings)), config.admin_web_problems(default_settings)
+    problems = config.validate_settings(default_settings, "all")
+    assert any(problem in text for text in problems), problems
 
 
 def test_the_service_in_compose_has_only_what_its_mode_needs():

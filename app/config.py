@@ -777,73 +777,10 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
         problems.append("REDIS_CA_FILE is set, but REDIS_URL is not a rediss:// URL: the CA file is only used for TLS")
     elif ca_file and not Path(ca_file).is_file():
         problems.append(f"The Redis CA file {ca_file} (REDIS_CA_FILE) does not exist")
-    password = config.secrets.server_password
-    if role in ("api", "all") and password is not None:
-        # Nothing slows down guessing, so the length is the only protection.
-        if len(password.get_secret_value()) < MIN_SERVER_PASSWORD_LENGTH:
-            problems.append(
-                f"The secret file {config.secrets_dir}/server_password must hold at least "
-                f"{MIN_SERVER_PASSWORD_LENGTH} characters"
-            )
-    if role in ("api", "remote", "all") and config.outsource.provider == "runpod":
-        required = {
-            "RUNPOD_ENDPOINT_ID": config.runpod.endpoint_id,
-            "STORAGE_ENDPOINT": config.storage.endpoint,
-            "STORAGE_BUCKET": config.storage.bucket,
-        }
-        for name, value in required.items():
-            if not value:
-                problems.append(f"{name} is required when OUTSOURCE_PROVIDER=runpod")
-        for name in ("runpod_api_key", "storage_access_key", "storage_secret_key"):
-            if getattr(config.secrets, name) is None:
-                problems.append(
-                    f"OUTSOURCE_PROVIDER=runpod needs the secret file {config.secrets_dir}/{name}"
-                )
-    if role in ("api", "worker", "remote", "all") and config.jobs.storage == "s3":
-        for name, value in {
-            "STORAGE_ENDPOINT": config.storage.endpoint,
-            "STORAGE_BUCKET": config.storage.bucket,
-        }.items():
-            if not value:
-                problems.append(f"{name} is required when JOB_STORAGE=s3")
-        for name in ("storage_access_key", "storage_secret_key"):
-            if getattr(config.secrets, name) is None:
-                problems.append(f"JOB_STORAGE=s3 needs the secret file {config.secrets_dir}/{name}")
-    if role in ("api", "all") and config.billing.provider == "google_play":
-        if not config.google_play.package_name:
-            problems.append("GOOGLE_PLAY_PACKAGE_NAME is required when BILLING_PROVIDER=google_play")
-        if not [client_id for client_id in config.auth.client_ids if client_id.strip()]:
-            problems.append("GOOGLE_OAUTH_CLIENT_IDS is required when BILLING_PROVIDER=google_play")
-        account = google_play_service_account_json(config)
-        if account is None:
-            source = (
-                f"GOOGLE_PLAY_SERVICE_ACCOUNT_FILE ({config.google_play.service_account_file}) cannot be read"
-                if config.google_play.service_account_file
-                else f"the secret file {config.secrets_dir}/google_play_service_account.json is missing"
-            )
-            problems.append(f"BILLING_PROVIDER=google_play needs a Google Play service account: {source}")
-        else:
-            try:
-                json.loads(account)
-            except ValueError:
-                problems.append("The Google Play service-account secret is not valid JSON")
-    if role in ("api", "all") and config.offsite.enabled:
-        problems.extend(offsite_problems(config))
-    # The cleanup service has no secrets, so it sends no reports.
-    if role in ("api", "worker", "remote", "all") and config.error_report.url and config.secrets.error_report_token is None:
-        problems.append(
-            f"ERROR_REPORT_URL needs the secret file {config.secrets_dir}/error_report_token"
-        )
-    if role in ("admin", "all"):
-        problems.extend(admin_web_problems(config, check_profile=role == "all"))
-    if role == "all" and config.tunnel.enabled:
-        # Only cloudflared reads the token, so only `check` looks for it.
-        token = Path(config.secrets_dir) / TUNNEL_TOKEN_FILE
-        if not token.is_file() or token.stat().st_size == 0:
-            problems.append(
-                f"COMPOSE_PROFILES={TUNNEL_PROFILE} needs the tunnel token in the secret file "
-                f"{config.secrets_dir}/{TUNNEL_TOKEN_FILE}"
-            )
+    # The optional features: what each needs, excludes, and requires.
+    from app.features import all_problems
+
+    problems.extend(all_problems(config, role))
     return problems
 
 
@@ -872,23 +809,16 @@ def admin_web_problems(config: "Settings", check_profile: bool = True) -> list[s
         problems.append("CLOUDFLARE_ACCESS_TEAM_DOMAIN must be your team domain, such as example.cloudflareaccess.com")
     if not config.billing.database_url:
         problems.append("The admin web page needs the PostgreSQL billing database (BILLING_DATABASE_URL)")
-    if check_profile:
-        if ADMIN_WEB_PROFILE not in profiles and "*" not in profiles:
-            problems.append(f"ADMIN_WEB_MODE={admin.mode} needs {ADMIN_WEB_PROFILE} in COMPOSE_PROFILES, which starts the service")
-        if not config.tunnel.enabled:
-            problems.append(f"ADMIN_WEB_MODE={admin.mode} needs the Cloudflare Tunnel (COMPOSE_PROFILES=cloudflare,admin)")
+    if check_profile and ADMIN_WEB_PROFILE not in profiles and "*" not in profiles:
+        problems.append(f"ADMIN_WEB_MODE={admin.mode} needs {ADMIN_WEB_PROFILE} in COMPOSE_PROFILES, which starts the service")
     return problems
 
 
 def offsite_problems(config: "Settings") -> list[str]:
+    """Beyond what the off-site feature lists in app/features.py: the key the
+    backups are encrypted to."""
     offsite = config.offsite
     problems = []
-    if config.billing.backups == "provider":
-        problems.append(
-            "OFFSITE_BACKUP_BUCKET copies the server's backups, which BILLING_BACKUPS=provider turns off"
-        )
-    if not offsite.endpoint:
-        problems.append("OFFSITE_BACKUP_ENDPOINT is required when OFFSITE_BACKUP_BUCKET is set")
     if not offsite.recipient:
         problems.append(
             "OFFSITE_BACKUP_RECIPIENT is required when OFFSITE_BACKUP_BUCKET is set: the age public key "
@@ -905,9 +835,6 @@ def offsite_problems(config: "Settings") -> list[str]:
             pass
         except Exception:
             problems.append("OFFSITE_BACKUP_RECIPIENT is not an age public key (age1...)")
-    for name in ("offsite_backup_access_key", "offsite_backup_secret_key"):
-        if getattr(config.secrets, name) is None:
-            problems.append(f"OFFSITE_BACKUP_BUCKET needs the secret file {config.secrets_dir}/{name}")
     return problems
 
 
@@ -946,9 +873,12 @@ def configuration_warnings(config: "Settings", environment: dict[str, str]) -> l
     offsite = config.offsite
     if offsite.enabled and (offsite.endpoint, offsite.bucket) == (config.storage.endpoint, config.storage.bucket):
         warnings.append(
-            "Off-site backups use the outsourcing bucket. Use a bucket and keys of their own, so the keys used "
-            "for every outsourced job cannot delete the backups."
+            "Off-site backups use the object storage bucket. Use a bucket and keys of their own, so the keys "
+            "every job uses cannot delete the backups."
         )
+    from app.features import unused_settings_warnings
+
+    warnings.extend(unused_settings_warnings(config, environment))
     return warnings
 
 
@@ -987,11 +917,19 @@ def ensure_valid(role: str) -> None:
 
 # --- `python -m app.config check` -----------------------------------------
 
-def format_duration(seconds: float) -> str:
+def duration_text(seconds: float) -> str:
+    """A duration as a setting is written: 15m, 1d, or 90s."""
     for unit, size in sorted(DURATION_UNITS.items(), key=lambda item: -item[1]):
         if seconds >= size and (seconds / size).is_integer():
-            return f"{int(seconds // size)}{unit} ({seconds:.10g} s)"
+            return f"{int(seconds // size)}{unit}"
     return f"{seconds:.10g}s"
+
+
+def format_duration(seconds: float) -> str:
+    """A duration for people, with its seconds when it has a unit: 15m (900 s)."""
+    if any(seconds >= size and (seconds / size).is_integer() for size in DURATION_UNITS.values()):
+        return f"{duration_text(seconds)} ({seconds:.10g} s)"
+    return duration_text(seconds)
 
 
 def is_duration(group: type[BaseSettings], field: str) -> bool:
@@ -1045,11 +983,20 @@ def main(arguments: list[str]) -> int:
     requirements.add_argument("--env-file", default=".env", help="env file to read (default: .env)")
     requirements.add_argument("--secrets-dir", default=SECRETS_DIR)
     requirements.add_argument("--json", action="store_true", help="print JSON, for scripts and AI agents")
+    features = subcommands.add_parser(
+        "features",
+        help="list the optional features: how each is turned on, what it needs, and what is missing",
+    )
+    features.add_argument("--env-file", default=".env", help="env file to read (default: .env)")
+    features.add_argument("--secrets-dir", default=SECRETS_DIR)
+    features.add_argument("--json", action="store_true", help="print JSON, for scripts/setup.py and AI agents")
     args = parser.parse_args(arguments)
 
     logging.basicConfig(level=logging.WARNING, format="warning: %(message)s")
     if args.command == "requirements":
         return print_requirements(args)
+    if args.command == "features":
+        return print_features(args)
     try:
         config = load_settings(args.env_file, args.secrets_dir)
         problems = validate_settings(config, "all")
@@ -1057,6 +1004,9 @@ def main(arguments: list[str]) -> int:
         problems = error.problems
         config = None
     if config is not None:
+        from app.features import summary_lines
+
+        print("\n".join(summary_lines(config)) + "\n")
         print("\n".join(describe(config)))
         warnings = configuration_warnings(config, read_environment(args.env_file))
         if warnings:
@@ -1080,6 +1030,21 @@ def main(arguments: list[str]) -> int:
     return 0
 
 
+def print_features(args) -> int:
+    from app.features import describe_features, summary_lines
+
+    try:
+        config = load_settings(args.env_file, args.secrets_dir)
+    except ConfigError as error:
+        print("\n".join(f"  - {problem}" for problem in error.problems), file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(describe_features(config), indent=2, default=str))
+    else:
+        print("\n".join(summary_lines(config)))
+    return 0
+
+
 def print_requirements(args) -> int:
     from app.requirements import build_requirements, format_requirements, requirements_json
 
@@ -1099,6 +1064,10 @@ def print_requirements(args) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    # Through app.config, which app.features imports: run as __main__, this
+    # file would otherwise be a second module that loads the settings again.
+    from app.config import main as package_main
+
+    sys.exit(package_main(sys.argv[1:]))
 
 settings = load_settings()
