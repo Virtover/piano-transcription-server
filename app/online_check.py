@@ -48,14 +48,14 @@ def _error_code(error: Exception) -> str | None:
     return None
 
 
-def _storage_failure(step: str, error: Exception) -> Result:
+def _storage_failure(step: str, error: Exception, name: str = "Storage") -> Result:
     code = _error_code(error)
     if code:
-        return Result("Storage", "fail", f"{step}: {code}", STORAGE_HINTS.get(code))
+        return Result(name, "fail", f"{step}: {code}", STORAGE_HINTS.get(code))
     hint = None
     if "Endpoint" in type(error).__name__ or "Connect" in type(error).__name__:
         hint = "The endpoint cannot be reached. Check STORAGE_ENDPOINT."
-    return Result("Storage", "fail", f"{step}: {type(error).__name__}", hint)
+    return Result(name, "fail", f"{step}: {type(error).__name__}", hint)
 
 
 def check_storage(config, storage_factory: Callable | None = None, http=requests) -> Result:
@@ -672,7 +672,7 @@ def check_job_storage(config, storage_factory: Callable | None = None) -> Result
     try:
         storage.client.put_object(Bucket=storage.bucket, Key=key, Body=TEST_BODY, Metadata={"mtime": "1"})
     except Exception as error:
-        return _storage_failure("Upload", error)
+        return _storage_failure("Upload", error, "Job storage")
     try:
         try:
             listed = job_id in set(storage.job_ids())
@@ -686,7 +686,7 @@ def check_job_storage(config, storage_factory: Callable | None = None) -> Result
         try:
             metadata = storage.client.head_object(Bucket=storage.bucket, Key=key).get("Metadata", {})
         except Exception as error:
-            return _storage_failure("Reading metadata", error)
+            return _storage_failure("Reading metadata", error, "Job storage")
         if metadata.get("mtime") != "1":
             return Result("Job storage", "fail", "The storage does not keep object metadata")
     finally:

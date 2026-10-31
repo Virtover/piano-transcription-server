@@ -212,6 +212,16 @@ def test_service_account_secret_is_read_from_file_and_masked(tmp_path):
     assert "very-secret" not in "\n".join(config.describe(settings))
 
 
+def test_the_database_url_secret_stays_a_secret(tmp_path):
+    url = "postgresql://billing:very-secret@db.example.com:5432/billing"
+    settings = load(tmp_path, secrets={"database_url": url})
+
+    # The secret, not DATABASE_URL, which check shows: the file is named like it.
+    assert config.effective_database_url(settings) == url
+    assert settings.database.url == config.DatabaseSettings.model_fields["url"].default
+    assert "very-secret" not in "\n".join(config.describe(settings))
+
+
 def test_deprecated_service_account_file_override(tmp_path):
     secret = '{"type": "service_account"}'
     relative = load(tmp_path, "GOOGLE_PLAY_SERVICE_ACCOUNT_FILE=legacy.json\n", {"legacy.json": secret})

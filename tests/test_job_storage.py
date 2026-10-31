@@ -387,3 +387,20 @@ def test_online_check_reports_storage_without_metadata(default_settings, monkeyp
 
     assert result.status == "fail"
     assert "metadata" in result.detail
+
+
+def test_an_unreachable_job_storage_is_named_apart_from_storage(default_settings, monkeypatch):
+    from botocore.exceptions import EndpointConnectionError
+
+    client = FakeS3()
+
+    def unreachable(**_):
+        raise EndpointConnectionError(endpoint_url="http://storage:8333")
+
+    monkeypatch.setattr(client, "put_object", unreachable)
+
+    result = online_check.check_job_storage(default_settings, lambda config: S3JobStorage(client, "jobs-bucket"))
+
+    # Beside check_storage's own result, the two are told apart.
+    assert (result.name, result.status) == ("Job storage", "fail")
+    assert "STORAGE_ENDPOINT" in result.hint

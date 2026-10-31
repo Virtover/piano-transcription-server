@@ -779,8 +779,13 @@ def load_settings(env_file: "str | Sequence[str] | None" = ENV_FILES, secrets_di
     problems = []
     for group_name, group in GROUPS.items():
         values = overrides.get(group_name, {})
+        # Only secrets come from the secrets folder: another group would read a
+        # file named like one of its settings, as secrets/database_url, with its
+        # password, into DATABASE_URL, which check shows.
+        secrets_folder = secrets if group is SecretSettings else None
         try:
-            groups[group_name] = group(_env_file=tuple(env_file_paths(env_file)) or None, _secrets_dir=secrets, **values)
+            groups[group_name] = group(_env_file=tuple(env_file_paths(env_file)) or None, _secrets_dir=secrets_folder,
+                                       **values)
         except ValidationError as error:
             problems.extend(_format_errors(group, error, values))
     if problems:
