@@ -22,28 +22,29 @@ configMapGenerator:
     envs:
       - settings.env
 
-# Built here; Docker Desktop's Kubernetes uses the local images. Each local
-# up and update sets a new tag, so the pods are replaced.
+# Built here; Docker Desktop's Kubernetes uses the local images. They keep
+# this tag, and each local up and update restarts the pods to use the new ones.
 images:
   - name: piano-api
     newName: piano-transcription-api
-    newTag: local
+    newTag: "local"
   - name: piano-worker
     newName: piano-transcription-worker
-    newTag: local
+    newTag: "local"
 
 patches:
-  # KEDA reads this namespace's /metrics; a CPU worker runs one job at a time.
+  # KEDA reads this namespace's /metrics, on the API's port below; a CPU
+  # worker runs one job at a time.
   - target:
       kind: ScaledObject
       name: worker
     patch: |-
       - op: replace
         path: /spec/triggers/0/metadata/url
-        value: http://api.piano-local.svc.cluster.local:8000/metrics
+        value: http://api.piano-local.svc.cluster.local:8080/metrics
       - op: replace
         path: /spec/triggers/1/metadata/url
-        value: http://api.piano-local.svc.cluster.local:8000/metrics
+        value: http://api.piano-local.svc.cluster.local:8080/metrics
       - op: replace
         path: /spec/triggers/0/metadata/targetValue
         value: "1"

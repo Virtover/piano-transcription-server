@@ -36,6 +36,7 @@ python scripts/kube.py down
 
 * **`up` and `update` do every step**: `settings.env` from `server.env`; the Secrets, from the files in `secrets`, created or updated; the images, built and, for a real cluster, pushed under a new tag; `kubectl apply`, waiting for every Deployment; and `check --online` in the cluster. They ask once, naming the kubectl context, before they change the cluster or push an image.
 * **Secrets are never shown.** Each is made from its files with `kubectl --dry-run` and applied from memory. Files only a real cluster uses, such as the managed database's URL, are in `secrets/kubernetes`, so the Compose stack on this machine never reads them; `up` asks for a missing one without showing it, and generates `metrics_token`.
+* **A cluster set up by hand** works with it too. A key a Secret already has in the cluster needs no file here: `up`, `update`, and `restart` keep it as it is, and replace only the keys they have a file for. To remove a key, use `kubectl edit secret`. `images` in `kustomization.yaml` may be written in any order, also with a `digest`, which `update` replaces with the new tag.
 * **`down`** deletes the namespace, with every pod and Secret. For a real cluster you type its name; the managed Redis, PostgreSQL, and bucket are not touched.
 * **`status`** shows every Deployment's ready pods, KEDA's workers, the queue and its oldest wait, the leading API, the Secrets by name, and every problem the API reports, including features Kubernetes needs that are off. `python scripts/setup.py status` shows, for each feature, whether Kubernetes needs it.
 
@@ -44,7 +45,7 @@ python scripts/kube.py down
 `python scripts/kube.py local up` runs the server on Docker Desktop's Kubernetes (turn it on in Docker Desktop's settings; kubectl's context is then `docker-desktop`), as a real cluster runs it, with what a cluster gets from providers inside it instead:
 
 * **Redis, PostgreSQL, and SeaweedFS** for the bucket, with random passwords in `secrets/kubernetes-local`, kept from one `up` to the next. Redis has the users and rules of `redis/users.acl`.
-* **The images built here**, which Docker Desktop's Kubernetes uses without a registry.
+* **The images built here**, which Docker Desktop's Kubernetes uses without a registry when it is set up with kubeadm; with kind, its node has images of its own and the pods cannot start. They keep the tag `local`: a rebuild replaces the last one, and `local up` and `update` restart the pods to use it.
 * **Two API replicas**, on `http://localhost:8080`, beside a Compose stack on `8000`.
 * **CPU workers, added by KEDA** as the queue grows, one job each and up to 3, as GPU workers on a real cluster; `local up` installs KEDA when it is missing.
 * **No tunnel, billing, outsourcing, or error reports:** `settings.env` is `server.env` with those off, and the services above. Storage is at `host.docker.internal:8333`, so signed links to results work from the pods and from a browser.

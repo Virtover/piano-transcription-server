@@ -36,7 +36,10 @@ class Cluster:
             if fragment in text:
                 return subprocess.CompletedProcess(command, code, stdout, "")
         if "--dry-run=client" in command:
-            return subprocess.CompletedProcess(command, 0, "kind: Secret\ndata: {value: c2VjcmV0}\n", "")
+            # One key per --from-file, as kubectl makes them.
+            keys = [part.split("=")[1] for part in command if part.startswith("--from-file=")]
+            return subprocess.CompletedProcess(command, 0, json.dumps({"kind": "Secret", "data": {
+                key: "c2VjcmV0" for key in keys}}), "")
         if command[:2] == ["kubectl", "-n"] and "get" in command and "deployments" in command:
             items = [{"metadata": {"name": "api"}, "spec": {"replicas": 2, "template": {"spec": {"containers": [
                 {"image": "piano-transcription-api:1"}]}}}, "status": {"readyReplicas": 2}}]
@@ -110,6 +113,7 @@ def write_cluster_secrets(project):
 
 def test_local_up_runs_everything_after_one_question(project):
     kube, cluster, script = make(project, "local", answers=["y"], context="docker-desktop")
+    committed = kube.target.text()
 
     assert kube.deploy(first=True) == 0
 
@@ -121,11 +125,26 @@ def test_local_up_runs_everything_after_one_question(project):
     assert build < secret < apply
     assert cluster.ran("rollout", "status", "deploy/api")
     assert cluster.ran("exec", "deploy/api", "python", "-c") and cluster.ran("check", "--online")
-    # Built here, never pushed, under a tag of their own.
+    # Built here, never pushed, always under the tag the committed file names,
+    # which stays unchanged; a restart brings the new images.
     assert not cluster.ran("docker", "push")
-    assert cluster.ran("docker", "build", "-t", "piano-transcription-api:20261030-120000")
-    assert 'newTag: "20261030-120000"' in (kube.target.kustomization).read_text(encoding="utf-8")
+    assert cluster.ran("docker", "build", "-t", "piano-transcription-api:local")
+    assert kube.target.kustomization.read_text(encoding="utf-8") == committed
+    assert set(kube.target.images().values()) == {("piano-transcription-api", "local"),
+                                                  ("piano-transcription-worker", "local")}
+    assert cluster.ran("rollout", "restart", "deploy/api")
     assert "http://localhost:8080" in script.text
+
+
+def test_local_build_brings_back_the_committed_tag(project):
+    kube, cluster, _ = make(project, "local", context="docker-desktop")
+    committed = kube.target.text()
+    kube.target.kustomization.write_text(kube_script.set_images(committed, None, "20261030-120000"), encoding="utf-8")
+
+    assert kube.build_images("20261031-090000")
+
+    assert cluster.ran("docker", "build", "-t", "piano-transcription-worker:local")
+    assert kube.target.text() == committed
 
 
 def test_local_settings_use_the_test_clusters_services(project):
@@ -182,8 +201,11 @@ def test_the_test_cluster_scales_on_its_own_metrics():
     local = yaml.safe_load((ROOT / "deploy" / "kubernetes" / "local" / "kustomization.yaml").read_text(encoding="utf-8"))
     [scaling] = [patch for patch in local["patches"] if patch.get("target", {}).get("kind") == "ScaledObject"]
     operations = {operation["path"]: operation["value"] for operation in yaml.safe_load(scaling["patch"])}
+    [port] = [operation["value"] for patch in local["patches"] if patch.get("target", {}).get("name") == "api"
+              for operation in yaml.safe_load(patch["patch"]) if operation["path"] == "/spec/ports/0/port"]
 
-    assert operations["/spec/triggers/0/metadata/url"] == f"http://api.{local['namespace']}.svc.cluster.local:8000/metrics"
+    # The API Service's port there, not the container's: a Service answers only on its own.
+    assert operations["/spec/triggers/0/metadata/url"] == f"http://api.{local['namespace']}.svc.cluster.local:{port}/metrics"
     assert operations["/spec/triggers/1/metadata/url"] == operations["/spec/triggers/0/metadata/url"]
     assert operations["/spec/triggers/0/metadata/targetValue"] == "1"
 
@@ -242,6 +264,93 @@ def test_secrets_are_copied_from_files_and_never_shown(project):
     # The YAML with the values went to kubectl, not to the screen.
     assert cluster.inputs and "s3cret-value" not in script.text
     assert not any("s3cret-value" in " ".join(command) for command in cluster.commands)
+
+
+# --- A cluster set up by hand, as docs/kubernetes.md describes --------------------------------------
+
+def test_secrets_made_by_hand_keep_the_keys_without_a_file_here(project):
+    write_cluster_secrets(project)
+    # By hand, the database's URL and CA file are in secrets/, not secrets/kubernetes.
+    (project[2] / "database_url").unlink()
+    kube, cluster, script = make(project, "cluster")
+    cluster.answers = {
+        "get secret piano-secrets -o json": (0, json.dumps({"data": {
+            "database_url": "aGFuZA==", "postgres_ca.crt": "Y2E=", "metrics_token": "b2xk"}})),
+    }
+
+    assert kube.apply_secrets()
+
+    [secret] = [json.loads(text) for text in cluster.inputs if '"database_url"' in text]
+    assert secret["data"]["database_url"] == "aGFuZA==" and secret["data"]["postgres_ca.crt"] == "Y2E="
+    # A file here wins over the cluster's value.
+    assert secret["data"]["metrics_token"] != "b2xk"
+    assert "kept from the cluster: database_url, postgres_ca.crt" in script.text
+    assert "aGFuZA==" not in script.text
+
+
+def test_a_key_the_cluster_has_is_not_asked_for(project):
+    write_cluster_secrets(project)
+    (project[2] / "database_url").unlink()
+    kube, cluster, script = make(project, "cluster")
+    cluster.answers = {"get secret piano-secrets -o go-template": (0, "database_url metrics_token ")}
+
+    assert kube.ensure_secret_files()
+    assert "database_url" not in script.text
+
+
+def test_images_written_by_hand_in_any_order(tmp_path):
+    text = (
+        "namespace: piano-transcription\n"
+        "images:\n"
+        "  # The API.\n"
+        "  - newTag: v1  # by hand\n"
+        "    name: piano-api\n"
+        "    newName: ghcr.io/me/piano-transcription-api\n"
+        "- name: piano-worker\n"
+        "  newName: ghcr.io/me/piano-transcription-worker\n"
+        "  digest: sha256:0123\n"
+        "configMapGenerator: []\n"
+    )
+    target = kube_script.Target(local=False, manifests=tmp_path)
+    target.kustomization.write_text(text, encoding="utf-8")
+
+    written = kube_script.set_images(text, "docker.io/other", "20261030-120000")
+    entries = kube_script.image_entries(written.splitlines())
+
+    assert {name: {field: value for field, (_, value) in entry.items()} for name, entry in entries.items()} == {
+        "piano-api": {"name": "piano-api", "newName": "docker.io/other/piano-transcription-api",
+                      "newTag": "20261030-120000"},
+        # The digest would win over the tag.
+        "piano-worker": {"name": "piano-worker", "newName": "docker.io/other/piano-transcription-worker",
+                         "newTag": "20261030-120000"},
+    }
+    assert "  # The API.\n" in written and written.endswith("configMapGenerator: []\n")
+    # Each field where it was, the entry's first with its "- ".
+    assert '  - newTag: "20261030-120000"\n    name: piano-api\n' in written
+    assert '- name: piano-worker\n  newName: docker.io/other/piano-transcription-worker\n  newTag: "20261030-120000"\n' in written
+    assert kube_script.set_images(written, "docker.io/other", "20261030-120000") == written
+    assert target.images()["piano-api"] == ("ghcr.io/me/piano-transcription-api", "v1")
+    assert target.images()["piano-worker"] == ("ghcr.io/me/piano-transcription-worker", "")
+
+
+def test_an_image_without_new_name_gets_the_projects():
+    text = "images:\n  - name: piano-api\n    newTag: \"1\"\n  - name: piano-worker\n"
+
+    written = kube_script.set_images(text, "docker.io/me", "2")
+
+    assert written == ("images:\n  - name: piano-api\n    newTag: \"2\"\n    newName: docker.io/me/piano-transcription-api\n"
+                       "  - name: piano-worker\n    newName: docker.io/me/piano-transcription-worker\n    newTag: \"2\"\n")
+
+
+def test_a_missing_image_entry_stops_before_anything_is_built(project):
+    kube, cluster, script = make(project, "cluster")
+    text = kube.target.text()
+    kube.target.kustomization.write_text(text.replace("  - name: piano-worker", "  - name: something-else"), encoding="utf-8")
+
+    assert not kube.build_images("20261030-120000", "docker.io/me")
+
+    assert "names no image piano-worker" in script.text
+    assert not cluster.ran("docker")
 
 
 def test_down_of_a_real_cluster_needs_its_name_typed(project):

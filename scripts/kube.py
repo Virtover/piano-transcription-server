@@ -10,7 +10,8 @@
 
 `local` before a command acts on the test cluster (deploy/kubernetes/local)
 instead of the real one (deploy/kubernetes). Also: check (check --online in
-the cluster), logs <deployment>, and build <tag> (the images alone).
+the cluster), logs <deployment>, and build <tag> (the images alone; the test
+cluster's are always tagged local).
 
 restart, stop, start, restore, and cancel are scripts/server.py's commands,
 and admin runs scripts/admin.py's, both through KubeStack: what they do is
@@ -57,6 +58,10 @@ LOCAL_SECRETS = Path("kubernetes-local")
 KEDA_VERSION = "2.16.1"
 KEDA_MANIFEST = f"https://github.com/kedacore/keda/releases/download/v{KEDA_VERSION}/keda-{KEDA_VERSION}.yaml"
 IMAGES = {"piano-api": "Dockerfile.api", "piano-worker": "Dockerfile.worker"}
+# The test cluster's images keep one tag, the one its committed kustomization
+# names: a rebuild replaces the last one instead of keeping it on the disk, and
+# its rollout restarts the pods to use it. A real cluster gets a new tag each time.
+LOCAL_TAG = "local"
 LOCAL_CONTEXTS = ("docker-desktop",)
 # The test cluster's own services in deploy/kubernetes/local/services.yaml,
 # which stop and restart leave running: its Redis keeps the queue only while
@@ -202,12 +207,13 @@ class Target:
         return files
 
     def images(self) -> dict[str, tuple[str, str]]:
-        """Each image's name and tag, as the kustomization sets them."""
+        """Each image's name and tag, as the kustomization sets them; the tag
+        is empty where a digest pins it."""
         found = {}
-        for name in IMAGES:
-            match = re.search(rf"- name: {name}\n\s+newName: (\S+)\n\s+newTag: \"?([^\"\n]+)\"?", self.text())
-            if match:
-                found[name] = (match.group(1), match.group(2))
+        for name, entry in image_entries(self.text().splitlines()).items():
+            if name in IMAGES:
+                fields = {field: value for field, (_, value) in entry.items()}
+                found[name] = (image_repository(name, fields.get("newName", "")), fields.get("newTag", ""))
         return found
 
     def registry(self) -> str | None:
@@ -223,20 +229,63 @@ CLUSTER = Target(local=False, manifests=MANIFESTS)
 LOCAL = Target(local=True, manifests=MANIFESTS / "local")
 
 
+IMAGE_FIELD = re.compile(r"^(\s*(?:-\s+)?)(name|newName|newTag|digest):\s*(.*?)\s*$")
+
+
+def image_entries(lines: list[str]) -> dict[str, dict[str, tuple[int, str]]]:
+    """The entries of the kustomization's images list, by name: each field's
+    line and value, in whatever order they were written, as by hand."""
+    entries, entry, inside = {}, None, False
+    for index, line in enumerate(lines):
+        if re.match(r"images:\s*(#.*)?$", line):
+            inside = True
+            continue
+        bare = line.strip()
+        if not inside or not bare or bare.startswith("#"):
+            continue
+        if not line[0].isspace() and not line.startswith("-"):
+            break
+        match = IMAGE_FIELD.match(line)
+        if bare.startswith("-"):
+            entry = {}
+        if match and entry is not None:
+            value = re.sub(r"\s+#.*$", "", match.group(3)).strip("\"'")
+            entry[match.group(2)] = (index, value)
+            if match.group(2) == "name":
+                entries[value] = entry
+    return entries
+
+
 def set_images(text: str, registry: str | None, tag: str) -> str:
-    """A kustomization with the images at tag, in registry when one is given."""
+    """A kustomization with the images at tag, in registry when one is given.
+    A digest goes: it would win over the tag."""
+    lines = text.splitlines()
     for name in IMAGES:
-        pattern = rf"(- name: {name}\n\s+newName: )(\S+)(\n\s+newTag: )[^\n]*"
-
-        def replace(match):
-            repository = match.group(2).rsplit("/", 1)[-1]
-            image = f"{registry.rstrip('/')}/{repository}" if registry else repository
-            return f'{match.group(1)}{image}{match.group(3)}"{tag}"'
-
-        text, count = re.subn(pattern, replace, text)
-        if count != 1:
+        entry = image_entries(lines).get(name)
+        if entry is None:
             raise SystemExit(f"The kustomization has no image {name} to change")
-    return text
+        if "digest" in entry:
+            del lines[entry["digest"][0]]
+            entry = image_entries(lines)[name]
+        # The column of the entry's fields, after "- " where the name has it.
+        indent = " " * len(IMAGE_FIELD.match(lines[entry["name"][0]]).group(1))
+        repository = image_repository(name, entry.get("newName", (0, ""))[1]).rsplit("/", 1)[-1]
+        image = f"{registry.rstrip('/')}/{repository}" if registry else repository
+        for field, value in (("newName", image), ("newTag", f'"{tag}"')):
+            if field in entry:
+                # With its own "- " where the entry starts with it.
+                line = entry[field][0]
+                lines[line] = f"{IMAGE_FIELD.match(lines[line]).group(1)}{field}: {value}"
+            else:
+                lines.insert(max(line for line, _ in entry.values()) + 1, f"{indent}{field}: {value}")
+            entry = image_entries(lines)[name]
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def image_repository(name: str, new_name: str) -> str:
+    """The image an entry names; without newName, the one its Dockerfile is
+    built as, such as piano-transcription-api for piano-api."""
+    return new_name or name.replace("piano-", "piano-transcription-", 1)
 
 
 def redis_users(password: str, users_acl: Path) -> str:
@@ -381,10 +430,16 @@ class Kube:
             self.write_local_secret_files()
             return True
         style, missing = self.style, []
-        for files in self.target.secret_files().values():
+        for name, files in self.target.secret_files().items():
+            # Keys the cluster already has, as in a Secret made by hand, need no file here.
+            in_cluster = None
             for file in files:
                 path = self.path(file)
                 if not file.needed or (path.is_file() and path.stat().st_size):
+                    continue
+                if in_cluster is None:
+                    in_cluster = self.secret_keys(name)
+                if file.key in in_cluster:
                     continue
                 relative = path.relative_to(self.root).as_posix()
                 self.console.say(f"{style(relative, 'bold')}  {style(file.description, 'dim')}")
@@ -406,20 +461,35 @@ class Kube:
 
     # --- The cluster -----------------------------------------------------------------------------------
 
+    def secret_keys(self, name: str) -> set[str]:
+        """The keys a Secret has in the cluster, without its values."""
+        result = self.kubectl("get", "secret", name, "-o", "go-template={{range $key, $_ := .data}}{{$key}} {{end}}")
+        return set(result.stdout.split()) if result.returncode == 0 else set()
+
     def apply_secrets(self) -> bool:
-        """Create or update every Secret from its files. Its YAML holds the
-        values, so it goes from memory to kubectl and is never shown."""
+        """Create or update every Secret from its files. Its JSON holds the
+        values, so it goes from memory to kubectl and is never shown. On a
+        real cluster, keys without a file here keep their value in the
+        cluster: a Secret made by hand loses nothing."""
         for name, files in self.target.secret_files().items():
             present = [file for file in files if self.path(file).is_file()]
             if not present:
                 continue
             made = self.kubectl("create", "secret", "generic", name,
                                 *[f"--from-file={file.key}={self.path(file)}" for file in present],
-                                "--dry-run=client", "-o", "yaml")
+                                "--dry-run=client", "-o", "json")
+            kept = []
+            if made.returncode == 0 and not self.target.local:
+                secret = json.loads(made.stdout)
+                current = (self.get_json("secret", name) or {}).get("data") or {}
+                kept = sorted(set(current) - set(secret.get("data") or {}))
+                secret["data"] = {**{key: current[key] for key in kept}, **(secret.get("data") or {})}
+                made.stdout = json.dumps(secret)
             applied = self.kubectl("apply", "-f", "-", input=made.stdout) if made.returncode == 0 else made
             if applied.returncode != 0:
                 return not self.fail(f"The Secret {name} could not be applied: {applied.stderr.strip()}")
-            self.console.say(f"  {self.style('Secret', 'dim')} {name}: {', '.join(file.key for file in present)}")
+            also = f"; kept from the cluster: {', '.join(kept)}" if kept else ""
+            self.console.say(f"  {self.style('Secret', 'dim')} {name}: {', '.join(file.key for file in present)}{also}")
         return True
 
     def image_registry(self) -> str | None:
@@ -433,6 +503,13 @@ class Kube:
         return registry
 
     def build_images(self, tag: str, registry: str | None = None) -> bool:
+        if self.target.local:
+            tag = LOCAL_TAG
+        # Before building and pushing, not after: the tag goes in these entries.
+        missing = [name for name in IMAGES if name not in self.target.images()]
+        if missing:
+            return not self.fail(f"{self.target.kustomization.relative_to(self.root).as_posix()} names no image "
+                                 f"{', '.join(missing)} under images: put back its entry, with name: and newName:.")
         if registry is None:
             try:
                 registry = self.image_registry()
@@ -448,7 +525,10 @@ class Kube:
             for image in names.values():
                 if self.run(["docker", "push", image], capture=False).returncode != 0:
                     return not self.fail(f"Pushing {image} failed: is docker signed in to the registry?")
-        self.target.kustomization.write_text(set_images(self.target.text(), registry, tag), encoding="utf-8")
+        # Unchanged for the test cluster, whose committed file names its tag.
+        images = set_images(self.target.text(), registry, tag)
+        if images != self.target.text():
+            self.target.kustomization.write_text(images, encoding="utf-8")
         return True
 
     def roll_out(self, restart: bool = False) -> bool:
@@ -529,7 +609,8 @@ class Kube:
         if not self.build_images(self.clock()):
             return 1
         self.run(["kubectl", "create", "namespace", self.target.namespace()])
-        if not self.apply_secrets() or not self.roll_out():
+        # The test cluster's tag stays the same, so only a restart brings its new images.
+        if not self.apply_secrets() or not self.roll_out(restart=self.target.local):
             return 1
         if self.target.local:
             self.create_local_bucket()
