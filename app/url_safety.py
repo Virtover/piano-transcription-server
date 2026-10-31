@@ -2,6 +2,7 @@ import ipaddress
 import socket
 from urllib.parse import urlsplit
 
+from app import network
 from app.config import settings
 from app.errors import SourceUnsupported
 
@@ -62,8 +63,9 @@ def ensure_safe_source_url(url: str) -> str:
 
     # Every address the host resolves to must be public. This also catches
     # tricks like http://2130706433/ or http://0x7f.1/ (both mean 127.0.0.1).
+    # Every address, IPv6 too, even where app.network limits lookups to IPv4.
     try:
-        infos = socket.getaddrinfo(
+        infos = network.all_addresses_getaddrinfo()(
             host, port or (443 if scheme == "https" else 80), type=socket.SOCK_STREAM
         )
     except socket.gaierror as error:

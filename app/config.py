@@ -30,6 +30,8 @@ from dotenv import dotenv_values
 from pydantic import BeforeValidator, Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app import network
+
 
 logger = logging.getLogger(__name__)
 
@@ -1166,4 +1168,6 @@ if __name__ == "__main__":
 
     sys.exit(package_main(sys.argv[1:]))
 
+# Every service imports this module before it connects anywhere.
+network.use_ipv4_without_ipv6_route()
 settings = load_settings()
