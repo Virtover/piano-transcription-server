@@ -60,30 +60,37 @@ def list_product_ids(service, package_name: str | None = None) -> set[str]:
             return products
 
 
-def sync_products() -> None:
+def sync_products() -> bool:
+    """Read the products from Google Play. Returns False when they could not
+    be read; the products read before, if any, stay offered."""
     global synced_products
 
     if settings.billing.provider != "google_play":
-        return
+        return True
     if not is_configured():
         synced_products = set()
         logger.warning("Google Play billing is enabled but catalog credentials are not configured")
-        return
+        return True
 
     try:
         products = list_product_ids(android_publisher())
     except Exception as error:
-        synced_products = set()
+        if synced_products is None:
+            synced_products = set()
         logger.warning("Could not sync Google Play products: %s", error)
-        return
+        return False
 
+    changed = products != synced_products
     synced_products = products
+    if not changed:
+        return True
 
     configured = set(settings.billing.products)
     for product_id in sorted(products - configured):
         logger.warning("Google Play product %s exists but is not configured on the server", product_id)
     for product_id in sorted(configured - products):
         logger.warning("Configured product %s does not exist in Google Play and will not be offered", product_id)
+    return True
 
 # Google keeps voided purchases for 30 days; each sync reads back over the
 # previous one by this much, so nothing voided near the boundary is missed.

@@ -102,7 +102,8 @@ def api_context(tmp_path, monkeypatch, video_sites) -> Iterator[tuple[TestClient
 
     monkeypatch.setattr(main, "recover_active_jobs", lambda reason: None)
     monkeypatch.setattr(main, "reconcile_billing", lambda **options: None)
-    monkeypatch.setattr(main, "sync_products", lambda: None)
+    monkeypatch.setattr(main, "sync_products", lambda: True)
+    monkeypatch.setattr(main, "keep_products_synced", lambda synced: None)
     monkeypatch.setattr(main, "backup_billing_database", lambda leader=None: None)
     monkeypatch.setattr(main, "watch_abandoned_jobs", lambda leader=None: None)
     monkeypatch.setattr(main, "enable_transcription_submissions", lambda: transcription_routes.enable_transcription_submissions())

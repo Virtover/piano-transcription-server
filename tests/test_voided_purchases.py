@@ -284,6 +284,72 @@ def test_voided_sync_waits_the_interval_after_other_errors(monkeypatch):
     assert waits == [3600.0, 3600.0]
 
 
+def run_products_loop(monkeypatch, first, outcomes):
+    """Runs main.keep_products_synced until outcomes run out; returns its waits."""
+    waits = []
+    outcomes = list(outcomes)
+
+    def sleep(seconds):
+        waits.append(seconds)
+        if not outcomes:
+            raise StopLoop
+
+    monkeypatch.setattr(main, "sync_products", lambda: outcomes.pop(0))
+    monkeypatch.setattr(main.time, "sleep", sleep)
+    with pytest.raises(StopLoop):
+        main.keep_products_synced(first)
+    return waits
+
+
+def test_products_are_read_again_soon_after_a_failed_read(monkeypatch):
+    waits = run_products_loop(monkeypatch, False, [False, True, False])
+    assert waits == [60.0, 120.0, 3600.0, 60.0]
+
+
+def test_products_are_refreshed_hourly(monkeypatch):
+    assert run_products_loop(monkeypatch, True, [True]) == [3600.0, 3600.0]
+
+
+class ProductsService:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+
+    def monetization(self):
+        return self
+
+    def onetimeproducts(self):
+        return self
+
+    def list(self, **arguments):
+        return self
+
+    def execute(self):
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return {"oneTimeProducts": [{"productId": product_id} for product_id in outcome]}
+
+
+def test_a_failed_product_read_keeps_the_products_read_before(billed, monkeypatch):
+    service = ProductsService([["starter"], OSError(101, "Network is unreachable")])
+    monkeypatch.setattr(google_play, "is_configured", lambda: True)
+    monkeypatch.setattr(google_play, "android_publisher", lambda: service)
+    monkeypatch.setattr(google_play, "synced_products", None)
+
+    assert google_play.sync_products()
+    assert not google_play.sync_products()
+    assert google_play.synced_products == {"starter"}
+
+
+def test_a_failed_first_product_read_offers_nothing(billed, monkeypatch):
+    monkeypatch.setattr(google_play, "is_configured", lambda: True)
+    monkeypatch.setattr(google_play, "android_publisher", lambda: ProductsService([OSError("down")]))
+    monkeypatch.setattr(google_play, "synced_products", None)
+
+    assert not google_play.sync_products()
+    assert google_play.synced_products == set()
+
+
 def test_network_errors_are_told_apart():
     assert google_play.is_network_error(OSError(101, "Network is unreachable"))
     assert google_play.is_network_error(TimeoutError())

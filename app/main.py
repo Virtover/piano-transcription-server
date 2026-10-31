@@ -160,6 +160,27 @@ def sync_voided_purchases(leader: Leadership | None = None) -> None:
         time.sleep(delay)
 
 
+# Every replica reads the products: each answers /server-info from its own copy.
+PRODUCTS_RETRY = 60.0
+PRODUCTS_REFRESH = 60 * 60.0
+
+
+def keep_products_synced(synced: bool) -> None:
+    """Read the Google Play products again, soon after a failed read, as at
+    startup before the host's network is up, and then hourly, so products
+    changed in Play Console are offered without a restart."""
+    retry = PRODUCTS_RETRY
+    while True:
+        if synced:
+            retry = PRODUCTS_RETRY
+            delay = PRODUCTS_REFRESH
+        else:
+            delay = min(retry, PRODUCTS_REFRESH)
+            retry *= 2
+        time.sleep(delay)
+        synced = sync_products()
+
+
 def voided_purchases_enabled() -> bool:
     return settings.billing.provider == "google_play" and google_play.is_configured()
 
@@ -253,7 +274,9 @@ def sync_billing_catalog() -> None:
     else:
         logger.info("Another API replica runs the periodic tasks; this one takes over if it stops")
     leadership.start(on_lead=recover_after_takeover)
-    sync_products()
+    synced = sync_products()
+    if settings.billing.provider == "google_play" and google_play.is_configured():
+        threading.Thread(target=keep_products_synced, args=(synced,), daemon=True).start()
     enable_transcription_submissions()
     threading.Thread(target=backup_billing_database, args=(leadership,), daemon=True).start()
     threading.Thread(target=monitor_backup_health, args=(leadership,), daemon=True).start()
