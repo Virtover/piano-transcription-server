@@ -632,6 +632,10 @@ class Kube:
                 return 1
         elif self.console.ask(f"Type {namespace} to delete it: ").strip() != namespace:
             return 1
+        # Kubernetes empties a namespace in the background, retrying with longer
+        # waits; without a word, the wait looks like a hang.
+        self.console.say(self.style(f"  Deleting {namespace}: Kubernetes removes everything in it first, which "
+                                    "can take several minutes.", "dim"))
         return self.run(["kubectl", "delete", "namespace", namespace, "--wait=true"], capture=False).returncode
 
     # --- Status ------------------------------------------------------------------------------------------
@@ -641,7 +645,9 @@ class Kube:
         if context is None:
             return 1
         say, style = self.console.say, self.style
-        say(f"{style(self.target.name.capitalize(), 'bold')}: context {style(context, 'cyan')}, "
+        # Not capitalize(), which would write "this pc".
+        title = self.target.name[:1].upper() + self.target.name[1:]
+        say(f"{style(title, 'bold')}: context {style(context, 'cyan')}, "
             f"namespace {style(self.target.namespace(), 'cyan')}")
         deployments = (self.get_json("deployments") or {"items": []})["items"]
         say("")
@@ -657,8 +663,13 @@ class Kube:
             say(f"  {item['metadata']['name']:15} {state}  {style(image, 'dim')}")
 
         scaled = self.get_json("hpa", "keda-hpa-worker")
+        # While stop has paused KEDA, its autoscaler's figures are left over.
+        annotations = ((self.get_json("scaledobject", "worker") or {}).get("metadata") or {}).get("annotations") or {}
         say("")
-        if scaled is None:
+        if KEDA_PAUSED in annotations:
+            say(f"{style('Scaling', 'bold')}  KEDA: paused at {annotations[KEDA_PAUSED]} workers while the server "
+                f"is stopped; {self.script} start resumes it")
+        elif scaled is None:
             say(f"{style('Scaling', 'bold')}  {style('no KEDA scaler for the workers: is KEDA installed?', 'yellow')}")
         else:
             current = scaled.get("status", {}).get("currentReplicas", 0)
@@ -740,8 +751,14 @@ class KubeStack(SERVER_SCRIPT.Stack):
     in a running pod."""
 
     cli = "kubectl"
-    cannot_restore = ("the cluster's database belongs to its provider, which keeps its backups: restore "
-                      "with the provider's own restore; see docs/kubernetes.md")
+
+    @property
+    def cannot_restore(self) -> str:
+        if self.kube.target.local:
+            return ("the test cluster's database is its own and keeps nothing worth restoring: it goes with "
+                    f"{self.script} down, and up starts it empty")
+        return ("the cluster's database belongs to its provider, which keeps its backups: restore "
+                "with the provider's own restore; see docs/kubernetes.md")
 
     def __init__(self, kube: Kube, popen=subprocess.Popen):
         self.kube = kube

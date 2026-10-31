@@ -359,9 +359,11 @@ def test_down_of_a_real_cluster_needs_its_name_typed(project):
     assert kube.down() == 1
     assert not cluster.ran("delete")
 
-    kube, cluster, _ = make(project, "cluster", answers=["piano-transcription"])
+    kube, cluster, script = make(project, "cluster", answers=["piano-transcription"])
     assert kube.down() == 0
     assert cluster.ran("kubectl", "delete", "namespace", "piano-transcription")
+    # The wait is minutes long: said before it starts.
+    assert "can take several minutes" in script.text
 
 
 def test_a_real_cluster_is_never_this_pc(project):
@@ -395,6 +397,33 @@ def test_status_shows_pods_scaling_queue_leader_and_problems(project):
     assert "local 3 waiting, the oldest 42 s" in text
     assert "On Kubernetes, metrics for scaling is needed" in text
     assert "missing keys" in text and "storage_access_key" in text
+
+
+def test_status_of_a_stopped_server_says_keda_is_paused(project):
+    kube, cluster, script = make(project, "local", context="docker-desktop")
+    cluster.answers = {
+        # The autoscaler's figures, left over from before stop.
+        "get hpa keda-hpa-worker": (0, json.dumps({"spec": {"minReplicas": 1, "maxReplicas": 1},
+                                                   "status": {"currentReplicas": 1, "desiredReplicas": 1}})),
+        "get scaledobject worker": (0, json.dumps({"metadata": {"annotations": {kube_script.KEDA_PAUSED: "0"}}})),
+        # The API is stopped too.
+        "app.admin status --json": (1, ""),
+        "app.config features --json": (1, ""),
+    }
+
+    kube.status()
+
+    assert "KEDA: paused at 0 workers while the server is stopped; python scripts/kube.py local start" in script.text
+    assert "wants 1" not in script.text
+    # "PC", not capitalize()'s "pc".
+    assert script.said[0].startswith("The test cluster on this PC")
+
+
+def test_restore_on_the_test_cluster_names_its_own_database(project):
+    kube, _, _ = make(project, "local", context="docker-desktop")
+
+    assert "the test cluster's database is its own" in kube.stack.cannot_restore
+    assert "provider" in make(project, "cluster")[0].stack.cannot_restore
 
 
 # --- Kept in step ----------------------------------------------------------------------------------------

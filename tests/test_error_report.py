@@ -287,8 +287,12 @@ def test_redirects_are_not_followed():
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             hits.append((self.path, self.headers.get("Authorization")))
+            # Read first: Windows resets a socket closed with unread data, and
+            # the client would see that instead of the redirect.
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
             self.send_response(302)
             self.send_header("Location", "/elsewhere")
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
         do_GET = do_POST
