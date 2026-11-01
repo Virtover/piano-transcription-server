@@ -194,7 +194,17 @@ def check_endpoint_settings(config, provider) -> list[Result]:
     expected = config.storage.endpoint
     # The handler also reads the deprecated name, which older endpoints have.
     names = [name for name in ("STORAGE_ENDPOINT", "OUTSOURCE_STORAGE_ENDPOINT") if name in env]
-    if len(names) == 2:
+    if "env" not in endpoint and "env" not in template:
+        results.append(
+            Result(
+                name,
+                "warn",
+                "RunPod does not report the endpoint's environment variables, so STORAGE_ENDPOINT cannot be checked",
+                f"Make sure the endpoint's environment variable STORAGE_ENDPOINT is {expected}. Without it, every "
+                "job fails with \"STORAGE_ENDPOINT is not configured on the handler\".",
+            )
+        )
+    elif len(names) == 2:
         results.append(
             Result(
                 name,

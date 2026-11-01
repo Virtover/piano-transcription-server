@@ -246,6 +246,44 @@ def test_endpoint_settings_are_read_with_the_template(outsourcing):
     assert calls[1] == ("https://rest.runpod.io/v1/endpoints/endpoint-1", {"includeTemplate": "true"})
 
 
+def without_template(**changes):
+    settings = {key: value for key, value in GOOD_SETTINGS.items() if key not in ("template", "env")}
+    return {**settings, "templateId": "template-1", **changes}
+
+
+def test_a_template_left_out_is_read_by_its_id(outsourcing):
+    template = {"imageName": "user/piano-transcription-runpod:4", "env": {"STORAGE_ENDPOINT": "https://storage.example"}}
+    session = Session(
+        HttpResponse(payload={"workers": {}}),
+        HttpResponse(payload=without_template()),
+        HttpResponse(payload=template),
+    )
+    calls = []
+    original = session.request
+    session.request = lambda method, url, **kwargs: calls.append(url) or original(method, url, **kwargs)
+    provider = RunPodProvider("https://api.runpod.ai/v2", "endpoint-1", "key", session=session)
+
+    results = check_runpod(outsourcing, lambda config: provider)
+
+    assert calls[2] == "https://rest.runpod.io/v1/templates/template-1"
+    assert all(result.status == "ok" for result in results)
+
+
+def test_environment_variables_runpod_does_not_report_are_not_called_missing(outsourcing):
+    provider = runpod(
+        HttpResponse(payload={"workers": {}}),
+        HttpResponse(payload=without_template()),
+        HttpResponse(404),
+    )
+
+    results = check_runpod(outsourcing, lambda config: provider)
+
+    [problem] = [result for result in results if "STORAGE_ENDPOINT" in result.detail]
+    assert problem.status == "warn"
+    assert "does not report" in problem.detail
+    assert "https://storage.example" in problem.hint
+
+
 @pytest.mark.parametrize("status, hint", [(401, "API key is wrong"), (403, "no access"), (404, "RUNPOD_ENDPOINT_ID")])
 def test_runpod_errors_explain_the_fix(default_settings, status, hint):
     [result] = check_runpod(default_settings, lambda config: runpod(HttpResponse(status)))
