@@ -15,7 +15,7 @@ python scripts/server.py start
 
 The first start creates `.env` from `.env.example` and a random PostgreSQL password in `secrets/postgres_password`, builds the images, and waits until the API is ready. Other docs show commands for **Windows (PowerShell)** and for **macOS and Linux** where they differ.
 
-The API is available at `http://localhost:8000`; interactive documentation is at `http://localhost:8000/docs`.
+The API is available at `http://localhost:8000` on the server and at `http://<server-ip>:8000` from another device on the local network; interactive documentation is at `/docs`.
 
 See [Local setup](docs/setup.md) for requirements, GPU checks, health checks, and worker scaling.
 

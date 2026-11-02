@@ -961,8 +961,8 @@ def configuration_warnings(config: "Settings", environment: dict[str, str]) -> l
                 "password nor sign-in: anyone who finds the address can use it. See \"Password protection\" "
                 "in docs/setup.md."
             )
-        # Unset, docker-compose.yml publishes on 127.0.0.1.
-        if uses_compose_profiles(config) and environment.get("API_BIND_ADDRESS", "127.0.0.1") != "127.0.0.1":
+        # Unset, docker-compose.yml publishes on every network interface.
+        if uses_compose_profiles(config) and environment.get("API_BIND_ADDRESS", "0.0.0.0") != "127.0.0.1":
             warnings.append(
                 "Port 8000 is published on every network interface, so the server is also reachable without the "
                 "tunnel's HTTPS. Set API_BIND_ADDRESS=127.0.0.1 unless devices on your network connect directly."

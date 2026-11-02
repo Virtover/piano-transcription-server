@@ -84,7 +84,7 @@ def test_legacy_worker_build_matches_the_compose_switch():
 def test_api_bind_address_is_configurable():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
-    assert '"${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"' in compose
+    assert '"${API_BIND_ADDRESS:-0.0.0.0}:8000:8000"' in compose
 
 
 def test_postgres_data_location_defaults_to_its_own_folder():

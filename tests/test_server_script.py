@@ -434,7 +434,7 @@ def test_start_stops_when_files_cannot_be_prepared(capsys):
 
 @pytest.fixture
 def checkout(tmp_path):
-    (tmp_path / ".env.example").write_text("# Compose\n# COMPOSE_PROFILES=cloudflare\nAPI_BIND_ADDRESS=127.0.0.1\n",
+    (tmp_path / ".env.example").write_text("# Compose\n# COMPOSE_PROFILES=cloudflare\nAPI_BIND_ADDRESS=0.0.0.0\n",
                                            encoding="utf-8")
     (tmp_path / "server.env.example").write_text("# Limits\nMAX_ACTIVE_JOBS=50\n# OUTSOURCE_PROVIDER=runpod\n",
                                                  encoding="utf-8")
@@ -580,7 +580,7 @@ def test_a_split_changes_no_value(checkout):
     server.separate_env_files(checkout)
 
     assert (checkout / ".env").read_text(encoding="utf-8") == (
-        "# Compose\n# COMPOSE_PROFILES=cloudflare\n# API_BIND_ADDRESS=127.0.0.1\n"
+        "# Compose\n# COMPOSE_PROFILES=cloudflare\n# API_BIND_ADDRESS=0.0.0.0\n"
     )
     assert (checkout / "server.env").read_text(encoding="utf-8") == (
         "# Limits\n# MAX_ACTIVE_JOBS=50\nOUTSOURCE_PROVIDER=runpod\n"

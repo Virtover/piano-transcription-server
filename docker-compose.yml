@@ -68,10 +68,10 @@ services:
       context: .
       dockerfile: Dockerfile.api
     ports:
-      # 0.0.0.0 accepts connections on every network interface. Set
-      # API_BIND_ADDRESS=127.0.0.1 in .env when an HTTPS proxy on this machine
-      # forwards to the API, so only the proxy can reach it.
-      - "${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+      # 0.0.0.0 accepts connections on every network interface, including
+      # other devices on the local network. Set API_BIND_ADDRESS=127.0.0.1
+      # in .env when an HTTPS proxy on this machine forwards to the API.
+      - "${API_BIND_ADDRESS:-0.0.0.0}:8000:8000"
     env_file: *settings
     environment: *wiring
     volumes:
