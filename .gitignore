@@ -1,5 +1,6 @@
 .env
 /.vscode
+/.continue
 /secrets/
 /.venv
 /billing-data/
