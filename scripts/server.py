@@ -578,6 +578,7 @@ def restart(args, stack: Stack, clock: Clock) -> int:
     drain(stack, clock, args.grace)
     persist_redis(stack, clock)
     say("restarting")
+    remove_stale_containers(stack)
     code = stack.up(args.command)
     if code != 0:
         say(f"the restart command failed with exit code {code}")
@@ -612,10 +613,17 @@ def stop(args, stack: Stack, clock: Clock) -> int:
     return 0
 
 
+def remove_stale_containers(stack: Stack) -> None:
+    removed = stack.remove_stale_containers()
+    if removed:
+        say(f"removed {', '.join(removed)}: its network no longer exists, so it is created again")
+
+
 def start(args, stack: Stack, clock: Clock) -> int:
     if not prepare(stack):
         return 1
     say("starting")
+    remove_stale_containers(stack)
     # Built every time, so a start after an update never runs old code; an
     # unchanged image is a quick cache hit.
     code = stack.up()

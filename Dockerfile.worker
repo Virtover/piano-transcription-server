@@ -48,6 +48,15 @@ RUN python3 -m pip install --upgrade pip setuptools wheel \
     fi \
     && pip install --no-cache-dir -r requirements.worker.txt
 
+# Beat This! beat tracker weights for the MIDI tempo map
+# (app/transcription/tempo.py), checked against their checksum and loaded once.
+ARG BEAT_THIS_CHECKPOINT_URL=https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt
+ARG BEAT_THIS_CHECKPOINT_SHA256=8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331
+RUN mkdir -p /opt/beat-this \
+    && python3 -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], '/opt/beat-this/final0.ckpt')" "$BEAT_THIS_CHECKPOINT_URL" \
+    && echo "${BEAT_THIS_CHECKPOINT_SHA256}  /opt/beat-this/final0.ckpt" | sha256sum -c - \
+    && python3 -c "from beat_this.inference import load_model; load_model('/opt/beat-this/final0.ckpt')"
+
 # The worker runs untrusted media through yt-dlp and ffmpeg, so not as root.
 # New volumes mounted at /data and /billing take the ownership below; see
 # "Running as a non-root user" in docs/setup.md for older volumes.

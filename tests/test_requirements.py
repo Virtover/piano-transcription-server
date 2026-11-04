@@ -27,7 +27,7 @@ def test_jobs_per_worker_follow_gpu_memory_settings(default_settings):
 
     default_settings.worker.memory_per_job_gib = 2.0
 
-    assert "about 7 per worker (11 on 24 GB)" in requirement(default_settings, "GPU endpoint", "Scaling").value
+    assert "about 6 per worker (10 on 24 GB)" in requirement(default_settings, "GPU endpoint", "Scaling").value
 
 
 def test_max_workers_follow_max_concurrency(default_settings):

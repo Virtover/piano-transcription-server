@@ -85,15 +85,13 @@ def transcribe_job(job: dict) -> dict:
             except RuntimeError as error:
                 raise InvalidInput("The audio file cannot be decoded") from error
 
-            events = BATCHER.submit(
-                audio_for_model(MODEL, sample_rate, audio),
-                Progress(job),
-                None,
-            )
+            model_audio = audio_for_model(MODEL, sample_rate, audio)
+            events = BATCHER.submit(model_audio, Progress(job), None)
             transcribed = time.monotonic()
 
             midi_path = Path(directory) / "transcription.mid"
-            write_midi(events, midi_path)
+            # Beat tracking on the GPU, in memory its job capacity reserves.
+            write_midi(events, midi_path, model_audio, MODEL.fs, DEVICE)
             midi = midi_path.read_bytes()
 
         encoded = base64.b64encode(midi).decode("ascii")

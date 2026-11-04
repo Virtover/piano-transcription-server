@@ -31,6 +31,15 @@ RUN python3 -c "import torch; assert torch.version.cuda.startswith('12.8'), f'to
 # image. Fail the build if they are missing or unreadable.
 RUN python3 -c "import pkg_resources, torch; torch.load(pkg_resources.resource_filename('transkun', 'pretrained/2.0.pt'), map_location='cpu')"
 
+# Beat This! beat tracker weights for the MIDI tempo map
+# (app/transcription/tempo.py), checked against their checksum and loaded once.
+ARG BEAT_THIS_CHECKPOINT_URL=https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt
+ARG BEAT_THIS_CHECKPOINT_SHA256=8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331
+RUN mkdir -p /opt/beat-this \
+    && python3 -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], '/opt/beat-this/final0.ckpt')" "$BEAT_THIS_CHECKPOINT_URL" \
+    && echo "${BEAT_THIS_CHECKPOINT_SHA256}  /opt/beat-this/final0.ckpt" | sha256sum -c - \
+    && python3 -c "from beat_this.inference import load_model; load_model('/opt/beat-this/final0.ckpt')"
+
 COPY app ./app
 COPY runpod/handler.py ./handler.py
 

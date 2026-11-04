@@ -104,6 +104,10 @@ class FakeStack(server.ComposeStack):
         self.build = FakeBuild(self.clock, self.clock.now() + self.build_seconds, self.build_code)
         return self.build
 
+    def remove_stale_containers(self):
+        self.stale_removed_at = self.clock.now()
+        return getattr(self, "stale", [])
+
     def up(self, command=None, build=True):
         self.up_call = (self.clock.now(), command, build)
         return self.up_code
@@ -225,6 +229,60 @@ def test_stop_covers_every_profile():
 
     assert calls[0] == ["docker", "compose", "--profile", "*", "stop"]
     assert calls[1] == ["docker", "compose", "--profile", "*", "down"]
+
+
+def docker_answers(answers):
+    """A docker CLI that answers each command by its first distinct words."""
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        for start, stdout in answers.items():
+            if " ".join(command).startswith(start):
+                return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        raise AssertionError(command)
+
+    return run, calls
+
+
+def test_containers_on_a_network_that_is_gone_are_removed():
+    run, calls = docker_answers({
+        "docker compose --profile * ps": "aaa\nbbb\nccc\n",
+        "docker network ls": "net-new\nnet-host\n",
+        "docker inspect": "/stack-cloudflared-1 false net-old\n/stack-api-1 true net-new\n/stack-prepare-1 false net-new\n",
+        "docker rm": "",
+    })
+
+    assert server.ComposeStack([], run=run).remove_stale_containers() == ["stack-cloudflared-1"]
+    assert calls[-1] == ["docker", "rm", "stack-cloudflared-1"]
+
+
+def test_nothing_is_removed_when_every_network_exists():
+    run, calls = docker_answers({
+        "docker compose --profile * ps": "aaa\n",
+        "docker network ls": "net-new\n",
+        "docker inspect": "/stack-api-1 false net-new\n",
+    })
+
+    assert server.ComposeStack([], run=run).remove_stale_containers() == []
+    assert not any(command[:2] == ["docker", "rm"] for command in calls)
+
+
+def test_nothing_is_removed_when_docker_cannot_say():
+    def run(command, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="Cannot connect to the Docker daemon")
+
+    assert server.ComposeStack([], run=run).remove_stale_containers() == []
+
+
+@pytest.mark.parametrize("action", ["start", "restart"])
+def test_stale_containers_are_removed_before_the_stack_comes_up(action, capsys):
+    clock = FakeClock()
+    stack = FakeStack(clock)
+    stack.stale = ["stack-cloudflared-1"]
+    assert server.main([action] + (["5m"] if action == "restart" else []), stack, clock) == 0
+    assert stack.stale_removed_at <= stack.up_call[0]
+    assert "removed stack-cloudflared-1: its network no longer exists" in capsys.readouterr().out
 
 
 def test_custom_command_is_run_instead_of_compose_up():

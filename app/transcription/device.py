@@ -12,6 +12,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# VRAM of the tempo map's beat tracker (app/transcription/tempo.py), which
+# runs on the job's GPU one job at a time. Only its weights and one 30 s
+# chunk are on the GPU, so this does not depend on the audio's length.
+TEMPO_MAP_MEMORY_GIB = 0.25
+
 def physical_cpu_count() -> int:
     detected = psutil.cpu_count(logical=False) if psutil else None
     return max(1, detected or os.cpu_count() or 1)
@@ -120,9 +125,11 @@ def device_free_memory(
 
 
 def job_capacity(free_memory: float, config=None) -> int:
-    """Jobs that fit in free_memory bytes of VRAM next to one model."""
+    """Jobs that fit in free_memory bytes of VRAM next to one model, and the
+    beat tracker of the tempo map when it is on."""
     worker = (config or settings).worker
-    available_memory = max(0, free_memory - worker.model_memory_gib * 1024**3)
+    reserved = worker.model_memory_gib + (TEMPO_MAP_MEMORY_GIB if worker.tempo_map else 0)
+    available_memory = max(0, free_memory - reserved * 1024**3)
     return int(available_memory // (worker.memory_per_job_gib * 1024**3))
 
 

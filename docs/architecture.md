@@ -30,7 +30,7 @@ The main implementation surfaces are `app/main.py`, `app/api/routes/`, `app/work
 1. Download source audio and metadata with `yt-dlp`, or use the uploaded file.
 2. Convert audio to 44.1 kHz mono WAV with `ffmpeg`.
 3. Run Transkun in overlapping 16-second segments with an 8-second hop.
-4. Write the MIDI file.
+4. Find the beats and downbeats with Beat This!, and write the MIDI file on them: the [tempo map](#-tempo-map).
 5. Serve the result from the API.
 
 The video site is asked once per job. When a link is submitted, the API reads the video's information with `yt-dlp` to check its length, and saves it in the job directory. The worker downloads with that information instead of asking the site again. It asks again only if the information is older than an hour or its audio links no longer work: they are signed and expire. It never asks again after the site refused the server or said the video cannot be read. A check is also reused for 5 minutes for the same URL, so asking the cost of a video and then submitting it is one request.
@@ -38,6 +38,20 @@ The video site is asked once per job. When a link is submitted, the API reads th
 Every request to a video site, from the API or a worker, goes through `app/video_sites.py`, which keeps its state per site in Redis, shared by the API and every worker. Requests that read a link from a site start `VIDEO_SITE_INTERVAL` apart, and at most `VIDEO_SITE_MAX_DOWNLOADS` downloads from it run at once. A rate limit or bot check, or repeated timeouts, open the site's breaker: its links are refused until a cooldown ends, then read one at a time until one succeeds. See [When a video site refuses the server](api.md#-when-a-video-site-refuses-the-server).
 
 The Transkun checkpoint detects sustain-pedal events separately instead of automatically extending note durations until pedal release. Progress during model execution is an estimate because the Transkun command does not expose exact per-segment progress.
+
+### 🥁 Tempo map
+
+Transkun gives every note's time in seconds; by itself the MIDI file would be at a fixed 120 BPM, so in a notation program or DAW the bar lines would not follow the music. `app/transcription/tempo.py` gives it the beats and bars of the recording (`WORKER_TEMPO_MAP`, on by default):
+
+* [Beat This!](https://github.com/CPJKU/beat_this) finds the beats and downbeats in the audio. Its weights are part of the worker and RunPod images. It runs on the job's GPU, one job at a time, in 0.25 GiB that GPU job capacity reserves for it (see [GPU memory and batching](configuration.md#-gpu-memory-and-batching)); if another program has taken that memory, on CPU. Jobs on CPU track beats on CPU.
+* Every beat becomes one quarter note, with a tempo change at every beat, so the grid follows rubato and tempo changes. Time signatures come from the downbeats, and notes before the first downbeat form a pickup bar.
+* No note is moved and nothing is quantized: every event keeps its time in seconds to within a millisecond, so the MIDI plays back exactly as before. Syncopation, swing, and grace notes keep their timing and sit off the beat where they belong.
+* Repairs: a beat missed between two others is filled in, and a spurious beat between two beats is dropped. A single bar of another length, such as one 2/4 bar among 4/4 bars, is followed, and a missed downbeat is filled with bars of the main meter.
+* Beats that cannot be trusted leave the MIDI at 120 BPM, as Transkun wrote it, rather than give it a wrong grid: fewer than 8 beats, a tempo outside 20 to 400 BPM, more than 15% of beats off the local tempo by over 30%, fewer than two downbeats, or fewer than three quarters of the bars in one meter. So does any error in beat tracking: it never fails a job. The worker log says which.
+* Memory does not grow with the audio's length: the spectrogram is made on CPU two minutes at a time, and only the weights and one 30 s chunk are on the GPU. Measured on an RTX 3060 Ti: 228 MiB of VRAM at most, the same for 2.4, 20, and 60 minutes of audio.
+* Measured on 142 s of audio: 0.23 s on an RTX 3060 Ti, 4.2 s on 4 CPU threads; 60 minutes take 7 s on that GPU.
+* Safeguards: the weights are checked against their SHA-256 when the image is built and never downloaded at run time. Before the file is replaced, every event of the new MIDI is checked to play at its original time. The new file is written beside the old one and moved over it, so a failed write, such as on a full disk, leaves the MIDI as Transkun wrote it; the whole result is then synced to disk before it replaces the job's MIDI, as without a tempo map.
+* Limits: the beat is the level Beat This! hears, usually the quarter note but sometimes the half or eighth note. Compound meters such as 6/8 become 2/4 with triplets. Free passages without a pulse, such as cadenzas, can make the beats too irregular for a map.
 
 ## 🗄️ Job retention and restart behavior
 
@@ -193,7 +207,7 @@ A local job that does not fit in GPU memory even on its own is also sent remote,
 1. `remote-worker` claims the job like a local worker would, and downloads and converts the audio with `yt-dlp` and `ffmpeg`. Downloads stay on this server because video sites often block datacenter IPs.
 2. It compresses the WAV to FLAC, uploads it to the bucket under a random key, and creates a presigned GET URL valid for `OUTSOURCE_TIMEOUT` plus five minutes.
 3. It submits `{"audio_url": ..., "job_id": ...}` to RunPod `/run`, then polls `/status` every 2 seconds. RunPod progress (0 to 1) is shown as 0.15 to 0.95, the same range as model progress for local jobs.
-4. The handler downloads only from the storage host and transcribes the audio in the same batcher as the local worker: one RunPod worker takes several requests at once and runs them as one batch, up to its GPU's job capacity. It returns the MIDI as base64.
+4. The handler downloads only from the storage host and transcribes the audio in the same batcher as the local worker: one RunPod worker takes several requests at once and runs them as one batch, up to its GPU's job capacity. It adds the [tempo map](#-tempo-map) and returns the MIDI as base64.
 5. The dispatcher writes the MIDI to the job directory and completes the job. The storage object is deleted in every case.
 
 When the user cancels, the dispatcher calls RunPod `/cancel` and stops. A remote-pending job waits for a remote concurrency slot and can be cancelled while waiting. When a remote job fails or exceeds `OUTSOURCE_TIMEOUT`, it is cancelled on RunPod; with `OUTSOURCE_FALLBACK_LOCAL=true` it is put back on the local queue with a flag that stops it from being sent remote again. Otherwise it fails. Short network errors while polling are retried up to five times. Download and conversion errors are not retried locally, because they would fail the same way.

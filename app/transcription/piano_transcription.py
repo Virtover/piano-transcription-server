@@ -34,6 +34,7 @@ from app.transcription.batching import (
     run_splitting_on_out_of_memory,
 )
 from app.config import settings
+from app.transcription.tempo import add_tempo_map
 from app.transcription.device import (
     cpu_batch_size,
     cpu_thread_count,
@@ -189,10 +190,20 @@ def audio_for_model(model, sample_rate: int, audio: np.ndarray) -> np.ndarray:
     return audio
 
 
-def write_midi(events: list, output_path: Path) -> None:
+def write_midi(
+    events: list,
+    output_path: Path,
+    audio: np.ndarray | None = None,
+    sample_rate: int | None = None,
+    device: str = "cpu",
+) -> None:
+    """Write the MIDI file atomically, with the tempo map of audio when it
+    is given."""
     partial_path = output_path.with_name(f".{output_path.name}.partial")
     try:
         writeMidi(events).write(str(partial_path))
+        if audio is not None:
+            add_tempo_map(partial_path, audio, sample_rate, device)
         with partial_path.open("rb") as file:
             os.fsync(file.fileno())
         os.replace(partial_path, output_path)
@@ -474,7 +485,7 @@ def transcribe_piano(
         0.07 - 0.10   model loading
         0.10 - 0.15   audio loading
         0.15 - 0.95   Transkun segment processing
-        0.95 - 1.00   MIDI writing
+        0.95 - 1.00   beat tracking and MIDI writing
     """
 
     device = select_device()
@@ -534,7 +545,8 @@ def transcribe_piano(
     if progress_callback:
         progress_callback(0.96)
 
-    write_midi(events, output_path)
+    # Beat tracking on the job's GPU, in memory its job capacity reserves.
+    write_midi(events, output_path, audio, model.fs, device)
 
     if progress_callback:
         progress_callback(1.0)

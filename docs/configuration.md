@@ -110,6 +110,7 @@ Prints what the external services must provide for outsourcing, sign-in, and bil
 | `WORKER_BATCH_SIZE` | `auto` | Maximum jobs combined into one model batch. `auto` uses each GPU's job capacity, or the lower of CPU thread capacity and the available-RAM estimate on CPU. A number is lowered to a GPU's capacity. In CPU mode, it is also the number of worker threads. See [below](#choosing-other-values). |
 | `WORKER_BATCH_TIMEOUT` | `2s` | Maximum wait for more jobs before running a partial batch. |
 | `WORKER_MAX_CONCURRENCY` | `auto` | Optional cap on concurrent GPU jobs. It can only lower the capacity calculated from VRAM. |
+| `WORKER_TEMPO_MAP` | `true` | Give the MIDI the beats and bars of the recording: a tempo change at every beat, one quarter note each, and time signatures from the downbeats. Notes keep their timing. See [Tempo map](architecture.md#-tempo-map). `false` writes everything at a fixed 120 BPM. On RunPod, set it on the endpoint. |
 
 ### Billing
 
@@ -378,8 +379,10 @@ An existing `.env` keeps working without changes; you only see deprecation warni
 When the worker starts, it reads the free VRAM of each GPU and calculates:
 
 ```text
-jobs per GPU = floor((free VRAM - WORKER_MODEL_MEMORY_GIB) / WORKER_MEMORY_PER_JOB_GIB)
+jobs per GPU = floor((free VRAM - WORKER_MODEL_MEMORY_GIB - 0.25 GiB) / WORKER_MEMORY_PER_JOB_GIB)
 ```
+
+The 0.25 GiB is the beat tracker of the [tempo map](architecture.md#-tempo-map), which runs on the job's GPU, one job at a time; it peaked at 170 MiB allocated on an RTX 3060 Ti. With `WORKER_TEMPO_MAP=false` nothing is reserved for it. If another program takes that memory, beat tracking falls back to the CPU for that job.
 
 The total, optionally capped by `WORKER_MAX_CONCURRENCY`, becomes the number of worker threads, which is the number of jobs transcribed at the same time. If no GPU has room for one job, the worker runs on the CPU. The worker log prints the result, for example `up to 4 job(s) by VRAM (GPU 0: 4 job(s), 5.68 GiB free)`.
 

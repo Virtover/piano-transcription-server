@@ -101,6 +101,11 @@ class Stack:
     def stop_services(self, services: list[str]) -> int:
         raise NotImplementedError
 
+    def remove_stale_containers(self) -> list[str]:
+        """Remove what cannot be started again as it is, so starting
+        creates it anew; the names removed."""
+        return []
+
     def host_path(self, container_path: str) -> Path:
         """Where a file a one-off container saved is on this machine."""
         raise NotImplementedError
@@ -219,6 +224,31 @@ class ComposeStack(Stack):
 
     def stop_services(self, services: list[str]) -> int:
         return self.docker(self.compose() + ["stop", *services]).returncode
+
+    def remove_stale_containers(self) -> list[str]:
+        # A stopped container keeps the ID of its network. After the network
+        # is created again, for example by `docker network prune` or a Docker
+        # Desktop reset, Docker cannot start it ("network ... not found"), and
+        # `up` does not replace it. Removed, it is created anew; its volumes stay.
+        def output(command: list[str]) -> list[str] | None:
+            result = self.docker(command, capture_output=True, text=True)
+            return result.stdout.splitlines() if result.returncode == 0 else None
+
+        containers = output(self.compose(ALL_PROFILES) + ["ps", "-a", "-q"])
+        networks = output(["docker", "network", "ls", "-q", "--no-trunc"])
+        if not containers or networks is None:
+            return []
+        described = output(["docker", "inspect", "--format",
+                            "{{.Name}} {{.State.Running}}{{range .NetworkSettings.Networks}} {{.NetworkID}}{{end}}",
+                            *containers]) or []
+        stale = []
+        for line in described:
+            name, running, *network_ids = line.split()
+            if running == "false" and set(network_ids) - set(networks):
+                stale.append(name.lstrip("/"))
+        if stale and output(["docker", "rm", *stale]) is None:
+            return []
+        return stale
 
     def host_path(self, container_path: str) -> Path:
         # billing-data is mounted at /billing in docker-compose.yml.

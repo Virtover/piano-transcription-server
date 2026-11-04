@@ -270,6 +270,8 @@ class WorkerSettings(BaseSettings):
     batch_size: AutoInt = None
     batch_timeout: Duration = 2.0
     max_concurrency: AutoInt = None
+    # Give the MIDI the beats and bars of the recording (app/transcription/tempo.py).
+    tempo_map: bool = True
 
 
 class JobSettings(BaseSettings):

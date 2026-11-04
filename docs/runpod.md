@@ -141,6 +141,7 @@ Optional environment variables on the endpoint:
 | `WORKER_MAX_CONCURRENCY` | from VRAM | A worker should take fewer requests than fit. Scale the endpoint by the same number of requests per worker. |
 | `WORKER_MEMORY_PER_JOB_GIB` | `1.1` | Workers run out of GPU memory. |
 | `WORKER_BATCH_TIMEOUT` | `2s` | Requests should wait longer or shorter for a batch. |
+| `WORKER_TEMPO_MAP` | `true` | The MIDI should keep a fixed 120 BPM instead of the recording's beats and bars: `false`. |
 | `OUTSOURCE_MAX_AUDIO_MB` | `512` | Long recordings are rejected. |
 
 ## ⏱️ Start-up time
