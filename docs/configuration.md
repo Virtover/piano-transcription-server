@@ -260,6 +260,8 @@ Optional, and on when `OFFSITE_BACKUP_BUCKET` is set. Then the other values and 
 
 ### Error reports
 
+With `ERROR_REPORT_URL` set, the API also reports its own crashes. A process that is killed (out of memory, `SIGKILL`) or dies on a fatal signal cannot report anything, so the API keeps a run marker and a faulthandler log (`crash-watch-api.*`) in `/data`, and the next start sends an `UnexpectedRestart` report. The Piano Weave website lists it under **Server crashes**, which can have its own Discord channel. The files hold only timestamps, a process ID and Python stacks, and the report is redacted like every other. A clean shutdown, such as a deploy, removes them, so it is not reported.
+
 | Variable | Default | Description |
 | --- | --- | --- |
 | `ERROR_REPORT_URL` | unset | Where the API and the workers send their errors, such as the Piano Weave website's `https://pianoweave.com/api/server-errors`. Needs the secret file `error_report_token`. Must use `https://`, so the token is never sent in the clear; plain `http://` is accepted only for `localhost`. |
