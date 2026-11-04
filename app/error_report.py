@@ -7,14 +7,23 @@ Reports are sent from a background thread, so logging never waits for the
 network. A report that cannot be sent is only printed: logging it as an error
 would report it again.
 
+The API also reports its own crashes: a process that is killed (out of memory,
+SIGKILL, power cut) or dies on a fatal signal cannot report anything itself, so
+it keeps a run marker and a faulthandler log in the data directory, and the
+next start reports the crash. The website files that report as "Server crashes",
+which can have a Discord channel of its own.
+
 Before a report leaves the server, every secret this server holds, passwords
 in connection URLs, and the query of every link (signed storage links carry
 their signature there) are cut out. Redirects are not followed, so the token
 only ever goes to ERROR_REPORT_URL itself.
 """
 
+import atexit
+import faulthandler
 import json
 import logging
+import os
 import queue
 import re
 import sys
@@ -23,6 +32,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -42,6 +52,10 @@ MAX_MESSAGE_LENGTH = 2000
 MAX_TRACEBACK_LENGTH = 20000
 USER_AGENT = "piano-transcription-server"
 REDACTED = "********"
+# Only the API is watched: it is one process, so a stale marker can only mean a crash.
+CRASH_WATCH_SERVICES = ("api",)
+CRASH_REPORT_TYPE = "UnexpectedRestart"  # the website files this type under "Server crashes"
+HEARTBEAT_SECONDS = 30
 # Secrets shorter than this could match ordinary text, and are too weak to matter.
 MIN_REDACTED_LENGTH = 8
 # The PostgreSQL password is a secret file of its own (app/billing.py).
@@ -206,6 +220,99 @@ class ReportHandler(logging.Handler):
 
 
 _reporter: Reporter | None = None
+_crash_watch_started = False
+
+
+class CrashWatch:
+    """A run marker (refreshed by a heartbeat, removed on a clean exit) and a faulthandler log.
+    Both hold no secrets: timestamps, a process id and the Python stack of every thread."""
+
+    def __init__(self, directory: Path, service: str):
+        self.marker = directory / f"crash-watch-{service}.json"
+        self.native = directory / f"crash-watch-{service}.log"
+        self.stop = threading.Event()
+        self.native_file = None
+
+    def previous_crash(self, report: Callable[[dict], object]) -> bool:
+        """Reports the previous run's crash, if it left a marker or a native crash log."""
+        try:
+            previous = json.loads(self.marker.read_text(encoding="utf-8"))
+            if not isinstance(previous, dict):
+                previous = {}
+            found = True
+        except FileNotFoundError:
+            previous, found = {}, False
+        except (OSError, ValueError):
+            previous, found = {}, True
+        try:
+            with open(self.native, "r", encoding="utf-8", errors="replace") as handle:
+                native = handle.read()[-MAX_TRACEBACK_LENGTH:].strip()
+        except OSError:
+            native = ""
+        if not found and not native:
+            return False
+        context = {key: str(previous[key])[:100] for key in ("started", "heartbeat", "pid") if key in previous}
+        report({
+            "level": "CRITICAL",
+            "type": CRASH_REPORT_TYPE,
+            "message": ("The server API crashed on a fatal signal and was restarted." if native else
+                        "The server API stopped without a clean shutdown (crash, out of memory, or killed) and was restarted."),
+            "traceback": native,
+            "context": {"Location": "process", **{k.capitalize(): v for k, v in context.items()}},
+        })
+        return True
+
+    def _write_marker(self, started: str) -> None:
+        temporary = self.marker.with_suffix(".tmp")
+        temporary.write_text(json.dumps({
+            "started": started, "heartbeat": datetime.now(timezone.utc).isoformat(), "pid": os.getpid(),
+        }), encoding="utf-8")
+        os.replace(temporary, self.marker)
+
+    def _beat(self, started: str) -> None:
+        while not self.stop.wait(HEARTBEAT_SECONDS):
+            try:
+                self._write_marker(started)
+            except OSError:
+                pass
+
+    def start(self) -> None:
+        started = datetime.now(timezone.utc).isoformat()
+        self.native_file = open(self.native, "w", encoding="utf-8")
+        faulthandler.enable(file=self.native_file, all_threads=True)
+        self._write_marker(started)
+        threading.Thread(target=self._beat, args=(started,), daemon=True, name="crash-watch").start()
+        atexit.register(self.clean_exit)
+
+    def clean_exit(self) -> None:
+        self.stop.set()
+        try:
+            faulthandler.disable()
+            if self.native_file is not None:
+                self.native_file.close()
+        except (OSError, ValueError):
+            pass
+        for path in (self.marker, self.native):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def watch_crashes(reporter: Reporter, directory: Path, service: str) -> bool:
+    """Reports the previous crash and starts watching this run. False if the directory is not writable."""
+    global _crash_watch_started
+    if _crash_watch_started or service not in CRASH_WATCH_SERVICES:
+        return False
+    watch = CrashWatch(Path(directory), service)
+    try:
+        watch.previous_crash(reporter.submit)
+        watch.start()
+    except OSError as error:
+        print(f"Crash watch is off: {type(error).__name__}", file=sys.stderr, flush=True)
+        return False
+    _crash_watch_started = True
+    return True
 
 
 def install(service: str, config=None) -> bool:
@@ -228,6 +335,7 @@ def install(service: str, config=None) -> bool:
         # uvicorn's loggers do not propagate to the root logger.
         for name in ("", "uvicorn"):
             logging.getLogger(name).addHandler(handler)
+        watch_crashes(_reporter, Path(config.service.data_dir), service)
     return _reporter is not None
 
 

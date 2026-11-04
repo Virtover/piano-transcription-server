@@ -338,3 +338,63 @@ def test_errors_still_reach_the_containers_log(monkeypatch, capsys, default_sett
         assert "Off-site backup copying is failing" in capsys.readouterr().err
     finally:
         root.handlers = saved
+
+
+# --- Crash watch ----------------------------------------------------------------
+
+def crash_watch(tmp_path):
+    return error_report.CrashWatch(tmp_path, "api")
+
+
+def test_first_start_reports_no_crash(tmp_path):
+    instance, sent = reporter()
+
+    assert crash_watch(tmp_path).previous_crash(instance.submit) is False
+    assert sent == []
+
+
+def test_a_leftover_marker_is_reported_as_a_crash(tmp_path):
+    first = crash_watch(tmp_path)
+    first._write_marker("2025-01-01T00:00:00+00:00")  # the run is killed: no clean exit
+    instance, sent = reporter()
+
+    assert crash_watch(tmp_path).previous_crash(instance.submit) is True
+    instance.flush()
+    [(_, _, report)] = sent
+    assert report["type"] == error_report.CRASH_REPORT_TYPE == "UnexpectedRestart"
+    assert report["level"] == "CRITICAL"
+    assert report["context"]["Started"] == "2025-01-01T00:00:00+00:00"
+
+
+def test_a_clean_exit_leaves_nothing_to_report(tmp_path):
+    watch = crash_watch(tmp_path)
+    watch._write_marker("2025-01-01T00:00:00+00:00")
+    watch.clean_exit()
+    instance, sent = reporter()
+
+    assert crash_watch(tmp_path).previous_crash(instance.submit) is False
+
+
+def test_a_native_crash_log_is_reported_without_secrets(tmp_path):
+    (tmp_path / "crash-watch-api.log").write_text("Fatal Python error: Segmentation fault\n  File x.py, line 1 in token", encoding="utf-8")
+    instance, sent = reporter()
+    assert crash_watch(tmp_path).previous_crash(instance.submit) is True
+    instance.flush()
+
+    [(_, _, report)] = sent
+    assert "Segmentation fault" in report["traceback"]
+    assert "token" not in report["traceback"]  # the reporter's token is cut out like in every report
+    assert "fatal signal" in report["message"]
+
+
+def test_only_the_api_is_watched(tmp_path):
+    instance, _ = reporter()
+
+    assert error_report.watch_crashes(instance, tmp_path, "worker") is False
+    assert not list(tmp_path.iterdir())
+
+
+def test_an_unwritable_directory_turns_the_watch_off(tmp_path):
+    instance, _ = reporter()
+
+    assert error_report.watch_crashes(instance, tmp_path / "missing", "api") is False
