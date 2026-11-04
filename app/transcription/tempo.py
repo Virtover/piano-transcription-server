@@ -402,14 +402,27 @@ _lock = threading.Lock()
 _trackers: dict[str, _Tracker] = {}
 
 
+def _tracker(device: str) -> _Tracker:
+    """The tracker for device, loaded on first use; call with _lock held."""
+    if device not in _trackers:
+        _trackers[device] = _Tracker(device)
+    return _trackers[device]
+
+
+def preload_tracker(device: str) -> None:
+    """Load Beat This! for device now, so that the first job's MIDI does
+    not wait for it. Nothing when the tempo map is off."""
+    if settings.worker.tempo_map:
+        with _lock:
+            _tracker(device)
+
+
 def detect_beats(audio, sample_rate: int, device: str) -> tuple[list[float], list[float]]:
     """Beat and downbeat times in seconds of audio (samples, or samples x channels)."""
     # One at a time: its GPU memory is reserved once, and on CPU it uses
     # every thread.
     with _lock:
-        if device not in _trackers:
-            _trackers[device] = _Tracker(device)
-        beats, downbeats = _trackers[device](audio, sample_rate)
+        beats, downbeats = _tracker(device)(audio, sample_rate)
     return [float(beat) for beat in beats], [float(downbeat) for downbeat in downbeats]
 
 

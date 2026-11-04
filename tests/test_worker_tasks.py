@@ -2,6 +2,7 @@ import sys
 import types
 from pathlib import Path
 
+import dramatiq
 import pytest
 
 from app.billing import cancelled_cost
@@ -506,3 +507,56 @@ def test_cancelled_job_is_kept_for_the_retention_period(worker, charge):
     tasks.cancel_job("job", charge=charge)
 
     assert 60 * 60 < tasks.redis.ttl(tasks.job_key("job")) <= 24 * 60 * 60
+
+
+def dramatiq_worker(queues):
+    # Dramatiq's own worker, not a stand-in: its attributes are what the middleware reads.
+    return dramatiq.Worker(tasks.broker, queues=queues, worker_threads=1)
+
+
+def test_workers_consume_their_queues_only():
+    assert tasks.consumes(dramatiq_worker(None), tasks.LOCAL_QUEUE)
+    assert tasks.consumes(dramatiq_worker([tasks.LOCAL_QUEUE]), tasks.LOCAL_QUEUE)
+    assert not tasks.consumes(dramatiq_worker([tasks.REMOTE_QUEUE]), tasks.LOCAL_QUEUE)
+    assert tasks.consumes(dramatiq_worker([tasks.REMOTE_QUEUE]), tasks.REMOTE_QUEUE)
+
+
+def test_the_remote_worker_publishes_no_local_heartbeat(monkeypatch):
+    monkeypatch.setattr(tasks.threading, "Thread", lambda **options: pytest.fail("heartbeat started"))
+
+    tasks.LocalWorkerHeartbeat().after_worker_boot(tasks.broker, dramatiq_worker([tasks.REMOTE_QUEUE]))
+
+
+def test_the_remote_worker_refreshes_the_remote_capacity(monkeypatch):
+    started = []
+    monkeypatch.setattr(tasks.settings.outsource, "max_concurrency", None)
+    monkeypatch.setattr(tasks.threading, "Thread", lambda **options: types.SimpleNamespace(start=lambda: started.append(options["name"])))
+
+    tasks.RemoteCapacityRefresh().after_worker_boot(tasks.broker, dramatiq_worker([tasks.REMOTE_QUEUE]))
+    tasks.RemoteCapacityRefresh().after_worker_boot(tasks.broker, dramatiq_worker([tasks.LOCAL_QUEUE]))
+
+    assert started == ["remote-capacity"]
+
+
+@pytest.mark.parametrize(("queues", "preloaded"), [(None, True), ([tasks.LOCAL_QUEUE], True), ([tasks.REMOTE_QUEUE], False)])
+def test_local_workers_load_the_models_at_start(monkeypatch, queues, preloaded):
+    calls = []
+    module = types.ModuleType("app.transcription.piano_transcription")
+    module.preload = lambda: calls.append("preload")
+    monkeypatch.setitem(sys.modules, "app.transcription.piano_transcription", module)
+    monkeypatch.setattr(tasks.threading, "Thread", lambda target, **options: types.SimpleNamespace(start=target))
+
+    tasks.LocalModelPreload().after_worker_boot(tasks.broker, dramatiq_worker(queues))
+
+    assert calls == (["preload"] if preloaded else [])
+
+
+def test_a_failed_preload_leaves_the_worker_running(monkeypatch, caplog):
+    module = types.ModuleType("app.transcription.piano_transcription")
+    module.preload = lambda: (_ for _ in ()).throw(RuntimeError("no GPU"))
+    monkeypatch.setitem(sys.modules, "app.transcription.piano_transcription", module)
+    monkeypatch.setattr(tasks.threading, "Thread", lambda target, **options: types.SimpleNamespace(start=target))
+
+    tasks.LocalModelPreload().after_worker_boot(tasks.broker, dramatiq_worker(None))
+
+    assert "Could not load the models" in caplog.text

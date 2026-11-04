@@ -335,3 +335,21 @@ def test_two_hours_of_beats_take_moments():
 
     assert time.monotonic() - started < 3
     assert len(tempo_map.beats_us) == 12_001
+
+
+def test_preloading_loads_the_tracker_once(monkeypatch):
+    loaded = []
+    monkeypatch.setattr(tempo, "_trackers", {})
+    monkeypatch.setattr(tempo, "_Tracker", lambda device: loaded.append(device) or (lambda audio, rate: ([], [])))
+
+    tempo.preload_tracker("cuda:0")
+    tempo.detect_beats([0.0], 44100, "cuda:0")
+
+    assert loaded == ["cuda:0"]
+
+
+def test_preloading_skips_the_tracker_when_the_tempo_map_is_off(monkeypatch):
+    monkeypatch.setattr(tempo.settings.worker, "tempo_map", False)
+    monkeypatch.setattr(tempo, "_Tracker", lambda device: pytest.fail("tracker loaded"))
+
+    tempo.preload_tracker("cpu")

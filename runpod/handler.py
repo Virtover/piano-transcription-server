@@ -9,7 +9,7 @@ One worker takes several requests at once and transcribes them together in
 the same batcher that local jobs use: the worker's concurrency is the
 batcher's batch size, which is the GPU's job capacity from its free VRAM
 (WORKER_MEMORY_PER_JOB_GIB, WORKER_BATCH_SIZE, and WORKER_MAX_CONCURRENCY
-apply as on the server). The model is loaded once when the worker starts.
+apply as on the server). The model and the beat tracker are loaded once when the worker starts.
 
 Run locally with the SDK's test server: python handler.py --rp_serve_api --rp_api_port 8010
 """
@@ -38,6 +38,7 @@ from app.transcription.piano_transcription import (  # noqa: E402
     select_device,
     write_midi,
 )
+from app.transcription.tempo import preload_tracker  # noqa: E402
 
 
 logger = logging.getLogger("handler")
@@ -50,6 +51,11 @@ PROGRESS_INTERVAL = 2.0
 DEVICE = select_device()
 BATCHER = get_batcher(DEVICE)
 MODEL = BATCHER.model
+try:
+    preload_tracker(DEVICE)
+except Exception:
+    # Each request tries again, and keeps its MIDI at 120 BPM if it cannot.
+    logger.warning("Could not load the beat tracker", exc_info=True)
 # One thread per request in flight; most of them wait on the batcher.
 EXECUTOR = ThreadPoolExecutor(max_workers=max(4, BATCHER.batch_size * 2), thread_name_prefix="request")
 

@@ -755,6 +755,12 @@ def transcribe_remote_job(
     run_job(job_id, "remote", transcribe)
 
 
+def consumes(worker, queue: str) -> bool:
+    """Whether a Dramatiq worker consumes queue: every queue without --queues."""
+    queues = worker.consumer_whitelist
+    return not queues or queue in queues
+
+
 class LocalWorkerHeartbeat(dramatiq.Middleware):
     """Publishes the worker's capacity and average job duration while it
     consumes the local queue, so the API can estimate the local wait."""
@@ -765,8 +771,7 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
         self._stop: threading.Event | None = None
 
     def after_worker_boot(self, broker, worker):
-        queues = getattr(worker, "queues", None)
-        if queues is not None and LOCAL_QUEUE not in queues:
+        if not consumes(worker, LOCAL_QUEUE):
             return
         capacity = worker.worker_threads
         stop = self._stop = threading.Event()
@@ -790,13 +795,36 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
                 logger.exception("Could not clear the worker heartbeat")
 
 
+class LocalModelPreload(dramatiq.Middleware):
+    """Loads the models as the worker starts consuming the local queue, so
+    that the first job does not wait for them. A job that arrives meanwhile
+    waits for the same load instead of starting its own."""
+
+    def after_worker_boot(self, broker, worker):
+        if not consumes(worker, LOCAL_QUEUE):
+            return
+
+        def preload():
+            started = time.monotonic()
+            try:
+                from app.transcription.piano_transcription import preload
+
+                preload()
+            except Exception:
+                # The first job loads them again, and fails if they still cannot.
+                logger.exception("Could not load the models before the first job")
+                return
+            logger.info("Models loaded in %.1f s", time.monotonic() - started)
+
+        threading.Thread(target=preload, name="model-preload", daemon=True).start()
+
+
 class RemoteCapacityRefresh(dramatiq.Middleware):
     """With OUTSOURCE_MAX_CONCURRENCY=auto, rereads the provider's max
     workers while the remote queue is consumed, so console changes apply."""
 
     def after_worker_boot(self, broker, worker):
-        queues = getattr(worker, "queues", None)
-        if queues is None or REMOTE_QUEUE not in queues or settings.outsource.max_concurrency is not None:
+        if not consumes(worker, REMOTE_QUEUE) or settings.outsource.max_concurrency is not None:
             return
 
         def refresh():
@@ -814,4 +842,5 @@ class RemoteCapacityRefresh(dramatiq.Middleware):
 
 
 broker.add_middleware(LocalWorkerHeartbeat())
+broker.add_middleware(LocalModelPreload())
 broker.add_middleware(RemoteCapacityRefresh())

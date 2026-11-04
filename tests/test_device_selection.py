@@ -57,3 +57,31 @@ def test_jobs_go_to_usable_gpu_with_most_free_memory(gpus):
 
     gpus["free"] = {0: 1 * 1024**3, 1: 7 * 1024**3, 2: 2 * 1024**3}
     assert piano_transcription.select_device() == "cuda:2"
+
+
+def test_threads_selecting_at_once_measure_once(gpus, monkeypatch):
+    import threading
+
+    measuring = threading.Event()
+    release = threading.Event()
+
+    def capacities():
+        gpus["capacity_calls"] += 1
+        measuring.set()
+        release.wait(5)
+        # A second measurement would see the first thread's model loaded.
+        return [(0, 4 if gpus["capacity_calls"] == 1 else 0, 0, 0)]
+
+    monkeypatch.setattr(piano_transcription, "cuda_job_capacities", capacities)
+    devices = []
+    first = threading.Thread(target=lambda: devices.append(piano_transcription.select_device()))
+    first.start()
+    measuring.wait(5)
+    second = threading.Thread(target=lambda: devices.append(piano_transcription.select_device()))
+    second.start()
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert devices == ["cuda:0", "cuda:0"]
+    assert gpus["capacity_calls"] == 1

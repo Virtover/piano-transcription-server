@@ -34,7 +34,7 @@ from app.transcription.batching import (
     run_splitting_on_out_of_memory,
 )
 from app.config import settings
-from app.transcription.tempo import add_tempo_map
+from app.transcription.tempo import add_tempo_map, preload_tracker
 from app.transcription.device import (
     cpu_batch_size,
     cpu_thread_count,
@@ -137,6 +137,10 @@ def load_model(device: str):
 # Usable GPU index -> job capacity, measured once before this process loads
 # a model, like the launcher does.
 _cuda_capacities: dict[int, int] | None = None
+# The first job and the preload at start select a device at the same time;
+# one measures while the other waits, so that no measurement counts a model
+# the other has begun to load.
+_cuda_capacities_lock = threading.Lock()
 
 
 def select_device() -> str:
@@ -146,12 +150,13 @@ def select_device() -> str:
     # Checking capacity again later would count the loaded model and running
     # jobs against it and send new jobs to the CPU whenever the GPU is busy.
     # Concurrency is already limited by the worker thread count.
-    if _cuda_capacities is None:
-        _cuda_capacities = {
-            device_index: capacity
-            for device_index, capacity, _, _ in cuda_job_capacities() or []
-            if capacity > 0
-        }
+    with _cuda_capacities_lock:
+        if _cuda_capacities is None:
+            _cuda_capacities = {
+                device_index: capacity
+                for device_index, capacity, _, _ in cuda_job_capacities() or []
+                if capacity > 0
+            }
 
     if not _cuda_capacities:
         return "cpu"
@@ -469,6 +474,16 @@ def get_batcher(device: str) -> _GpuBatcher:
             batcher = _GpuBatcher(device)
             _gpu_batchers[device] = batcher
         return batcher
+
+
+def preload() -> None:
+    """Load the model, and the beat tracker, on the device jobs will use, so
+    that the first job does not wait for them."""
+    device = select_device()
+    if device == "cpu":
+        configure_cpu_threads()
+    get_batcher(device)
+    preload_tracker(device)
 
 
 def transcribe_piano(
