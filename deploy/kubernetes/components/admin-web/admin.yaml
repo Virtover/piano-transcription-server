@@ -83,3 +83,22 @@ spec:
   ports:
     - port: 8100
       targetPort: 8100
+---
+# Only the tunnel reaches the page, behind Cloudflare Access.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: admin
+spec:
+  podSelector:
+    matchLabels:
+      app: admin
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: cloudflared
+      ports:
+        - port: 8100
+          protocol: TCP

@@ -17,9 +17,11 @@ resources:
   - namespace.yaml
   - base
 
-# The admin web page; uncomment to deploy it. See docs/kubernetes.md.
-# components:
-#   - components/admin-web
+# The cluster's choices from cluster.env: the GPU nodes, the workers'
+# scaling, KEDA's namespace, and the admin web page. Written by
+# scripts/kube.py; not committed.
+components:
+  - cluster
 
 # The server's settings: a copy of server.env, which holds nothing of Docker
 # Compose's, with REDIS_URL added. Not committed. A change rolls the pods out.
@@ -29,7 +31,8 @@ configMapGenerator:
       - settings.env
 
 # Built from Dockerfile.api and Dockerfile.worker, and pushed to a registry
-# the cluster can pull from.
+# the cluster can pull from: KUBE_REGISTRY in cluster.env, which
+# scripts/kube.py writes here with each new tag.
 images:
   - name: piano-api
     newName: registry.example.com/piano-transcription-api

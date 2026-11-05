@@ -227,13 +227,14 @@ Remote and local jobs share one lifecycle (`run_job` in `app/worker/tasks.py`), 
 | `piano_jobs_running` | `queue`, `backend` | Jobs being transcribed. |
 | `piano_queue_active_jobs` | `queue`, `backend` | Both together: what workers are needed for. |
 | `piano_local_workers`, `piano_local_worker_capacity` | | Local workers with a live heartbeat, and the jobs they run at once together. |
+| `piano_local_workers_needed` | `queue`, `backend` | Local workers the active jobs need, at the jobs the live workers run at once on average; 1 for any job while no worker has a heartbeat. |
 | `piano_remote_job_limit` | | Remote jobs allowed at once, with outsourcing on. |
 | `piano_video_checks`, `piano_video_checks_limit` | | Video links being checked by every replica, and `MAX_VIDEO_CHECKS`. |
 | `piano_api_requests_in_flight` | | Requests this replica is answering. |
 
 Scale on the queue, not on CPU. A GPU worker that waits for its next job uses little CPU while users wait, and one that transcribes uses all of it however long the queue is.
 
-* **Local workers:** run as many as `piano_queue_active_jobs{queue="default"}` divided by the jobs one worker runs at once, and one more while `piano_queue_oldest_job_age_seconds{queue="default"}` stays above what users should wait, for example 60 seconds. Scaling on waiting jobs alone would remove workers that are still transcribing once the queue is empty. Remove workers slowly, a few minutes apart: a new GPU worker loads the model before it takes jobs, which takes about a minute, and a stopping one finishes its jobs first.
+* **Local workers:** run as many as `piano_local_workers_needed{queue="default"}`, which is `piano_queue_active_jobs` divided by the jobs a live worker runs at once on average, so workers on larger GPUs count for more and no setting has to say how many jobs one takes. Run one more while `piano_queue_oldest_job_age_seconds{queue="default"}` stays above what users should wait, for example 60 seconds. Scaling on waiting jobs alone would remove workers that are still transcribing once the queue is empty. Remove workers slowly, a few minutes apart: a new GPU worker loads the model before it takes jobs, which takes about a minute, and a stopping one finishes its jobs first.
 * **The remote worker** only waits for RunPod, so one is enough; RunPod scales the GPUs.
 * **API replicas:** on `piano_api_requests_in_flight` and CPU. Uploads and video checks hold a request for seconds, so in-flight requests rise before CPU does.
 

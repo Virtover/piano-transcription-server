@@ -10,3 +10,4 @@ resources:
   - remote-worker.yaml
   - cleanup.yaml
   - cloudflared.yaml
+  - network-policy.yaml

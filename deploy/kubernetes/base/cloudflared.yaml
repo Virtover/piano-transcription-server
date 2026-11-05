@@ -19,6 +19,27 @@ spec:
     spec:
       # No pod uses the Kubernetes API: a compromised one gets no token for it.
       automountServiceAccountToken: false
+      # Replicas on different machines, so that one machine going away
+      # leaves the others serving, and in different zones where the cluster has
+      # them. Nodes whose taint keeps these pods off do not count, and nor do the
+      # old replicas during a rolling update.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          matchLabelKeys: [pod-template-hash]
+          labelSelector:
+            matchLabels:
+              app: cloudflared
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          nodeTaintsPolicy: Honor
+          matchLabelKeys: [pod-template-hash]
+          labelSelector:
+            matchLabels:
+              app: cloudflared
       securityContext:
         # The image's own non-root user.
         runAsNonRoot: true

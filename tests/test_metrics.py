@@ -75,10 +75,41 @@ def test_queues_report_waiting_and_running_jobs_and_the_oldest_wait(api_context,
     assert found['piano_queue_jobs{queue="remote",backend="remote"}'] == 1
     assert found["piano_local_workers"] == 1
     assert found["piano_local_worker_capacity"] == 2
+    # Three jobs active, two at once per worker.
+    assert found['piano_local_workers_needed{queue="default",backend="local"}'] == 2
     assert found["piano_video_checks_limit"] == 4
     # This scrape itself.
     assert found["piano_api_requests_in_flight"] == 1
     assert "# TYPE piano_queue_jobs gauge" in response.text
+
+
+@pytest.mark.parametrize("active, capacities, needed", [
+    (0, [], 0),
+    (0, [4], 0),
+    # No heartbeat yet: one worker, whose heartbeat then tells the rest.
+    (5, [], 1),
+    (5, [2], 3),
+    (4, [2, 2], 2),
+    # Mixed GPUs: 2.5 jobs a worker on average.
+    (5, [1, 4], 2),
+    (6, [1, 4], 3),
+    # A worker that takes no job, such as one that found no GPU, does not count.
+    (4, [0, 4], 1),
+])
+def test_workers_needed_follow_what_each_worker_takes(active, capacities, needed):
+    workers = [{"capacity": capacity} for capacity in capacities]
+
+    assert metrics.workers_needed(active, workers) == needed
+
+
+def test_larger_workers_lower_the_workers_needed(api_context, token):
+    client, _, _ = api_context
+    for index in range(8):
+        add_job(f"job-{index}", "local", "queued", time.time())
+    routing.publish_heartbeat(tasks.redis, 4, None, worker="large:1")
+    routing.publish_heartbeat(tasks.redis, 4, None, worker="large:2")
+
+    assert samples(scrape(client).text)['piano_local_workers_needed{queue="default",backend="local"}'] == 2
 
 
 def test_empty_queues_wait_zero(api_context):

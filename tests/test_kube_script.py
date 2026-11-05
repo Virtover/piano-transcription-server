@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -78,9 +79,9 @@ def project(tmp_path):
     import shutil
 
     manifests = tmp_path / "deploy" / "kubernetes"
-    # Without the settings.env that kube.py wrote for this machine, which
-    # is not committed.
-    shutil.copytree(ROOT / "deploy" / "kubernetes", manifests, ignore=shutil.ignore_patterns("settings.env"))
+    # Without the settings.env, cluster.env, and component that kube.py
+    # wrote for this machine, which are not committed.
+    shutil.copytree(ROOT / "deploy" / "kubernetes", manifests, ignore=shutil.ignore_patterns("settings.env", "cluster.env", "cluster"))
     (tmp_path / "redis").mkdir()
     shutil.copyfile(ROOT / "redis" / "users.acl", tmp_path / "redis" / "users.acl")
     shutil.copyfile(ROOT / "server.env.example", tmp_path / "server.env")
@@ -207,7 +208,8 @@ def test_the_test_cluster_scales_on_its_own_metrics():
     # The API Service's port there, not the container's: a Service answers only on its own.
     assert operations["/spec/triggers/0/metadata/url"] == f"http://api.{local['namespace']}.svc.cluster.local:{port}/metrics"
     assert operations["/spec/triggers/1/metadata/url"] == operations["/spec/triggers/0/metadata/url"]
-    assert operations["/spec/triggers/0/metadata/targetValue"] == "1"
+    # The workers needed come from each CPU worker's heartbeat, as from a GPU worker's.
+    assert not any(path.endswith("/targetValue") for path in operations)
 
 
 def test_the_test_cluster_needs_docker_desktop(project):
@@ -229,6 +231,9 @@ def test_up_asks_for_what_is_missing_and_pushes(project):
 
     assert cluster.ran("docker", "push", "docker.io/me/piano-transcription-api:20261030-120000")
     assert 'newName: docker.io/me/piano-transcription-worker' in kube.target.kustomization.read_text(encoding="utf-8")
+    # Kept for the next time, and the component written before the apply.
+    assert kube_script.EnvFile(kube.target.choices).get("KUBE_REGISTRY") == "docker.io/me"
+    assert kube.target.component.exists()
     settings = kube_script.EnvFile(kube.target.settings)
     assert settings.get("REDIS_URL") == "rediss://app@redis.example.com:6380/0"
 
@@ -264,6 +269,199 @@ def test_secrets_are_copied_from_files_and_never_shown(project):
     # The YAML with the values went to kubectl, not to the screen.
     assert cluster.inputs and "s3cret-value" not in script.text
     assert not any("s3cret-value" in " ".join(command) for command in cluster.commands)
+
+
+# --- cluster.env ----------------------------------------------------------------------------------
+
+def base_documents(manifests: Path) -> list[dict]:
+    import yaml
+
+    return [document for path in sorted((manifests / "base").glob("*.yaml")) if path.name != "kustomization.yaml"
+            for document in yaml.safe_load_all(path.read_text(encoding="utf-8")) if document]
+
+
+def patched(manifests: Path, component: str) -> dict[tuple[str, str], dict]:
+    """Base's documents with the component's JSON patches applied, as
+    kustomize applies them: a path that is not there fails."""
+    import yaml
+
+    documents = {(document["kind"], document["metadata"]["name"]): document for document in base_documents(manifests)}
+    for patch in yaml.safe_load(component)["patches"]:
+        document = documents[(patch["target"]["kind"], patch["target"]["name"])]
+        for operation in json.loads(patch["patch"]):
+            *parents, last = [part.replace("~1", "/").replace("~0", "~") for part in operation["path"].split("/")[1:]]
+            node = document
+            for part in parents:
+                node = node[int(part)] if isinstance(node, list) else node[part]
+            if operation["op"] == "replace":
+                assert (node[int(last)] if isinstance(node, list) else node[last]) is not None
+            else:
+                assert operation["op"] == "add" and last not in node
+            node[int(last) if isinstance(node, list) else last] = operation["value"]
+    return documents
+
+
+def test_the_example_lists_every_choice_at_bases_values(project):
+    _, manifests, _ = project
+    example = (manifests / "cluster.env.example").read_text(encoding="utf-8")
+    written = dict(re.findall(r"^#?([A-Z_]+)=(.*)$", example, re.M))
+    base = {(document["kind"], document["metadata"]["name"]): document for document in base_documents(manifests)}
+    scaled = base[("ScaledObject", "worker")]["spec"]
+
+    assert set(written) == set(kube_script.CLUSTER_CHOICES)
+    # What applies when a choice is unset is what base has.
+    defaults = kube_script.CLUSTER_CHOICES
+    assert int(defaults["KUBE_MIN_WORKERS"]) == scaled["minReplicaCount"]
+    assert int(defaults["KUBE_MAX_WORKERS"]) == scaled["maxReplicaCount"]
+    assert kube_script.SERVER_SCRIPT.parse_duration(defaults["KUBE_MAX_WAIT"]) == float(scaled["triggers"][1]["metadata"]["targetValue"])
+    namespace = base[("NetworkPolicy", "api")]["spec"]["ingress"][1]["from"][0]["namespaceSelector"]["matchLabels"]
+    assert namespace == {"kubernetes.io/metadata.name": defaults["KUBE_KEDA_NAMESPACE"]}
+
+
+def test_unset_choices_change_nothing_of_base(project):
+    _, manifests, _ = project
+    component = kube_script.cluster_component({})
+    base = {(document["kind"], document["metadata"]["name"]): document for document in base_documents(manifests)}
+
+    assert patched(manifests, component) == base
+    assert component.startswith("# Written by scripts/kube.py")
+
+
+def test_the_choices_reach_the_workers_their_scaling_and_the_network_rule(project):
+    _, manifests, _ = project
+    component = kube_script.cluster_component({
+        "KUBE_GPU_NODE_LABEL": "nvidia.com/gpu.present=true",
+        "KUBE_GPU_NODE_TAINT": "nvidia.com/gpu",
+        "KUBE_MIN_WORKERS": "0",
+        "KUBE_MAX_WORKERS": "6",
+        "KUBE_MAX_WAIT": "2m",
+        "KUBE_KEDA_NAMESPACE": "autoscaling",
+    })
+
+    documents = patched(manifests, component)
+    pod = documents[("Deployment", "worker")]["spec"]["template"]["spec"]
+    scaled = documents[("ScaledObject", "worker")]["spec"]
+    assert pod["nodeSelector"] == {"nvidia.com/gpu.present": "true"}
+    assert pod["tolerations"] == [{"key": "nvidia.com/gpu", "operator": "Exists"}]
+    assert (scaled["minReplicaCount"], scaled["maxReplicaCount"]) == (0, 6)
+    assert scaled["triggers"][1]["metadata"]["targetValue"] == "120"
+    keda = documents[("NetworkPolicy", "api")]["spec"]["ingress"][1]["from"][0]["namespaceSelector"]
+    assert keda == {"matchLabels": {"kubernetes.io/metadata.name": "autoscaling"}}
+
+
+@pytest.mark.parametrize("choices, named", [
+    ({"KUBE_MAX_WORKERS": "0"}, "KUBE_MAX_WORKERS"),
+    ({"KUBE_MAX_WORKERS": "many"}, "KUBE_MAX_WORKERS"),
+    ({"KUBE_MIN_WORKERS": "-1"}, "KUBE_MIN_WORKERS"),
+    ({"KUBE_MIN_WORKERS": "5", "KUBE_MAX_WORKERS": "2"}, "KUBE_MIN_WORKERS"),
+    ({"KUBE_MAX_WAIT": "60"}, "KUBE_MAX_WAIT"),
+    ({"KUBE_MAX_WAIT": "0s"}, "KUBE_MAX_WAIT"),
+    ({"KUBE_GPU_NODE_LABEL": "nvidia.com/gpu.present"}, "KUBE_GPU_NODE_LABEL"),
+    ({"KUBE_GPU_NODE_LABEL": "gpu=yes please"}, "KUBE_GPU_NODE_LABEL"),
+    ({"KUBE_GPU_NODE_TAINT": "nvidia.com/gpu=present:NoSchedule"}, "KUBE_GPU_NODE_TAINT"),
+    ({"KUBE_KEDA_NAMESPACE": "KEDA"}, "KUBE_KEDA_NAMESPACE"),
+    ({"KUBE_ADMIN_WEB_MODE": "on"}, "KUBE_ADMIN_WEB_MODE"),
+])
+def test_a_choice_that_is_not_valid_is_named(choices, named):
+    with pytest.raises(ValueError, match=named):
+        kube_script.cluster_component(choices)
+
+
+def test_cluster_env_comes_from_its_example_on_the_first_use(project):
+    kube, _, _ = make(project, "cluster")
+
+    assert not kube.target.choices.exists()
+    assert kube.write_component()
+
+    assert kube.target.choices.read_text(encoding="utf-8") == (
+        kube.target.manifests / "cluster.env.example").read_text(encoding="utf-8")
+    assert kube.target.component.read_text(encoding="utf-8") == kube_script.cluster_component({})
+
+
+def test_a_choice_that_is_not_valid_stops_before_the_cluster_changes(project):
+    write_cluster_secrets(project)
+    kube, cluster, script = make(project, "cluster", answers=["rediss://app@redis.example.com:6380/0"])
+    kube.target.choices.write_text("KUBE_MAX_WORKERS=0\n", encoding="utf-8")
+
+    assert kube.deploy(first=True) == 1
+
+    assert "deploy/kubernetes/cluster.env: KUBE_MAX_WORKERS" in script.text
+    assert not cluster.ran("docker") and not cluster.ran("apply")
+
+
+def test_the_registry_in_cluster_env_is_not_asked_for(project):
+    kube, _, script = make(project, "cluster")
+    kube.target.choices.write_text("KUBE_REGISTRY=ghcr.io/me/\n", encoding="utf-8")
+
+    assert kube.image_registry() == "ghcr.io/me"
+    assert not script.said
+
+
+def test_a_registry_set_by_hand_in_the_kustomization_moves_to_cluster_env(project):
+    kube, _, script = make(project, "cluster")
+    kube.target.kustomization.write_text(kube.target.text().replace("registry.example.com", "docker.io/me"),
+                                         encoding="utf-8")
+
+    assert kube.image_registry() == "docker.io/me"
+    assert not script.said
+    assert kube_script.EnvFile(kube.target.choices).get("KUBE_REGISTRY") == "docker.io/me"
+
+
+def test_config_writes_the_component_without_kubectl(project, monkeypatch):
+    kube, cluster, script = make(project, "cluster")
+    kube.target.choices.write_text("KUBE_MAX_WORKERS=8\n", encoding="utf-8")
+    monkeypatch.setattr(kube_script.shutil, "which", lambda name: None)
+    monkeypatch.setattr(kube_script, "CLUSTER", kube.target)
+
+    assert kube_script.main(["config"], kube) == 0
+
+    assert '\\"value\\": 8' in kube.target.component.read_text(encoding="utf-8")
+    assert not cluster.commands
+    assert "Wrote deploy/kubernetes/cluster/kustomization.yaml" in script.text
+    with pytest.raises(SystemExit):
+        kube_script.main(["local", "config"], kube)
+
+
+def test_the_test_cluster_has_no_cluster_env(project):
+    kube, _, _ = make(project, "local", context="docker-desktop")
+
+    assert kube.write_component()
+    assert not (kube.target.manifests / "cluster.env").exists()
+    assert "components" not in kube.target.text()
+
+
+def test_the_admin_page_is_off_until_cluster_env_turns_it_on(project):
+    write_cluster_secrets(project)
+    kube, _, _ = make(project, "cluster", answers=["rediss://app@redis.example.com:6380/0"])
+
+    assert kube.target.admin_web_mode() == "disabled" and not kube.target.admin_component()
+    assert kube.write_settings() and kube.write_component()
+    assert "piano-admin-web" not in kube.target.secret_files()
+    assert "components" not in json.loads(kube.target.component.read_text(encoding="utf-8").split("\n", 2)[2])
+    assert kube_script.EnvFile(kube.target.settings).get("ADMIN_WEB_MODE") is None
+
+
+def test_cluster_env_turns_on_the_admin_page_with_its_mode_and_secret(project):
+    write_cluster_secrets(project)
+    kube, _, script = make(project, "cluster", answers=["rediss://app@redis.example.com:6380/0"])
+    kube.target.choices.write_text("KUBE_ADMIN_WEB_MODE=read-only\n", encoding="utf-8")
+
+    assert kube.write_settings() and kube.write_component()
+
+    # No question: the mode is the one cluster.env names.
+    assert script.said == ["The managed Redis's URL, with the services' user (rediss://app@<host>:<port>/0): "]
+    assert kube_script.EnvFile(kube.target.settings).get("ADMIN_WEB_MODE") == "read-only"
+    assert "piano-admin-web" in kube.target.secret_files()
+    component = json.loads(kube.target.component.read_text(encoding="utf-8").split("\n", 2)[2])
+    assert component["components"] == ["../components/admin-web"]
+    assert (kube.target.component.parent / component["components"][0] / "kustomization.yaml").exists()
+
+
+def test_the_test_cluster_never_has_the_admin_page(project):
+    kube, _, _ = make(project, "local", context="docker-desktop")
+    (kube.target.manifests / "cluster.env").write_text("KUBE_ADMIN_WEB_MODE=read-write\n", encoding="utf-8")
+
+    assert not kube.target.admin_component()
 
 
 # --- A cluster set up by hand, as docs/kubernetes.md describes --------------------------------------

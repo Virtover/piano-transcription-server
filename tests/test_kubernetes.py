@@ -59,7 +59,9 @@ def test_every_file_is_listed_in_the_kustomization():
     assert set(kustomization("base")["resources"]) == base
     # The real cluster and the test cluster: each its namespace, the base, settings, images.
     assert kustomization()["resources"] == ["namespace.yaml", "base"]
-    assert kustomization("local")["resources"] == ["namespace.yaml", "../base", "services.yaml"]
+    # The cluster's choices from cluster.env, which scripts/kube.py writes there.
+    assert kustomization()["components"] == ["cluster"]
+    assert kustomization("local")["resources"] == ["namespace.yaml", "../base", "services.yaml", "network-policy.yaml"]
     for folder in ("", "local"):
         assert {image["name"] for image in kustomization(folder)["images"]} == set(IMAGES.values())
         assert kustomization(folder)["configMapGenerator"] == [{"name": "settings", "envs": ["settings.env"]}]
@@ -217,6 +219,21 @@ def test_the_workers_scale_on_metrics_the_api_reports():
         assert trigger["authenticationRef"]["name"] == "metrics"
 
 
+def scaled_object() -> dict:
+    [scaled] = [document for document in documents("base/worker.yaml") if document["kind"] == "ScaledObject"]
+    return scaled
+
+
+def test_the_workers_scale_on_the_workers_the_jobs_need():
+    needed, waiting = scaled_object()["spec"]["triggers"]
+
+    # The API divides by what each live worker takes: one replica per worker it reports.
+    assert needed["metadata"]["valueLocation"].startswith("piano_local_workers_needed{")
+    assert needed["metricType"] == "AverageValue" and needed["metadata"]["targetValue"] == "1"
+    assert waiting["metadata"]["valueLocation"].startswith("piano_queue_oldest_job_age_seconds{")
+    assert waiting["metricType"] == "Value"
+
+
 def test_the_metrics_token_is_the_secret_the_api_reads():
     [authentication] = [document for document in documents("base/worker.yaml") if document["kind"] == "TriggerAuthentication"]
     [reference] = authentication["spec"]["secretTargetRef"]
@@ -230,5 +247,117 @@ def test_the_gpu_worker_asks_for_a_gpu():
     assert COMPOSE["services"]["worker"]["gpus"] == "all"
 
 
-def test_the_kubernetes_settings_are_never_committed():
-    assert "/deploy/kubernetes/settings.env" in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+def test_the_kubernetes_settings_and_choices_are_never_committed():
+    ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    assert {"/deploy/kubernetes/settings.env", "/deploy/kubernetes/cluster.env", "/deploy/kubernetes/cluster/"} <= set(ignored)
+
+
+# --- Network rules and spreading -------------------------------------------------------------------
+
+def policies(*names: str) -> dict[str, dict]:
+    return {document["metadata"]["name"]: document for name in names for document in documents(name)
+            if document["kind"] == "NetworkPolicy"}
+
+
+def selected(policy: dict) -> set[str]:
+    """The app labels a policy's podSelector picks; {"*"} for every pod."""
+    selector = policy["spec"]["podSelector"]
+    if not selector:
+        return {"*"}
+    if "matchLabels" in selector:
+        return {selector["matchLabels"]["app"]}
+    [expression] = selector["matchExpressions"]
+    assert expression["key"] == "app" and expression["operator"] == "In"
+    return set(expression["values"])
+
+
+def test_nothing_reaches_a_pod_without_a_rule():
+    base = policies("base/network-policy.yaml")
+
+    assert base["deny-ingress"]["spec"] == {"podSelector": {}, "policyTypes": ["Ingress"]}
+    # Every other rule names who may come in; none opens a pod to all.
+    for name, policy in base.items():
+        for rule in policy["spec"].get("ingress", []):
+            assert rule.get("from"), name
+
+
+def test_only_the_tunnel_and_keda_reach_the_api():
+    api = policies("base/network-policy.yaml")["api"]
+    port = container("api")["ports"][0]["containerPort"]
+
+    assert selected(api) == {"api"}
+    tunnel, keda = api["spec"]["ingress"]
+    assert tunnel["from"] == [{"podSelector": {"matchLabels": {"app": "cloudflared"}}}]
+    assert keda["from"] == [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "keda"}}}]
+    assert tunnel["ports"] == keda["ports"] == [{"port": port, "protocol": "TCP"}]
+
+
+def test_only_the_tunnel_reaches_the_admin_page():
+    admin = policies("components/admin-web/admin.yaml")["admin"]
+
+    assert selected(admin) == {"admin"}
+    [rule] = admin["spec"]["ingress"]
+    assert rule["from"] == [{"podSelector": {"matchLabels": {"app": "cloudflared"}}}]
+    assert rule["ports"] == [{"port": container("admin")["ports"][0]["containerPort"], "protocol": "TCP"}]
+
+
+def test_pods_that_fetch_media_never_reach_link_local_addresses():
+    policy = policies("base/network-policy.yaml")["no-metadata"]
+    egress = policy["spec"]["egress"]
+    blocks = [peer["ipBlock"] for rule in egress for peer in rule.get("to", []) if "ipBlock" in peer]
+
+    assert selected(policy) == {"api", "worker", "remote-worker"}
+    assert policy["spec"]["policyTypes"] == ["Egress"]
+    assert {block["cidr"] for block in blocks} == {"0.0.0.0/0", "::/0"}
+    assert all(block["except"] for block in blocks)
+    assert "169.254.0.0/16" in next(block for block in blocks if block["cidr"] == "0.0.0.0/0")["except"]
+    # Names resolve, also through a node-local DNS cache on a link-local address.
+    [dns] = [rule for rule in egress if "to" not in rule]
+    assert {(port["port"], port["protocol"]) for port in dns["ports"]} == {(53, "UDP"), (53, "TCP")}
+
+
+def test_the_rules_name_pods_that_exist():
+    apps = {deployment(service)["spec"]["template"]["metadata"]["labels"]["app"] for service in DEPLOYED}
+    local = {document["spec"]["template"]["metadata"]["labels"]["app"]
+             for document in documents("local/services.yaml") if document["kind"] == "Deployment"}
+
+    for policy in policies("base/network-policy.yaml", "components/admin-web/admin.yaml").values():
+        assert selected(policy) <= apps | {"*"}
+    for policy in policies("local/network-policy.yaml").values():
+        assert selected(policy) <= apps | local
+
+
+def test_the_test_clusters_services_and_its_pc_get_in():
+    local = policies("local/network-policy.yaml")
+    ports = {port["port"] for rule in local["from-this-pc"]["spec"]["ingress"] for port in rule["ports"]}
+
+    assert selected(local["services"]) == {"redis", "postgres"}
+    assert local["services"]["spec"]["ingress"] == [{"from": [{"podSelector": {}}]}]
+    # The API's container port behind the LoadBalancer, and the storage's.
+    assert ports == {container("api")["ports"][0]["containerPort"], 8333}
+
+
+@pytest.mark.parametrize("service", ["api", "cloudflared"])
+def test_replicas_are_kept_on_different_machines(service):
+    pod = deployment(service)["spec"]["template"]
+    by_key = {constraint["topologyKey"]: constraint for constraint in pod["spec"]["topologySpreadConstraints"]}
+
+    host, zone = by_key["kubernetes.io/hostname"], by_key["topology.kubernetes.io/zone"]
+    assert host["whenUnsatisfiable"] == "DoNotSchedule" and host["maxSkew"] == 1
+    # A cluster without zones still schedules.
+    assert zone["whenUnsatisfiable"] == "ScheduleAnyway"
+    for constraint in by_key.values():
+        assert constraint["labelSelector"] == {"matchLabels": pod["metadata"]["labels"]}
+        # Tainted GPU nodes the pods cannot use, and the old replicas of a rollout, do not count.
+        assert constraint["nodeTaintsPolicy"] == "Honor"
+        assert constraint["matchLabelKeys"] == ["pod-template-hash"]
+
+
+def test_workers_prefer_different_machines_without_waiting_for_one():
+    pod = deployment("worker")["spec"]["template"]
+    [constraint] = pod["spec"]["topologySpreadConstraints"]
+
+    assert constraint["topologyKey"] == "kubernetes.io/hostname"
+    assert constraint["whenUnsatisfiable"] == "ScheduleAnyway"
+    assert constraint["labelSelector"] == {"matchLabels": pod["metadata"]["labels"]}

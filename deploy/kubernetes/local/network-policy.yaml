@@ -1,0 +1,36 @@
+# The test cluster's own rules, over those of ../base: its Redis, PostgreSQL,
+# and storage answer the pods here, and the API and storage this PC, through
+# their LoadBalancer Services. Docker Desktop's Kubernetes enforces none of
+# them, but they keep the base's rules from shutting these out elsewhere.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: services
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [redis, postgres]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: from-this-pc
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [api, seaweed]
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 8000
+          protocol: TCP
+        - port: 8333
+          protocol: TCP

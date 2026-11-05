@@ -7,6 +7,7 @@ has waited. Everything comes from Redis, so every API replica answers the
 same, except api_requests_in_flight, which is the replica's own.
 """
 
+import math
 import threading
 import time
 
@@ -72,10 +73,24 @@ def job_queues(redis: Redis, now: float | None = None) -> dict[str, dict]:
     return result
 
 
+def workers_needed(active: int, workers: list[dict]) -> int:
+    """Local workers that `active` jobs need, at the jobs the live workers
+    run at once on average: a worker on a larger GPU takes more of them, so
+    fewer are needed. Without a live worker yet, one for any job; its
+    heartbeat then tells how many jobs a worker takes."""
+    if active < 1:
+        return 0
+    capacities = [worker["capacity"] for worker in workers if worker["capacity"] > 0]
+    if not capacities:
+        return 1
+    return math.ceil(active * len(capacities) / sum(capacities))
+
+
 def collect(redis: Redis) -> list[tuple[str, str, dict[str, str], float]]:
     """(name, help, labels, value) for every sample."""
     samples = []
-    for backend, queue in job_queues(redis).items():
+    queues = job_queues(redis)
+    for backend, queue in queues.items():
         labels = {"queue": QUEUES[backend], "backend": backend}
         samples += [
             ("piano_queue_jobs", "Jobs waiting in the queue.", labels, queue["waiting"]),
@@ -87,11 +102,16 @@ def collect(redis: Redis) -> list[tuple[str, str, dict[str, str], float]]:
             ("piano_queue_active_jobs", "Jobs waiting or being transcribed.", labels,
              queue["waiting"] + queue["running"]),
         ]
-    capacity, _ = routing.local_capacity(redis)
+    workers = routing.local_workers(redis)
+    local = queues["local"]
     samples += [
-        ("piano_local_workers", "Local GPU or CPU workers with a live heartbeat.", {},
-         len(routing.local_workers(redis))),
-        ("piano_local_worker_capacity", "Jobs the local workers run at once, together.", {}, capacity),
+        ("piano_local_workers", "Local GPU or CPU workers with a live heartbeat.", {}, len(workers)),
+        ("piano_local_worker_capacity", "Jobs the local workers run at once, together.", {},
+         sum(worker["capacity"] for worker in workers)),
+        # What an autoscaler sets the worker count to, whatever each worker's GPU.
+        ("piano_local_workers_needed", "Local workers the waiting and running jobs need, at the live workers' "
+         "average capacity.", {"queue": QUEUES["local"], "backend": "local"},
+         workers_needed(local["waiting"] + local["running"], workers)),
     ]
     if routing.outsourcing_enabled():
         from app.outsource.capacity import remote_job_limit

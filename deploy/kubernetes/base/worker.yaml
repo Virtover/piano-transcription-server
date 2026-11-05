@@ -28,13 +28,18 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      # Put the workers on the GPU nodes: a label and taint of your cluster's.
-      # nodeSelector:
-      #   nvidia.com/gpu.present: "true"
-      # tolerations:
-      #   - key: nvidia.com/gpu
-      #     operator: Exists
-      #     effect: NoSchedule
+      # The GPU nodes' label and taint come from cluster.env, through the
+      # component scripts/kube.py writes; see docs/kubernetes.md.
+      # Workers on different machines where they can be, so that one machine
+      # going away takes as few as possible.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              app: worker
       containers:
         - name: worker
           image: piano-worker
@@ -109,16 +114,19 @@ spec:
             - type: Pods
               value: 1
               periodSeconds: 300
+  # minReplicaCount, maxReplicaCount, and the second trigger's targetValue
+  # come from cluster.env.
   triggers:
-    # Jobs waiting or running, per worker: targetValue is the jobs one worker
-    # runs at once, which its log shows at startup.
+    # The workers the jobs waiting or running need, which the API works out
+    # from the jobs each live worker runs at once: workers on larger GPUs
+    # take more, so a cluster of mixed GPUs needs no setting here.
     - type: metrics-api
       metricType: AverageValue
       metadata:
         url: http://api.piano-transcription.svc.cluster.local:8000/metrics
         format: prometheus
-        valueLocation: 'piano_queue_active_jobs{queue="default",backend="local"}'
-        targetValue: "2"
+        valueLocation: 'piano_local_workers_needed{queue="default",backend="local"}'
+        targetValue: "1"
         authMode: bearer
       authenticationRef:
         name: metrics

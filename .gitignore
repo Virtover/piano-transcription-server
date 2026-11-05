@@ -6,6 +6,8 @@
 /billing-data/
 __pycache__/
 /deploy/kubernetes/settings.env
+/deploy/kubernetes/cluster.env
+/deploy/kubernetes/cluster/
 /server.env
 /.env.before-split
 /deploy/kubernetes/local/settings.env

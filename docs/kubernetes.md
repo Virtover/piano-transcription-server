@@ -6,16 +6,18 @@ The Compose stack runs everything on one machine. For more than one machine, `de
 > **Not yet run on real infrastructure.** The Kubernetes deployment has been tested only on the test cluster on this PC (`python scripts/kube.py local up`) and by `tests/test_kubernetes.py`. A real cluster with managed Redis, PostgreSQL, and a bucket, GPU nodes, and KEDA has not served users yet. Docker Compose is the supported way to run the server; try a real cluster on a copy first, with its own bucket and database, before moving users to it.
 
 * **API replicas**, two or more behind the Service `api`, added on CPU. Any replica answers any request; one leads the periodic tasks.
-* **GPU workers**, one GPU each. KEDA adds them while jobs wait and removes them slowly afterwards; see [Metrics for scaling](architecture.md#-metrics-for-scaling).
+* **GPU workers**, one GPU each. KEDA adds them while jobs wait and removes them slowly afterwards, as many as the jobs need at what each worker reports it takes, so GPUs of different sizes can be mixed; see [Metrics for scaling](architecture.md#-metrics-for-scaling).
 * **One remote worker** for RunPod, **one cleanup**, **two `cloudflared` connectors**, and optionally the [admin web page](#-the-admin-web-page).
 * **No Redis, PostgreSQL, or data volume of its own.** Redis and PostgreSQL are managed services, and job files are kept in the object storage bucket.
 
-The manifests set `JOB_STORAGE=s3` and `DATABASE_BACKUPS=provider` themselves, because several machines share no folder: see [Job storage](architecture.md#job-storage) and [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). `tests/test_kubernetes.py` keeps them in step with `docker-compose.yml`: the same commands, wiring, secret paths, user, and hardening. No pod gets a token for the Kubernetes API, which none of them uses, so a worker that a malicious file takes over cannot act on the cluster.
+The manifests set `JOB_STORAGE=s3` and `DATABASE_BACKUPS=provider` themselves, because several machines share no folder: see [Job storage](architecture.md#job-storage) and [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). `tests/test_kubernetes.py` keeps them in step with `docker-compose.yml`: the same commands, wiring, secret paths, user, and hardening. No pod gets a token for the Kubernetes API, which none of them uses, so a worker that a malicious file takes over cannot act on the cluster. [Network rules](#-network-rules-and-spreading) let each pod be reached only by what uses it, and keep replicas on different machines.
 
-| Folder | What |
+| Path | What |
 | --- | --- |
 | `deploy/kubernetes/base` | What every Kubernetes deployment runs |
 | `deploy/kubernetes` | A real cluster: its namespace, `settings.env`, and images, on top of `base` |
+| `deploy/kubernetes/cluster.env` | The real cluster's own choices: the registry, the GPU nodes, the workers' scaling, the admin web page. See [Cluster choices](#-cluster-choices). Not committed |
+| `deploy/kubernetes/cluster` | The component `scripts/kube.py` writes from `cluster.env`. Not committed |
 | `deploy/kubernetes/local` | A test cluster on this PC: `base`, with Redis, PostgreSQL, and S3-compatible storage inside it |
 
 ## 🧰 `scripts/kube.py`
@@ -30,15 +32,31 @@ python scripts/kube.py admin jobs     # the administration commands, as scripts/
 python scripts/kube.py down
 ```
 
-`local` before a command acts on the test cluster instead of the real one. Also `check` (`check --online` inside the cluster), `logs <deployment>`, and `build <tag>` (the images alone).
+`local` before a command acts on the test cluster instead of the real one. Also `check` (`check --online` inside the cluster), `logs <deployment>`, `build <tag>` (the images alone), and `config`, which writes `deploy/kubernetes/cluster` from `cluster.env` without kubectl, for `kubectl apply -k` by hand.
 
 `restart`, `stop`, `start`, `restore`, and `cancel` are the commands of `scripts/server.py`, with the same options, and `admin` runs those of `scripts/admin.py`: the same code, which reaches the cluster with kubectl instead of Docker Compose. See [Restarts and administration](#-restarts-and-administration).
 
-* **`up` and `update` do every step**: `settings.env` from `server.env`; the Secrets, from the files in `secrets`, created or updated; the images, built and, for a real cluster, pushed under a new tag; `kubectl apply`, waiting for every Deployment; and `check --online` in the cluster. They ask once, naming the kubectl context, before they change the cluster or push an image.
+* **`up` and `update` do every step**: `settings.env` from `server.env`; the component from `cluster.env`, which the first `up` makes from `cluster.env.example`; the Secrets, from the files in `secrets`, created or updated; the images, built and, for a real cluster, pushed under a new tag; `kubectl apply`, waiting for every Deployment; and `check --online` in the cluster. They ask once, naming the kubectl context, before they change the cluster or push an image.
 * **Secrets are never shown.** Each is made from its files with `kubectl --dry-run` and applied from memory. Files only a real cluster uses, such as the managed database's URL, are in `secrets/kubernetes`, so the Compose stack on this machine never reads them; `up` asks for a missing one without showing it, and generates `metrics_token`.
 * **A cluster set up by hand** works with it too. A key a Secret already has in the cluster needs no file here: `up`, `update`, and `restart` keep it as it is, and replace only the keys they have a file for. To remove a key, use `kubectl edit secret`. `images` in `kustomization.yaml` may be written in any order, also with a `digest`, which `update` replaces with the new tag.
 * **`down`** deletes the namespace, with every pod and Secret. For a real cluster you type its name; the managed Redis, PostgreSQL, and bucket are not touched.
 * **`status`** shows every Deployment's ready pods, KEDA's workers, the queue and its oldest wait, the leading API, the Secrets by name, and every problem the API reports, including features Kubernetes needs that are off. `python scripts/setup.py status` shows, for each feature, whether Kubernetes needs it.
+
+## 🎛️ Cluster choices
+
+What differs from one cluster to another, and is not the server's, is in `deploy/kubernetes/cluster.env`; the server's settings stay in `server.env`, the same everywhere. The first `python scripts/kube.py up` makes it from `cluster.env.example`, and `up`, `update`, `start`, `restart`, and `config` write the component in `deploy/kubernetes/cluster` from it, so no manifest is edited by hand. A choice that is not valid stops them before anything is built or changed, naming it. An unset choice keeps the value below, which is `base`'s.
+
+| Choice | Unset | What |
+| --- | --- | --- |
+| `KUBE_REGISTRY` | asked for | Where the images are pushed and the cluster pulls them from, such as `docker.io/<user>` or `ghcr.io/<user>`. Asked for once and written here; a registry already set by hand in `kustomization.yaml` moves here. |
+| `KUBE_GPU_NODE_LABEL` | none | The GPU nodes' label as `name=value`, such as `nvidia.com/gpu.present=true`: the GPU workers run only there. Unset, on any node that offers `nvidia.com/gpu`. |
+| `KUBE_GPU_NODE_TAINT` | none | The key of the taint that keeps other pods off the GPU nodes, such as `nvidia.com/gpu`, which the GPU workers tolerate with any effect. |
+| `KUBE_MIN_WORKERS`, `KUBE_MAX_WORKERS` | `1`, `4` | The fewest and most GPU workers KEDA runs, one GPU each. The most is what you are willing to pay for, or the GPUs the cluster has; workers beyond the free GPUs wait unscheduled and take no jobs. |
+| `KUBE_MAX_WAIT` | `60s` | One worker more while the oldest job has waited longer than this. |
+| `KUBE_KEDA_NAMESPACE` | `keda` | The namespace KEDA runs in, whose pods alone may read `/metrics` besides the tunnel. |
+| `KUBE_ADMIN_WEB_MODE` | `disabled` | The [admin web page](#-the-admin-web-page): `disabled`, `read-only`, or `read-write`. It deploys the page and sets `ADMIN_WEB_MODE` in `settings.env`. |
+
+The tag of the images changes with every build, so `scripts/kube.py` writes it, with the registry, under `images` in `kustomization.yaml`.
 
 ## 🧪 A test cluster on this PC
 
@@ -48,13 +66,15 @@ python scripts/kube.py down
 * **The images built here**, which Docker Desktop's Kubernetes uses without a registry when it is set up with kubeadm; with kind, its node has images of its own and the pods cannot start. They keep the tag `local`: a rebuild replaces the last one, and `local up` and `update` restart the pods to use it.
 * **Two API replicas**, on `http://localhost:8080`, beside a Compose stack on `8000`.
 * **CPU workers, added by KEDA** as the queue grows, one job each and up to 3, as GPU workers on a real cluster; `local up` installs KEDA when it is missing.
+* **Its own choices** in `local/kustomization.yaml`, without `cluster.env` or the admin web page.
 * **No tunnel, billing, outsourcing, or error reports:** `settings.env` is `server.env` with those off, and the services above. Storage is at `host.docker.internal:8333`, so signed links to results work from the pods and from a browser.
 
 `python scripts/kube.py local down` removes it, with its database; KEDA stays installed. To see the scaling, submit a few uploads and watch `python scripts/kube.py local status`.
 
 ## 📋 What you need
 
-* A Kubernetes cluster with GPU nodes that offer `nvidia.com/gpu`, through NVIDIA's device plugin or GPU operator.
+* A Kubernetes cluster, version 1.27 or newer for the spreading rules, with GPU nodes that offer `nvidia.com/gpu`, through NVIDIA's device plugin or GPU operator.
+* A network plugin that enforces NetworkPolicies, such as Calico or Cilium, for the [network rules](#-network-rules-and-spreading). Without one the server runs, without them.
 * KEDA, with a `metrics-api` scaler that reads the Prometheus text format.
 * A container registry the cluster can pull from.
 * A managed Redis, a managed PostgreSQL, and the object storage bucket. What each must provide comes from the server: put `REDIS_URL` and the database URL in place as described below, then run
@@ -78,7 +98,7 @@ python scripts/kube.py down
    docker push <registry>/piano-transcription-worker:<tag>
    ```
 
-   Then put the names and tag under `images` in `deploy/kubernetes/kustomization.yaml`.
+   Then put the names and tag under `images` in `deploy/kubernetes/kustomization.yaml`, and the registry in `KUBE_REGISTRY` in `deploy/kubernetes/cluster.env` (copy it from `cluster.env.example`), so that `scripts/kube.py` pushes there later.
 
 2. **Settings.** Copy `server.env` to `deploy/kubernetes/settings.env`, which git ignores; it holds the server's settings and nothing of Docker Compose's. Add the managed Redis's address, with the services' user:
 
@@ -106,7 +126,11 @@ python scripts/kube.py down
 
    `metrics_token` is needed: KEDA reads the queue with it. Create one with the commands in [Secrets](configuration.md#-secrets).
 
-5. **GPU nodes.** In `deploy/kubernetes/base/worker.yaml`, uncomment `nodeSelector` and `tolerations` and give them your cluster's GPU node label and taint. Set the first trigger's `targetValue` to the jobs one worker runs at once, which the worker's log shows at startup (`kubectl -n piano-transcription logs deploy/worker`), and `maxReplicaCount` to the most GPUs you want to pay for.
+5. **The cluster's choices.** In `deploy/kubernetes/cluster.env`, set `KUBE_GPU_NODE_LABEL` and `KUBE_GPU_NODE_TAINT` to your cluster's GPU node label and taint, `KUBE_MAX_WORKERS` to the most GPUs you want to pay for, and `KUBE_KEDA_NAMESPACE` if KEDA runs elsewhere; see [Cluster choices](#-cluster-choices). The jobs one worker runs at once need no setting: each worker reports them. Then write the component:
+
+   ```shell
+   python scripts/kube.py config
+   ```
 
 6. **Apply** and wait for the API:
 
@@ -131,7 +155,17 @@ Build and push the new version under a new tag, change the tag in `kustomization
 * An API replica that stops hands the lead to another at once; the new replicas join without recovering anything.
 * A worker that stops takes no new job and gets 15 minutes to finish the ones it runs (`terminationGracePeriodSeconds` in `base/worker.yaml`). A job still running then fails and is refunded.
 
-A rolling update interrupts nothing, so it needs no notice. To change settings, edit `settings.env` and apply: the settings' ConfigMap gets a new name, which restarts the pods that use it.
+A rolling update interrupts nothing, so it needs no notice. To change settings, edit `settings.env` and apply: the settings' ConfigMap gets a new name, which restarts the pods that use it. To change a choice, edit `cluster.env` and run `python scripts/kube.py update`, or `config` before applying by hand.
+
+## 🛡️ Network rules and spreading
+
+`base/network-policy.yaml` lets each pod be reached only by what uses it. The rules need a network plugin that enforces them; elsewhere they change nothing.
+
+* **Nothing reaches a pod without a rule.** The API answers `cloudflared` and KEDA's namespace (`KUBE_KEDA_NAMESPACE`), on port 8000; the admin web page answers only `cloudflared`, on 8100. A Prometheus of your own that scrapes `/metrics` needs a rule like KEDA's.
+* **The API and the workers**, which fetch video links and decode untrusted media, reach the internet, DNS, and this namespace, but not link-local addresses, where clouds answer with the machine's credentials. `app/url_safety.py` refuses those addresses too; this rule still holds if a decoder is taken over.
+* **The test cluster** adds rules of its own for its Redis, PostgreSQL, and storage, and for this PC; Docker Desktop's Kubernetes enforces none of them.
+
+Replicas of the API and `cloudflared` are kept on different machines (`topologySpreadConstraints`), so one machine going away leaves the others serving, and spread across zones where the cluster has them. A cluster with one node still runs them both there; nodes whose taint keeps them off do not count. GPU workers prefer different machines, but never wait for one.
 
 ## 🛠️ Restarts and administration
 
@@ -156,7 +190,7 @@ They differ from Compose where a cluster does:
 
 ## 🔐 The admin web page
 
-Uncomment `components` in `kustomization.yaml`, and add `ADMIN_WEB_MODE=read-only` (or `read-write`) to `settings.env`: with Compose it is in `.env`, which a copy of `server.env` does not have. The page signs in to Redis and PostgreSQL with roles of its own, as in Compose: create at the providers the Redis user `admin-read-only` (or `admin-read-write`) with the rules of `redis/users.acl`, and the PostgreSQL role that the API creates for `ADMIN_WEB_MODE`. Then their Secret:
+Set `KUBE_ADMIN_WEB_MODE=read-only` (or `read-write`) in `cluster.env`: it deploys `components/admin-web` and sets `ADMIN_WEB_MODE` in `settings.env`, which with Compose is in `.env`, so a copy of `server.env` does not have it. The page signs in to Redis and PostgreSQL with roles of its own, as in Compose: create at the providers the Redis user `admin-read-only` (or `admin-read-write`) with the rules of `redis/users.acl`, and the PostgreSQL role that the API creates for `ADMIN_WEB_MODE`. Then their Secret:
 
 ```shell
 kubectl -n piano-transcription create secret generic piano-admin-web --from-literal=redis_url=rediss://admin-read-only@<host>:<port>/0 --from-file=redis_password=<file with its Redis password> --from-file=database_url=<file with its database URL>

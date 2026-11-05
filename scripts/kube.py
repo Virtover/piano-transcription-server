@@ -10,8 +10,13 @@
 
 `local` before a command acts on the test cluster (deploy/kubernetes/local)
 instead of the real one (deploy/kubernetes). Also: check (check --online in
-the cluster), logs <deployment>, and build <tag> (the images alone; the test
-cluster's are always tagged local).
+the cluster), logs <deployment>, build <tag> (the images alone; the test
+cluster's are always tagged local), and config (the component in
+deploy/kubernetes/cluster from cluster.env, for kubectl apply -k by hand).
+
+The real cluster's own choices, such as the registry, the GPU nodes, and how
+far the workers scale, are in deploy/kubernetes/cluster.env, made from
+cluster.env.example; the server's settings stay in server.env.
 
 restart, stop, start, restore, and cancel are scripts/server.py's commands,
 and admin runs scripts/admin.py's, both through KubeStack: what they do is
@@ -69,6 +74,27 @@ LOCAL_CONTEXTS = ("docker-desktop",)
 INFRASTRUCTURE = ("redis", "postgres", "seaweed")
 # KEDA keeps a ScaledObject's target at this many replicas while it is set.
 KEDA_PAUSED = "autoscaling.keda.sh/paused-replicas"
+
+# The real cluster's choices in cluster.env, and each one's value when it is
+# unset: those of base, which the component in ./cluster changes.
+CLUSTER_CHOICES = {
+    "KUBE_REGISTRY": "",
+    "KUBE_GPU_NODE_LABEL": "",
+    "KUBE_GPU_NODE_TAINT": "",
+    "KUBE_MIN_WORKERS": "1",
+    "KUBE_MAX_WORKERS": "4",
+    "KUBE_MAX_WAIT": "60s",
+    "KUBE_KEDA_NAMESPACE": "keda",
+    "KUBE_ADMIN_WEB_MODE": "disabled",
+}
+# KUBE_ADMIN_WEB_MODE's values, as ADMIN_WEB_MODE's, which it sets in settings.env.
+ADMIN_WEB_MODES = ("disabled", "read-only", "read-write")
+# A label's or taint's key, with an optional prefix such as nvidia.com/, and a label's value.
+LABEL_KEY = re.compile(r"(?:[a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?")
+LABEL_VALUE = re.compile(r"(?:[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?")
+NAMESPACE = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
+COMPONENT_HEADER = ("# Written by scripts/kube.py from cluster.env on every up, update, start, restart,\n"
+                    "# and config: change cluster.env instead. See docs/kubernetes.md.\n")
 
 # The test cluster's settings over server.env's: its own services, no
 # outsourcing, no billing, and no reports to the real error monitor.
@@ -188,6 +214,16 @@ class Target:
     def settings(self) -> Path:
         return self.manifests / "settings.env"
 
+    @property
+    def choices(self) -> Path:
+        """cluster.env, the real cluster's own choices."""
+        return self.manifests / "cluster.env"
+
+    @property
+    def component(self) -> Path:
+        """What scripts/kube.py writes from cluster.env."""
+        return self.manifests / "cluster" / "kustomization.yaml"
+
     def text(self) -> str:
         return self.kustomization.read_text(encoding="utf-8")
 
@@ -195,8 +231,15 @@ class Target:
         match = re.search(r"^namespace:\s*(\S+)", self.text(), re.M)
         return match.group(1) if match else "default"
 
+    def admin_web_mode(self) -> str:
+        """KUBE_ADMIN_WEB_MODE in cluster.env: disabled without the file, and
+        always on the test cluster."""
+        if self.local or not self.choices.exists():
+            return "disabled"
+        return (EnvFile(self.choices).get("KUBE_ADMIN_WEB_MODE") or "disabled").strip()
+
     def admin_component(self) -> bool:
-        return not self.local and bool(re.search(r"^components:\s*\n\s+- components/admin-web", self.text(), re.M))
+        return self.admin_web_mode() in ("read-only", "read-write")
 
     def secret_files(self) -> dict[str, list[SecretFile]]:
         if self.local:
@@ -286,6 +329,72 @@ def image_repository(name: str, new_name: str) -> str:
     """The image an entry names; without newName, the one its Dockerfile is
     built as, such as piano-transcription-api for piano-api."""
     return new_name or name.replace("piano-", "piano-transcription-", 1)
+
+
+def cluster_component(choices: dict[str, str | None]) -> str:
+    """The component in ./cluster from cluster.env's choices: base's GPU
+    workers kept to the GPU nodes, their scaling, and the namespace whose KEDA
+    may read /metrics. ValueError says which choice is not valid."""
+    value = {name: (choices.get(name) or default).strip() for name, default in CLUSTER_CHOICES.items()}
+
+    def count(name: str, least: int) -> int:
+        try:
+            number = int(value[name])
+        except ValueError:
+            number = least - 1
+        if number < least:
+            raise ValueError(f"{name} must be a whole number, {least} or more, not {value[name]!r}")
+        return number
+
+    fewest, most = count("KUBE_MIN_WORKERS", 0), count("KUBE_MAX_WORKERS", 1)
+    if fewest > most:
+        raise ValueError(f"KUBE_MIN_WORKERS ({fewest}) is more than KUBE_MAX_WORKERS ({most})")
+    try:
+        wait = SERVER_SCRIPT.parse_duration(value["KUBE_MAX_WAIT"])
+    except argparse.ArgumentTypeError as error:
+        raise ValueError(f"KUBE_MAX_WAIT: {error}") from None
+    if wait < 1:
+        raise ValueError("KUBE_MAX_WAIT must be 1s or more")
+    namespace = value["KUBE_KEDA_NAMESPACE"]
+    if not NAMESPACE.fullmatch(namespace):
+        raise ValueError(f"KUBE_KEDA_NAMESPACE is not a namespace's name: {namespace!r}")
+    if value["KUBE_ADMIN_WEB_MODE"] not in ADMIN_WEB_MODES:
+        raise ValueError(f"KUBE_ADMIN_WEB_MODE must be one of {', '.join(ADMIN_WEB_MODES)}, "
+                         f"not {value['KUBE_ADMIN_WEB_MODE']!r}")
+
+    placement = []
+    if label := value["KUBE_GPU_NODE_LABEL"]:
+        key, equals, label_value = label.partition("=")
+        if not equals or not LABEL_KEY.fullmatch(key) or not LABEL_VALUE.fullmatch(label_value):
+            raise ValueError("KUBE_GPU_NODE_LABEL must be name=value, such as nvidia.com/gpu.present=true, "
+                             f"not {label!r}")
+        placement.append(("nodeSelector", {key: label_value}))
+    if taint := value["KUBE_GPU_NODE_TAINT"]:
+        if not LABEL_KEY.fullmatch(taint):
+            raise ValueError(f"KUBE_GPU_NODE_TAINT must be a taint's key, such as nvidia.com/gpu, not {taint!r}")
+        # Any effect of that key.
+        placement.append(("tolerations", [{"key": taint, "operator": "Exists"}]))
+
+    patches = [
+        {"target": {"kind": "ScaledObject", "name": "worker"}, "patch": json.dumps([
+            {"op": "replace", "path": "/spec/minReplicaCount", "value": fewest},
+            {"op": "replace", "path": "/spec/maxReplicaCount", "value": most},
+            {"op": "replace", "path": "/spec/triggers/1/metadata/targetValue", "value": str(round(wait))},
+        ])},
+        {"target": {"kind": "NetworkPolicy", "name": "api"}, "patch": json.dumps([
+            {"op": "replace", "path": "/spec/ingress/1/from/0/namespaceSelector/matchLabels/"
+                                      "kubernetes.io~1metadata.name", "value": namespace},
+        ])},
+    ]
+    if placement:
+        patches.append({"target": {"kind": "Deployment", "name": "worker"}, "patch": json.dumps([
+            {"op": "add", "path": f"/spec/template/spec/{field}", "value": setting} for field, setting in placement
+        ])})
+    # JSON is YAML too, and needs no YAML library on this machine.
+    component = {"apiVersion": "kustomize.config.k8s.io/v1alpha1", "kind": "Component", "patches": patches}
+    if value["KUBE_ADMIN_WEB_MODE"] != "disabled":
+        component["components"] = ["../components/admin-web"]
+    return COMPONENT_HEADER + json.dumps(component, indent=2) + "\n"
 
 
 def redis_users(password: str, users_acl: Path) -> str:
@@ -395,12 +504,34 @@ class Kube:
                 url = self.console.ask("The managed Redis's URL, with the services' user "
                                        "(rediss://app@<host>:<port>/0): ").strip()
             settings.set("REDIS_URL", url)
-            if self.target.admin_component() and not settings.get("ADMIN_WEB_MODE"):
-                mode = ""
-                while mode not in ("read-only", "read-write"):
-                    mode = self.console.ask("The admin web page's mode, read-only or read-write: ").strip()
-                settings.set("ADMIN_WEB_MODE", mode)
+            # With Compose it is in .env, which a copy of server.env lacks.
+            if self.target.admin_component():
+                settings.set("ADMIN_WEB_MODE", self.target.admin_web_mode())
+            else:
+                settings.unset("ADMIN_WEB_MODE")
         settings.save()
+        return True
+
+    def cluster_choices(self) -> EnvFile:
+        """cluster.env, made from its example on the first use."""
+        path = self.target.choices
+        if not path.exists():
+            shutil.copyfile(self.target.manifests / "cluster.env.example", path)
+        return EnvFile(path)
+
+    def write_component(self) -> bool:
+        """The component in ./cluster, from cluster.env. The test cluster's
+        choices are in its own kustomization instead."""
+        if self.target.local:
+            return True
+        choices = self.cluster_choices()
+        try:
+            text = cluster_component({name: choices.get(name) for name in CLUSTER_CHOICES})
+        except ValueError as error:
+            return not self.fail(f"{self.target.choices.relative_to(self.root).as_posix()}: {error}")
+        self.target.component.parent.mkdir(exist_ok=True)
+        if not self.target.component.exists() or self.target.component.read_text(encoding="utf-8") != text:
+            self.target.component.write_text(text, encoding="utf-8")
         return True
 
     def write_local_secret_files(self) -> None:
@@ -494,12 +625,19 @@ class Kube:
 
     def image_registry(self) -> str | None:
         """Where the images go: None for the test cluster, which uses this
-        machine's; asked for when the kustomization names none."""
-        registry = self.target.registry()
-        if not self.target.local and (registry is None or "example.com" in registry):
+        machine's. KUBE_REGISTRY in cluster.env, else the kustomization's, as
+        set by hand; asked for when neither names one, and kept in cluster.env."""
+        if self.target.local:
+            return None
+        choices = self.cluster_choices()
+        registry = (choices.get("KUBE_REGISTRY") or "").strip().rstrip("/") or self.target.registry()
+        if registry is None or "example.com" in registry:
             registry = self.console.ask("Registry to push the images to, such as docker.io/<user>: ").strip().rstrip("/")
             if not registry:
                 raise RuntimeError("No registry: the cluster cannot pull the images.")
+        if choices.get("KUBE_REGISTRY") != registry:
+            choices.set("KUBE_REGISTRY", registry)
+            choices.save()
         return registry
 
     def build_images(self, tag: str, registry: str | None = None) -> bool:
@@ -535,6 +673,8 @@ class Kube:
         """Apply the manifests, which also brings back what stop scaled
         down, and wait for every deployment; with restart, replace the
         server's pods even where nothing changed."""
+        if not self.write_component():
+            return False
         if self.run(["kubectl", "apply", "-k", str(self.target.manifests)], capture=False).returncode != 0:
             return not self.fail("kubectl apply failed.")
         # Fails harmlessly where KEDA or the annotation is missing.
@@ -596,7 +736,7 @@ class Kube:
         if not self.target.local:
             self.console.wrap("Before this: the managed Redis, PostgreSQL, and bucket that python -m app.config "
                               "requirements lists, the GPU nodes, and KEDA; see docs/kubernetes.md.", "  ", "dim")
-        if not self.write_settings() or not self.ensure_secret_files():
+        if not self.write_settings() or not self.write_component() or not self.ensure_secret_files():
             return 1
         pushes = "" if self.target.local else ", push them"
         keda = self.target.local and not self.keda_installed()
@@ -782,7 +922,8 @@ class KubeStack(SERVER_SCRIPT.Stack):
         missing, and where the images go, before anything is announced."""
         if not self.kube.right_context():
             raise RuntimeError("nothing was changed")
-        if not self.kube.write_settings() or not self.kube.ensure_secret_files():
+        if (not self.kube.write_settings() or not self.kube.write_component()
+                or not self.kube.ensure_secret_files()):
             raise RuntimeError("nothing was changed")
         self.registry = self.kube.image_registry()
         return []
@@ -807,7 +948,7 @@ class KubeStack(SERVER_SCRIPT.Stack):
         return f"{self.script} logs {service}"
 
 
-COMMANDS = ("up", "update", "down", "status", "check", "logs", "build", "admin")
+COMMANDS = ("up", "update", "down", "status", "check", "logs", "build", "config", "admin")
 # scripts/server.py's commands, run on the cluster; kube.py's status also
 # shows the notice that server.py's status prints.
 SERVER_COMMANDS = tuple(action for action in SERVER_SCRIPT.actions() if action not in COMMANDS)
@@ -836,7 +977,8 @@ def main(arguments: list[str], kube: Kube | None = None) -> int:
         command, extra = words[0], words[1:]
 
     if kube is None:
-        if shutil.which("kubectl") is None:
+        # config only writes files here.
+        if shutil.which("kubectl") is None and command != "config":
             print("kubectl is needed, signed in to the cluster.", file=sys.stderr)
             return 1
         kube = Kube(console=Console(style=Style.for_terminal()))
@@ -850,6 +992,14 @@ def main(arguments: list[str], kube: Kube | None = None) -> int:
                     f"{command.capitalize()} the server in {kube.target.name}, context {context}?", default=False):
                 return 1
         return SERVER_SCRIPT.main([command, *extra], kube.stack)
+    if command == "config":
+        if local:
+            parser.error("config is the real cluster's: the test cluster's choices are in its kustomization")
+        if not kube.write_component():
+            return 1
+        kube.console.say(f"Wrote {kube.target.component.relative_to(kube.root).as_posix()} from "
+                         f"{kube.target.choices.relative_to(kube.root).as_posix()}.")
+        return 0
     if command == "build":
         if not extra:
             parser.error("build needs a tag for the images")
