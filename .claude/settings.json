@@ -1,5 +1,17 @@
 {
   "permissions": {
-    "deny": ["Read(./secrets/**)", "Edit(./secrets/**)"]
+    "allow": [
+      "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
+      "Bash(./.venv/Scripts/python -m pytest:*)", "Bash(.venv/Scripts/python -m pytest:*)", "Bash(.venv/bin/python -m pytest:*)",
+      "Bash(./.venv/Scripts/python -m app.config describe:*)", "Bash(./.venv/Scripts/python -m app.config requirements:*)", "Bash(./.venv/Scripts/python -m app.config features:*)",
+      "Bash(.venv/bin/python -m app.config describe:*)", "Bash(.venv/bin/python -m app.config requirements:*)", "Bash(.venv/bin/python -m app.config features:*)",
+      "PowerShell(git status:*)", "PowerShell(git diff:*)", "PowerShell(git log:*)",
+      "PowerShell(.\\.venv\\Scripts\\python -m pytest:*)",
+      "PowerShell(.\\.venv\\Scripts\\python -m app.config describe:*)", "PowerShell(.\\.venv\\Scripts\\python -m app.config requirements:*)", "PowerShell(.\\.venv\\Scripts\\python -m app.config features:*)"
+    ],
+    "deny": [
+      "Read(./secrets/**)", "Edit(./secrets/**)",
+      "Read(./app/admin_web/static/logo.png)", "Read(./docs/images/**)"
+    ]
   }
 }

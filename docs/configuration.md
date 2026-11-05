@@ -36,7 +36,7 @@ A basic server needs no setting: `python scripts/server.py start` runs it with e
 | Error reports | `ERROR_REPORT_URL` | | `error_report_token` | [Error reports](#error-reports) |
 | Metrics for scaling | the secret file `metrics_token` | | `metrics_token` | [Metrics for scaling](architecture.md#-metrics-for-scaling) |
 
-`python scripts/setup.py` sets features up and turns them off; see [Setting up features](setup.md#-setting-up-optional-features). `python -m app.config features --json` lists them with their state and what is missing, for scripts and agents. The table is `FEATURES` in `app/features.py`, which validation reads, and a test keeps this list and the blocks of `.env.example` in step with it.
+`python scripts/setup.py` sets features up and turns them off; see [Setting up features](setup.md#-setting-up-optional-features). `python -m app.config features --json` lists them with their state and what is missing, for scripts and agents; `--feature outsourcing` lists only that one, by its key. The table is `FEATURES` in `app/features.py`, which validation reads, and a test keeps this list and the blocks of `.env.example` in step with it.
 
 ### ✅ Checking the configuration
 
@@ -68,7 +68,15 @@ Each result is `OK`, `WARN`, `FAIL`, or `SKIP`, and every warning or failure nam
 docker compose run --rm api python -m app.config requirements
 ```
 
-Prints what the external services must provide for outsourcing, sign-in, and billing: each requirement, its value, and the reason. Values are calculated from the configuration and the code, so they cannot go out of date. For example, the GPU endpoint's minimum execution timeout follows `OUTSOURCE_TIMEOUT`, and its requests per worker follow `WORKER_MODEL_MEMORY_GIB` and `WORKER_MEMORY_PER_JOB_GIB`. Requirements are stated as what they must achieve, not as a provider's setting names, so they stay valid when a provider changes its console. Those marked `[checked]` are verified by `check --online`. Add `--json` for scripts and AI agents.
+Prints what the external services must provide for outsourcing, sign-in, and billing: each requirement, its value, and the reason. Values are calculated from the configuration and the code, so they cannot go out of date. For example, the GPU endpoint's minimum execution timeout follows `OUTSOURCE_TIMEOUT`, and its requests per worker follow `WORKER_MODEL_MEMORY_GIB` and `WORKER_MEMORY_PER_JOB_GIB`. Requirements are stated as what they must achieve, not as a provider's setting names, so they stay valid when a provider changes its console. Those marked `[checked]` are verified by `check --online`. Add `--json` for scripts and AI agents. `--section "GPU endpoint"` prints only that section, and `--feature outsourcing` prints only the sections of that feature; both repeat and combine, and they match without case.
+
+### 🔎 One setting
+
+```shell
+python -m app.config describe OUTSOURCE_TIMEOUT runpod_api_key
+```
+
+Prints what a setting or secret is without reading the code and this page: the file it belongs in (`server.env`, `.env`, or `secrets/`), its value in the current configuration (for a secret only whether the file exists), its default and description from this page with the line they are on, and the features that use it. Old names say what replaced them, and a misspelled name gets suggestions. Add `--json` for scripts and AI agents. The images do not contain `docs/`, so run it on the host, with the Python of the test environment.
 
 ### ⏱️ Value formats
 

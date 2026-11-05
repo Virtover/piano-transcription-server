@@ -326,9 +326,14 @@ def test_online_check_refuses_a_redirect(tmp_path):
 def test_errors_still_reach_the_containers_log(monkeypatch, capsys, default_settings):
     import logging
 
-    root = logging.getLogger()
-    saved = list(root.handlers)
+    import functools
+
+    root, uvicorn = logging.getLogger(), logging.getLogger("uvicorn")
+    saved, saved_uvicorn = list(root.handlers), list(uvicorn.handlers)
     monkeypatch.setattr(error_report, "_reporter", None)
+    # Nothing sent from a thread that outlives the test, and no crash watch.
+    monkeypatch.setattr(error_report, "Reporter", functools.partial(error_report.Reporter, send=lambda *_: 200, background=False))
+    monkeypatch.setattr(error_report, "watch_crashes", lambda *_: False)
     default_settings.error_report.url = "https://monitor.example/errors"
     default_settings.secrets.error_report_token = "token"
     root.handlers = []
@@ -337,7 +342,7 @@ def test_errors_still_reach_the_containers_log(monkeypatch, capsys, default_sett
         logging.getLogger("app.main").error("Off-site backup copying is failing")
         assert "Off-site backup copying is failing" in capsys.readouterr().err
     finally:
-        root.handlers = saved
+        root.handlers, uvicorn.handlers = saved, saved_uvicorn
 
 
 # --- Crash watch ----------------------------------------------------------------

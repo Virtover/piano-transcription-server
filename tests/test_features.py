@@ -234,6 +234,26 @@ def test_features_command(tmp_path):
     assert listed["job_storage"]["enabled"] is True
 
 
+def features_cli(tmp_path, *arguments):
+    (tmp_path / ".env").write_text("JOB_STORAGE=s3\n", encoding="utf-8")
+    return app_config.main(["features", *arguments, "--env-file", str(tmp_path / ".env"), "--secrets-dir", str(tmp_path)])
+
+
+def test_features_command_prints_only_the_features_asked_for(tmp_path, capsys):
+    assert features_cli(tmp_path, "--json", "--feature", "Job_Storage", "--feature", "tunnel") == 0
+    assert [feature["key"] for feature in json.loads(capsys.readouterr().out)] == ["tunnel", "job_storage"]
+
+    assert features_cli(tmp_path, "--feature", "job_storage") == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"{BY_KEY['job_storage'].title} (job_storage): on"
+    assert any("STORAGE_ENDPOINT" in line for line in lines[1:])
+
+
+def test_features_command_refuses_an_unknown_feature(tmp_path, capsys):
+    assert features_cli(tmp_path, "--feature", "runpod") == 2
+    assert "unknown feature 'runpod'; one of: password" in capsys.readouterr().err
+
+
 # --- server.env.example and the docs follow the table -----------------------------------------
 
 def test_env_example_has_a_block_for_every_feature():

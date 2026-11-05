@@ -30,7 +30,7 @@ The commands below expect the environment to be active.
 python -m pytest -q
 ```
 
-Run one file or one test while working on a feature:
+`pytest.ini` keeps the output short: short tracebacks, and no warnings for known deprecations. Run one file or one test while working on a feature:
 
 ```shell
 python -m pytest -q tests/test_account_api.py
@@ -126,7 +126,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_redis_users.py` | Redis users: the rules in `redis/users.acl`, which services see which password, that every Redis client signs in, and the `check --online` probe. The rules themselves were checked against a real Redis, because fakeredis does not enforce them. |
 | `test_server_script.py` | `scripts/server.py` with a fake stack and clock: announce, build during the countdown, cancel on build failure or Ctrl+C, drain within the grace period, restart, stop every profile, start, and clear; and moving each line of `.env` and `server.env` to its file. `scripts/stacks.py`: the docker commands, every request built on `exec` and `one_off`, and no other script building a `docker compose` command. |
 | `test_cloudflare_tunnel.py` | The optional Cloudflare Tunnel: `COMPOSE_PROFILES`, the token check, warnings for an open server, the `check --online` results and hints, the requirements, and the `cloudflared` service in `docker-compose.yml`. |
-| `test_requirements.py` | `requirements`: values calculated from the configuration, the RunPod CUDA version matching `Dockerfile.runpod`, and the text and JSON output. |
+| `test_requirements.py` | `requirements`: values calculated from the configuration, the RunPod CUDA version matching `Dockerfile.runpod`, the text and JSON output, and `--section` and `--feature`. |
 | `test_job_diagnostics.py` | Job diagnostics records at each job state, survival after the Redis job expires, account deletion, pruning, and inclusion in backups. |
 | `test_worker_tasks.py` | Worker job lifecycle, billing reconciliation (leaving jobs that just ended to whoever ended them), restart handling, and file cleanup. |
 | `test_auth.py` | Google token checks: audience, expiry, verified email, userinfo fallback, caching, and outages. |
@@ -135,7 +135,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_upload_api.py` | File uploads: storage, size and length limits, title handling, billing, cleanup on errors, and cost by duration. |
 | `test_media.py` | `ffprobe` checks: accepted and rejected formats, files without audio, and playlist files. Real-file tests need `ffmpeg`. |
 | `test_pipeline_upload.py` | Converting uploaded audio and video to the WAV format the model needs. Needs the worker image. |
-| `test_config.py` | Settings parsing, durations, deprecated names, unknown-name warnings, secrets, startup validation, the `check` command, and drift guards against `.env.example` and these docs. |
+| `test_config.py` | Settings parsing, durations, deprecated names, unknown-name warnings, secrets, startup validation, the `check` and `describe` commands, and drift guards against `.env.example` and these docs. |
 | `test_launcher.py` | Worker resources resolved at startup: threads, CPU threads, and the values passed to Dramatiq. |
 | `test_job_storage.py` | `JOB_STORAGE=s3` with an in-memory bucket: submissions kept only in the bucket, workers' scratch folders, results and signed download links, cleanup, account deletion, settings, requirements, and the online check. |
 | `test_managed_services.py` | Redis and PostgreSQL outside the stack: TLS options, warnings about unencrypted connections, the online check without `CONFIG`, backups turned off, and their requirements. |
@@ -143,7 +143,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_slots.py` | Places limited across processes through Redis: the limit, unlimited places, a crashed holder's place freeing itself, and waiting for a place. |
 | `test_kubernetes.py` | `deploy/kubernetes` against `docker-compose.yml`: images, commands, wiring, secret mounts, the tunnel token's isolation, the non-root user and hardening, and scaling on metrics the API reports. |
 | `test_copy_to.py` | `python -m app.backups copy-to`: the newest backup restored in one transaction, the password kept out of the command line, and refusals. |
-| `test_features.py` | The optional features' table: references, needs and exclusions, required settings and secrets per role, unused settings, `features --json`, and `.env.example` and the docs in step with it. |
+| `test_features.py` | The optional features' table: references, needs and exclusions, required settings and secrets per role, unused settings, `features --json` and `--feature`, and `.env.example` and the docs in step with it. |
 | `test_setup_script.py` | `scripts/setup.py`: editing `server.env` and `.env` in place, descriptions from the docs, setting features up with what they need, secrets never shown, what is missing named by its file or setting, the status columns explained with what differs on Kubernetes, colors only in a terminal, and turning features off. |
 | `test_kube_script.py` | `scripts/kube.py` with a fake kubectl and docker: one question before any change, the order of the steps, Secrets from files and never shown, the test cluster's generated passwords and Redis users, KEDA installed for its scaling, the context checks, `down`'s confirmation, and `status`; and `scripts/server.py`'s and `scripts/admin.py`'s commands through `KubeStack`: one question before a restart, a rolling restart of the server's Deployments only, KEDA paused by `stop`, the build in the background, and `restore` refused. |
 | `test_leader.py` | Which API replica leads: one at a time, handover on shutdown and after a crash, periodic tasks waiting for the lead, startup recovery only when no other API runs, and recovery by a replica that takes over. |

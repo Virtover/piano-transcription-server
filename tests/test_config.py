@@ -475,6 +475,74 @@ def test_every_setting_is_documented():
     assert missing == []
 
 
+def describe_cli(tmp_path, *arguments, text="OUTSOURCE_TIMEOUT=20m\n"):
+    (tmp_path / ".env").write_text(text, encoding="utf-8")
+    return config.main(["describe", *arguments, "--env-file", str(tmp_path / ".env"), "--secrets-dir", str(tmp_path / "secrets")])
+
+
+def test_describe_prints_a_setting_from_the_code_and_the_docs(tmp_path, capsys):
+    import json
+
+    assert describe_cli(tmp_path, "--json", "outsource_timeout") == 0
+
+    [facts] = json.loads(capsys.readouterr().out)
+    documentation = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8").splitlines()
+    assert facts["name"] == "OUTSOURCE_TIMEOUT"
+    assert (facts["kind"], facts["file"], facts["value"]) == ("setting", "server.env", "20m (1200 s)")
+    assert facts["features"] == [{"key": "outsourcing", "required": False}]
+    assert facts["docs"]["section"] == "Outsourcing"
+    assert facts["docs"]["default"] == "`15m`"
+    assert documentation[facts["docs"]["line"] - 1].startswith("| `OUTSOURCE_TIMEOUT` |")
+    assert facts["docs"]["description"] in documentation[facts["docs"]["line"] - 1]
+
+
+def test_describe_prints_secrets_compose_variables_and_old_names(tmp_path, capsys):
+    import json
+
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "runpod_api_key").write_text("never shown", encoding="utf-8")
+    assert describe_cli(tmp_path, "--json", "RUNPOD_API_KEY", "COMPOSE_PROFILES", "BILLING_BACKUPS", "API_BIND_ADDRESS") == 0
+
+    output = capsys.readouterr().out
+    secret, profiles, old, bind = json.loads(output)
+    assert "never shown" not in output
+    assert (secret["name"], secret["file"], secret["value"]) == ("runpod_api_key", "secrets/runpod_api_key", "present")
+    assert secret["docs"]["section"] == "Secrets"
+    assert profiles["file"] == ".env"
+    assert {"key": "tunnel", "required": False} in profiles["features"]
+    assert (old["kind"], old["replaced_by"]) == ("deprecated", "DATABASE_BACKUPS")
+    assert "default" not in old["docs"]
+    assert (bind["file"], "value" in bind) == (".env", False)  # read by Docker Compose, not a setting
+    assert bind["docs"]["line"]
+
+
+def test_describe_text_and_unknown_names(tmp_path, capsys):
+    assert describe_cli(tmp_path, "OUTSOURCE_TIMEOUT", "OUTSORCE_TIMEOUT") == 2
+
+    captured = capsys.readouterr()
+    assert captured.out.splitlines()[:3] == ["OUTSOURCE_TIMEOUT (setting, in server.env)", "  value: 20m (1200 s)", "  default: `15m`"]
+    assert "unknown setting 'OUTSORCE_TIMEOUT'; did you mean OUTSOURCE_TIMEOUT" in captured.err
+
+
+def test_describe_works_with_an_invalid_configuration_and_without_the_docs(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(config, "CONFIGURATION_DOCS", tmp_path / "missing.md")
+
+    assert describe_cli(tmp_path, "OUTSOURCE_TIMEOUT", text="OUTSOURCE_TIMEOUT=forever\n") == 0
+
+    output = capsys.readouterr().out
+    assert "value:" not in output
+    assert "is not here (not in the images); run this on the host" in output
+
+
+def test_every_setting_can_be_described(default_settings):
+    documentation = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
+    names = [*config.known_variables(), *config.ALIASES, *config.COMPOSE_VARIABLES,
+             *(config.env_name(config.SecretSettings, field) for field in config.SecretSettings.model_fields)]
+
+    undocumented = [name for name in names if not config.setting_facts(name, default_settings, "secrets", documentation)["docs"].get("line")]
+    assert undocumented == []
+
+
 def test_settings_import_without_gpu_libraries():
     code = (
         "import sys\n"

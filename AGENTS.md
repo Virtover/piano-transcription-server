@@ -8,7 +8,8 @@ Piano Transcription Server: a FastAPI API, Dramatiq workers, and Redis, run with
 .\.venv\Scripts\python -m pytest -q                              # all tests; no Docker, GPU, or credentials needed (.venv/bin/python on macOS/Linux)
 docker compose run --rm api python -m app.config check           # validate server.env, .env, and secrets, offline
 docker compose run --rm api python -m app.config check --online  # also test storage, RunPod, Google Play for real
-docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents
+docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents, --feature/--section for only part
+.\.venv\Scripts\python -m app.config describe OUTSOURCE_TIMEOUT  # one setting or secret: file, value, default, docs line, features; host only
 docker compose run --rm api python -m app.config features --json # the optional features: on or off, what each needs, what is missing
 python scripts/setup.py status                                  # the same for people; python scripts/setup.py <feature> sets one up
 docker compose up -d --build                                     # the stack; OUTSOURCE_PROVIDER in server.env switches RunPod on
@@ -45,6 +46,14 @@ python scripts/kube.py restart 5m                               # server.py's an
 | `scripts/setup.py` | Guided setup of the optional features on the host, from `features --json` and `requirements --json` |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
 | `scripts/stacks.py` | Where the server runs, for the host scripts: requests built on a few primitives, `ComposeStack` gives them with the docker CLI and `KubeStack` (in `scripts/kube.py`) with kubectl. A change to server.py or admin.py reaches both |
+
+## Reading and testing economically
+
+- **Which test covers what** is the table in "What is covered" in `docs/testing.md`. Run the file for the code you changed (`pytest -q tests/test_<name>.py`), and the whole suite (about 90 s) once at the end.
+- **Tests that keep files in step**, worth running after editing either side: `test_config.py` (settings, `docs/configuration.md`, `server.env.example`), `test_features.py` (`FEATURES`, `server.env.example`, the docs), `test_kubernetes.py` (`deploy/kubernetes`, `docker-compose.yml`), `test_requirements.py` (`RUNPOD_CUDA_VERSION`, `Dockerfile.runpod`), `test_server_script.py` (no script but `scripts/stacks.py` builds a `docker compose` command).
+- **A setting:** `app.config describe <NAME>` instead of reading `app/config.py` and `docs/configuration.md`. For other parts of a long doc, Grep for the heading or name and read from that line.
+- **Large files:** search `app/admin_web/static/admin.js` and `admin.css` with Grep and read only the matching part; `scripts/kube.py`, `app/config.py`, and `app/billing.py` likewise. The PNG files are only images.
+- **Filter the JSON commands:** `requirements --json --feature <key>` or `--section <name>`, and `features --json --feature <key>`, print only what a task needs; the full outputs are about 20 KB each.
 
 ## Conventions
 

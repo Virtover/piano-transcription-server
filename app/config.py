@@ -1038,23 +1038,27 @@ def is_duration(group: type[BaseSettings], field: str) -> bool:
     )
 
 
+def shown_value(group: BaseSettings, field: str) -> Any:
+    """A setting's value as `check` prints it: secrets masked, durations with units."""
+    value = getattr(group, field)
+    if isinstance(value, SecretStr):
+        return "********"
+    if value is None and type(group) is WorkerSettings and field == "batch_size":
+        return "auto (each GPU's job capacity, CPU/RAM dependent; resolved at worker start)"
+    if value is None:
+        return "auto" if field in ("threads", "max_concurrency") else "(unset)"
+    if is_duration(type(group), field):
+        return format_duration(value)
+    return value
+
+
 def describe(config: Settings) -> list[str]:
     lines = []
     for group_name in GROUPS:
         group = getattr(config, group_name)
         lines.append(f"[{group_name}]")
         for field in type(group).model_fields:
-            value = getattr(group, field)
-            if isinstance(value, SecretStr):
-                shown = "********"
-            elif value is None and type(group) is WorkerSettings and field == "batch_size":
-                shown = "auto (each GPU's job capacity, CPU/RAM dependent; resolved at worker start)"
-            elif value is None:
-                shown = "auto" if field in ("threads", "max_concurrency") else "(unset)"
-            elif is_duration(type(group), field):
-                shown = format_duration(value)
-            else:
-                shown = value
+            shown = shown_value(group, field)
             name = env_name(type(group), field)
             if is_secret(type(group), field):
                 name = f"secret {config.secrets_dir}/{name}"
@@ -1082,6 +1086,8 @@ def main(arguments: list[str]) -> int:
     requirements.add_argument("--env-file", action="append", help="an env file to read; repeatable (default: .env and server.env)")
     requirements.add_argument("--secrets-dir", default=SECRETS_DIR)
     requirements.add_argument("--json", action="store_true", help="print JSON, for scripts and AI agents")
+    requirements.add_argument("--section", action="append", help="only this section, for example \"GPU endpoint\"; repeatable")
+    requirements.add_argument("--feature", action="append", help="only the sections of this feature, for example outsourcing; repeatable")
     features = subcommands.add_parser(
         "features",
         help="list the optional features: how each is turned on, what it needs, and what is missing",
@@ -1089,6 +1095,15 @@ def main(arguments: list[str]) -> int:
     features.add_argument("--env-file", action="append", help="an env file to read; repeatable (default: .env and server.env)")
     features.add_argument("--secrets-dir", default=SECRETS_DIR)
     features.add_argument("--json", action="store_true", help="print JSON, for scripts/setup.py and AI agents")
+    features.add_argument("--feature", action="append", help="only this feature, by its key; repeatable")
+    describe_command = subcommands.add_parser(
+        "describe",
+        help="print one setting or secret: its file, value, features, and documentation",
+    )
+    describe_command.add_argument("names", nargs="+", metavar="NAME", help="a variable or secret file name, for example OUTSOURCE_TIMEOUT")
+    describe_command.add_argument("--env-file", action="append", help="an env file to read; repeatable (default: .env and server.env)")
+    describe_command.add_argument("--secrets-dir", default=SECRETS_DIR)
+    describe_command.add_argument("--json", action="store_true", help="print JSON, for scripts and AI agents")
     args = parser.parse_args(arguments)
 
     logging.basicConfig(level=logging.WARNING, format="warning: %(message)s")
@@ -1096,6 +1111,8 @@ def main(arguments: list[str]) -> int:
         return print_requirements(args)
     if args.command == "features":
         return print_features(args)
+    if args.command == "describe":
+        return print_settings(args)
     try:
         config = load_settings(args.env_file or ENV_FILES, args.secrets_dir)
         problems = validate_settings(config, "all")
@@ -1138,14 +1155,35 @@ def print_features(args) -> int:
     except ConfigError as error:
         print("\n".join(f"  - {problem}" for problem in error.problems), file=sys.stderr)
         return 1
+    features = describe_features(config)
+    keys, problems = select_names(args.feature, [feature["key"] for feature in features], "feature")
+    if problems:
+        print("\n".join(problems), file=sys.stderr)
+        return 2
+    features = [feature for feature in features if feature["key"] in keys]
     if args.json:
-        print(json.dumps(describe_features(config), indent=2, default=str))
+        print(json.dumps(features, indent=2, default=str))
+    elif args.feature:
+        for feature in features:
+            print(f"{feature['title']} ({feature['key']}): {'on' if feature['enabled'] else 'off'}")
+            for problem in feature["problems"]:
+                print(f"  - {problem}")
     else:
         print("\n".join(summary_lines(config)))
     return 0
 
 
+def select_names(names: list[str] | None, choices: list[str], kind: str) -> tuple[list[str], list[str]]:
+    """The choices named, matched without case, or all of them without names; and the unknown names."""
+    if not names:
+        return list(choices), []
+    by_lower = {choice.lower(): choice for choice in choices}
+    problems = [f"unknown {kind} {name!r}; one of: {', '.join(choices)}" for name in names if name.lower() not in by_lower]
+    return [by_lower[name.lower()] for name in names if name.lower() in by_lower], problems
+
+
 def print_requirements(args) -> int:
+    from app.features import FEATURES
     from app.requirements import build_requirements, format_requirements, requirements_json
 
     try:
@@ -1156,10 +1194,127 @@ def print_requirements(args) -> int:
             print(f"  - {problem}", file=sys.stderr)
         return 1
     sections = build_requirements(config)
+    if args.section or args.feature:
+        names, problems = select_names(args.section, [section.name for section in sections], "section") if args.section else ([], [])
+        by_key = {feature.key: feature for feature in FEATURES}
+        keys, unknown = select_names(args.feature, list(by_key), "feature") if args.feature else ([], [])
+        problems += unknown
+        if problems:
+            print("\n".join(problems), file=sys.stderr)
+            return 2
+        names += [name for key in keys for name in by_key[key].requirement_sections]
+        sections = [section for section in sections if section.name in names]
     if args.json:
         print(json.dumps(requirements_json(sections), indent=2))
     else:
         print("\n".join(format_requirements(sections)))
+    return 0
+
+
+CONFIGURATION_DOCS = Path(__file__).resolve().parent.parent / "docs" / "configuration.md"
+
+
+def setting_docs(name: str, documentation: str) -> dict:
+    """Where docs/configuration.md documents a name: its table row, or else its first mention."""
+    section, mention = None, None
+    for number, line in enumerate(documentation.splitlines(), start=1):
+        if line.startswith("#"):
+            section = re.sub(r"^[^\w`]+", "", line.lstrip("#").strip())  # without the emoji
+        elif line.startswith(f"| `{name}` |"):
+            cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+            row = {"line": number, "section": section, "description": cells[-1]}
+            if len(cells) >= 3:
+                row["default"] = cells[1]
+            return row
+        elif mention is None and f"`{name}" in line:
+            mention = {"line": number, "section": section}
+    return mention or {}
+
+
+def setting_facts(name: str, config: Settings | None, secrets_dir: str, documentation: str | None) -> dict | None:
+    """What an agent needs about one setting or secret, without reading the code and the docs; None if unknown."""
+    from app.features import FEATURES
+
+    secrets = {env_name(SecretSettings, field): field for field in SecretSettings.model_fields}
+    variables = known_variables()
+    by_lower = {known.lower(): known for known in [*variables, *ALIASES, *COMPOSE_VARIABLES]}
+    if name in secrets or name.lower() in {secret.lower() for secret in secrets}:
+        name = next(secret for secret in secrets if secret.lower() == name.lower())
+        facts = {"name": name, "kind": "secret", "file": f"secrets/{name}",
+                 "value": "present" if (Path(secrets_dir) / name).is_file() else "missing"}
+    elif name.lower() in by_lower:
+        name = by_lower[name.lower()]
+        if name in ALIASES:
+            facts = {"name": name, "kind": "deprecated", "replaced_by": ALIASES[name].new_name}
+        else:
+            facts = {"name": name, "kind": "setting",
+                     "file": COMPOSE_ENV_FILE if name in COMPOSE_ONLY_VARIABLES else SERVER_ENV_FILE}
+            if name in variables and config is not None:
+                group_name, field = variables[name]
+                facts["value"] = shown_value(getattr(config, group_name), field)
+    else:
+        return None
+    facts["features"] = [
+        {"key": feature.key, "required": name in feature.required}
+        for feature in FEATURES
+        if name in feature.settings or name in feature.turn_on or name == feature.switch_secret
+        or name in [secret.name for secret in feature.secrets] or (name == "COMPOSE_PROFILES" and feature.profiles)
+    ]
+    facts["docs"] = None if documentation is None else {"file": "docs/configuration.md", **setting_docs(name, documentation)}
+    if facts["docs"] and facts["kind"] == "deprecated":
+        facts["docs"].pop("default", None)  # that table's middle column is the replacement
+    return facts
+
+
+def format_setting(facts: dict) -> list[str]:
+    where = f", replaced by {facts['replaced_by']}" if "replaced_by" in facts else f", in {facts['file']}"
+    lines = [f"{facts['name']} ({facts['kind']}{where})"]
+    if "value" in facts:
+        lines.append(f"  value: {facts['value']}")
+    docs = facts["docs"]
+    if docs is None:
+        lines.append("  docs: docs/configuration.md is not here (not in the images); run this on the host")
+    elif docs.get("line"):
+        if "default" in docs:
+            lines.append(f"  default: {docs['default']}")
+        lines.append(f"  docs: docs/configuration.md:{docs['line']} ({docs['section']})")
+        if docs.get("description"):
+            lines.append(f"  {docs['description']}")
+    if facts["features"]:
+        lines.append("  features: " + ", ".join(
+            feature["key"] + (" (required)" if feature["required"] else "") for feature in facts["features"]
+        ))
+    return lines
+
+
+def print_settings(args) -> int:
+    try:
+        config = load_settings(args.env_file or ENV_FILES, args.secrets_dir)
+    except ConfigError:
+        config = None  # still described, without values; `check` names the problems
+    documentation = CONFIGURATION_DOCS.read_text(encoding="utf-8") if CONFIGURATION_DOCS.is_file() else None
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")  # the docs' text on a console without UTF-8
+    described, unknown = [], []
+    for name in args.names:
+        facts = setting_facts(name, config, args.secrets_dir, documentation)
+        if facts is None:
+            unknown.append(name)
+        else:
+            described.append(facts)
+    if args.json:
+        print(json.dumps(described, indent=2, default=str))
+    else:
+        print("\n\n".join("\n".join(format_setting(facts)) for facts in described))
+    if unknown:
+        import difflib
+
+        names = [*known_variables(), *ALIASES, *COMPOSE_VARIABLES, *(env_name(SecretSettings, field) for field in SecretSettings.model_fields)]
+        for name in unknown:
+            close = difflib.get_close_matches(name.upper(), [known.upper() for known in names], n=3)
+            hint = f"; did you mean {', '.join(close)}?" if close else ""
+            print(f"unknown setting {name!r}{hint}", file=sys.stderr)
+        return 2
     return 0
 
 

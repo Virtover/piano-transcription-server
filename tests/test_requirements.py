@@ -95,6 +95,34 @@ def test_cli_prints_requirements_as_json(tmp_path, capsys):
     }
 
 
+def requirements_cli(tmp_path, *arguments):
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    return config_module.main(["requirements", *arguments, "--env-file", str(env_file), "--secrets-dir", str(tmp_path)])
+
+
+def test_cli_prints_only_the_sections_asked_for(tmp_path, capsys):
+    assert requirements_cli(tmp_path, "--json", "--section", "gpu endpoint", "--section", "Storage") == 0
+
+    # In the order of the full list, matched without case.
+    assert [section["name"] for section in json.loads(capsys.readouterr().out)] == ["Storage", "GPU endpoint"]
+
+
+def test_cli_prints_a_features_sections(tmp_path, capsys):
+    assert requirements_cli(tmp_path, "--json", "--feature", "outsourcing", "--section", "Google Play") == 0
+
+    names = [section["name"] for section in json.loads(capsys.readouterr().out)]
+    assert names == ["Storage", "Image registry", "GPU endpoint", "Google Play"]
+
+
+def test_cli_refuses_unknown_sections_and_features(tmp_path, capsys):
+    assert requirements_cli(tmp_path, "--section", "GPU", "--feature", "gpu") == 2
+
+    error = capsys.readouterr().err
+    assert "unknown section 'GPU'; one of: " in error and "GPU endpoint" in error
+    assert "unknown feature 'gpu'; one of: " in error and "outsourcing" in error
+
+
 def test_cli_reports_invalid_configuration(tmp_path, capsys):
     env_file = tmp_path / ".env"
     env_file.write_text("OUTSOURCE_TIMEOUT=forever\n")

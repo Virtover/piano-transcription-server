@@ -9,7 +9,7 @@ The server states what it needs; you translate that into Google's current settin
 
 ## Rules
 
-- **The requirements come from the server**, never from memory: `docker compose run --rm api python -m app.config requirements --json` (or `<venv python> -m app.config requirements --json --secrets-dir secrets` without Docker, where `<venv python>` is `.\.venv\Scripts\python` on Windows and `.venv/bin/python` on macOS and Linux). Use the sections Google sign-in and Google Play.
+- **The requirements come from the server**, never from memory: `docker compose run --rm api python -m app.config requirements --json --feature billing` (or `<venv python> -m app.config requirements --json --feature billing --secrets-dir secrets` without Docker, where `<venv python>` is `.\.venv\Scripts\python` on Windows and `.venv/bin/python` on macOS and Linux). `--feature billing` prints only its sections: Google sign-in and Google Play.
 - **Look up Google's current documentation** to find where each requirement is set, every time. Do not rely on remembered menu paths, labels, or permission names. If the documentation is unclear, say what you are unsure of and ask the user what their screen shows.
 - **You cannot click in web consoles.** Tell the user what to set, one group at a time, with the requirement's reason, and wait for them.
 - **Never ask the user to paste a secret into the chat**, and never read `secrets/google_play_service_account.json`. Client IDs are public and may be pasted; client secrets are never needed. Check the key only exists: `Get-Item secrets\google_play_service_account.json | Select-Object Name, Length` on Windows, `ls -l secrets/google_play_service_account.json` on macOS and Linux.
