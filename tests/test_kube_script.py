@@ -137,6 +137,43 @@ def test_local_up_runs_everything_after_one_question(project):
     assert "http://localhost:8080" in script.text
 
 
+SERVICES = {"items": [
+    {"metadata": {"name": "api"}, "spec": {"type": "LoadBalancer", "ports": [{"port": 8080}]},
+     "status": {"loadBalancer": {"ingress": [{"hostname": "localhost"}]}}},
+    {"metadata": {"name": "seaweed"}, "spec": {"type": "LoadBalancer", "ports": [{"port": 8333}]},
+     "status": {"loadBalancer": {}}},
+    {"metadata": {"name": "redis"}, "spec": {"type": "ClusterIP", "ports": [{"port": 6379}]}, "status": {}},
+]}
+
+
+def test_local_up_stops_where_docker_desktop_did_not_open_a_port(project):
+    kube, cluster, script = make(project, "local", answers=["y"], context="docker-desktop")
+    kube.sleep = lambda seconds: None
+    cluster.answers = {"get services": (0, json.dumps(SERVICES))}
+
+    assert kube.deploy(first=True) == 1
+
+    # Named with its port, and the way out; no bucket or check against storage nobody can reach.
+    assert "Docker Desktop did not open seaweed (8333)" in script.text
+    assert "api (8080)" not in script.text and "redis" not in script.text.split("did not open")[1].split("\n")[0]
+    assert "restart Docker Desktop" in script.text
+    assert not cluster.ran("exec", "deploy/api", "python", "-c")
+    assert not cluster.ran("check", "--online")
+
+
+def test_a_port_that_opens_late_is_waited_for(project):
+    kube, cluster, _ = make(project, "local", context="docker-desktop")
+    opened = json.loads(json.dumps(SERVICES))
+    opened["items"][1]["status"]["loadBalancer"]["ingress"] = [{"hostname": "localhost"}]
+    answers = [json.dumps(SERVICES), json.dumps(SERVICES), json.dumps(opened)]
+    waits = []
+    kube.sleep = waits.append
+    kube.get_json = lambda *arguments: json.loads(answers.pop(0))
+
+    assert kube.closed_ports() == []
+    assert waits == [2, 2]
+
+
 def test_local_build_brings_back_the_committed_tag(project):
     kube, cluster, _ = make(project, "local", context="docker-desktop")
     committed = kube.target.text()

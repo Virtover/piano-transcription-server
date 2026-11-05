@@ -70,6 +70,8 @@ The tag of the images changes with every build, so `scripts/kube.py` writes it, 
 * **Its own choices** in `local/kustomization.yaml`, without `cluster.env` or the admin web page.
 * **No tunnel, billing, outsourcing, or error reports:** `settings.env` is `server.env` with those off, and the services above. Storage is at `host.docker.internal:8333`, so signed links to results work from the pods and from a browser.
 
+`local up` stops, naming the port, when Docker Desktop does not open `8080` or `8333` on this PC: another program holds it, or Docker Desktop kept the port for a test cluster that is gone, which only restarting Docker Desktop releases. `netstat -ano` shows what listens on it.
+
 `python scripts/kube.py local down` removes it, with its database; KEDA stays installed. To see the scaling, submit a few uploads and watch `python scripts/kube.py local status`.
 
 ## 📋 What you need

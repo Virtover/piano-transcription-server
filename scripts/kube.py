@@ -456,6 +456,7 @@ class Kube:
     run: Callable[..., subprocess.CompletedProcess] = run
     root: Path = ROOT
     clock: Callable[[], str] = lambda: time.strftime("%Y%m%d-%H%M%S")
+    sleep: Callable[[float], None] = time.sleep
 
     @property
     def style(self) -> Style:
@@ -745,6 +746,21 @@ class Kube:
                           capture=False)
         return waited.returncode == 0 or not self.fail("KEDA did not start.")
 
+    def closed_ports(self, attempts: int = 15) -> list[str]:
+        """The test cluster's LoadBalancer Services that Docker Desktop has not
+        opened on this PC after about half a minute, as "name (port)". It
+        leaves one pending, without a word, while something else holds the
+        port, such as a forward Docker Desktop kept from an earlier cluster."""
+        for attempt in range(attempts):
+            services = (self.get_json("services") or {"items": []})["items"]
+            closed = [f"{item['metadata']['name']} ({item['spec']['ports'][0]['port']})" for item in services
+                      if item["spec"].get("type") == "LoadBalancer"
+                      and not ((item.get("status") or {}).get("loadBalancer") or {}).get("ingress")]
+            if not closed or attempt == attempts - 1:
+                return closed
+            self.sleep(2)
+        return []
+
     def create_local_bucket(self) -> None:
         code = ("from app.config import settings; from app.outsource.storage import s3_client; "
                 "c = s3_client(settings); b = settings.storage.bucket; "
@@ -781,6 +797,15 @@ class Kube:
         if not self.apply_secrets() or not self.roll_out(restart=self.target.local):
             return 1
         if self.target.local:
+            # The pods reach the storage, and a browser the API, through this PC's ports.
+            closed = self.closed_ports()
+            if closed:
+                self.fail(f"Docker Desktop did not open {', '.join(closed)} on this PC: another program holds "
+                          "the port, or Docker Desktop kept it for a cluster that is gone.")
+                self.console.wrap("Stop the program that uses it, or restart Docker Desktop, then run "
+                                  f"{self.script} up again. To see what holds a port: netstat -ano, and look "
+                                  "for the port's LISTENING line.", "", "dim")
+                return 1
             self.create_local_bucket()
         result = self.check()
         if self.target.local:
