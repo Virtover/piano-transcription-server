@@ -293,6 +293,10 @@ def patched(manifests: Path, component: str) -> dict[tuple[str, str], dict]:
             node = document
             for part in parents:
                 node = node[int(part)] if isinstance(node, list) else node[part]
+            if last == "-":
+                assert operation["op"] == "add" and isinstance(node, list)
+                node.append(operation["value"])
+                continue
             if operation["op"] == "replace":
                 assert (node[int(last)] if isinstance(node, list) else node[last]) is not None
             else:
@@ -361,10 +365,43 @@ def test_the_choices_reach_the_workers_their_scaling_and_the_network_rule(projec
     ({"KUBE_GPU_NODE_TAINT": "nvidia.com/gpu=present:NoSchedule"}, "KUBE_GPU_NODE_TAINT"),
     ({"KUBE_KEDA_NAMESPACE": "KEDA"}, "KUBE_KEDA_NAMESPACE"),
     ({"KUBE_ADMIN_WEB_MODE": "on"}, "KUBE_ADMIN_WEB_MODE"),
+    ({"KUBE_PRIVATE_EGRESS": "192.168.1.300"}, "KUBE_PRIVATE_EGRESS"),
+    ({"KUBE_PRIVATE_EGRESS": "10.0.0.0/8 192.168.0.0/16"}, "KUBE_PRIVATE_EGRESS"),
+    ({"KUBE_PRIVATE_EGRESS": "0.0.0.0/0"}, "KUBE_PRIVATE_EGRESS"),
+    ({"KUBE_PRIVATE_EGRESS": "::/0"}, "KUBE_PRIVATE_EGRESS"),
+    # Nothing that could end the kustomization's line or start a comment there.
+    ({"KUBE_REGISTRY": "docker.io/me # x"}, "KUBE_REGISTRY"),
+    ({"KUBE_REGISTRY": "docker.io/me\nnewTag: evil"}, "KUBE_REGISTRY"),
+    ({"KUBE_REGISTRY": "Docker.io/Me"}, "KUBE_REGISTRY"),
 ])
 def test_a_choice_that_is_not_valid_is_named(choices, named):
     with pytest.raises(ValueError, match=named):
         kube_script.cluster_component(choices)
+
+
+def test_private_addresses_the_server_needs_are_opened_one_by_one(project):
+    _, manifests, _ = project
+    component = kube_script.cluster_component({"KUBE_PRIVATE_EGRESS": "10.0.4.0/24, 192.168.1.20"})
+
+    egress = patched(manifests, component)[("NetworkPolicy", "egress")]["spec"]["egress"]
+    assert egress[-1] == {"to": [{"ipBlock": {"cidr": "10.0.4.0/24"}}, {"ipBlock": {"cidr": "192.168.1.20/32"}}]}
+    # The rules before it are base's, unchanged.
+    assert len(egress) == 4
+
+
+@pytest.mark.parametrize("registry", ["docker.io/me", "ghcr.io/my-team/images", "registry.local:5000/team",
+                                      "localhost:5000", "123456789.dkr.ecr.eu-west-1.amazonaws.com/piano"])
+def test_registries_as_they_are_written(registry):
+    assert kube_script.valid_registry(registry)
+    kube_script.cluster_component({"KUBE_REGISTRY": registry})
+
+
+def test_a_registry_typed_in_that_is_not_valid_is_refused(project):
+    kube, _, _ = make(project, "cluster", answers=["docker.io/me: x"])
+
+    with pytest.raises(RuntimeError, match="not a registry"):
+        kube.image_registry()
+    assert not kube_script.EnvFile(kube.target.choices).get("KUBE_REGISTRY")
 
 
 def test_cluster_env_comes_from_its_example_on_the_first_use(project):

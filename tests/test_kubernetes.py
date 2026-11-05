@@ -302,19 +302,60 @@ def test_only_the_tunnel_reaches_the_admin_page():
     assert rule["ports"] == [{"port": container("admin")["ports"][0]["containerPort"], "protocol": "TCP"}]
 
 
-def test_pods_that_fetch_media_never_reach_link_local_addresses():
-    policy = policies("base/network-policy.yaml")["no-metadata"]
-    egress = policy["spec"]["egress"]
-    blocks = [peer["ipBlock"] for rule in egress for peer in rule.get("to", []) if "ipBlock" in peer]
+def egress_rules():
+    policy = policies("base/network-policy.yaml")["egress"]
+    dns, namespace, internet = policy["spec"]["egress"]
+    return policy, dns, namespace, internet
+
+
+def reachable(address: str, rule: dict) -> bool:
+    """Whether a rule's ipBlocks let traffic to address out."""
+    import ipaddress
+
+    ip = ipaddress.ip_address(address)
+    for peer in rule["to"]:
+        block = peer.get("ipBlock")
+        if block and ip.version == ipaddress.ip_network(block["cidr"]).version and ip in ipaddress.ip_network(block["cidr"]):
+            if not any(ip in ipaddress.ip_network(excepted) for excepted in block.get("except", [])):
+                return True
+    return False
+
+
+def test_pods_that_fetch_media_reach_only_the_internet_and_this_namespace():
+    policy, _, namespace, internet = egress_rules()
 
     assert selected(policy) == {"api", "worker", "remote-worker"}
     assert policy["spec"]["policyTypes"] == ["Egress"]
-    assert {block["cidr"] for block in blocks} == {"0.0.0.0/0", "::/0"}
-    assert all(block["except"] for block in blocks)
-    assert "169.254.0.0/16" in next(block for block in blocks if block["cidr"] == "0.0.0.0/0")["except"]
-    # Names resolve, also through a node-local DNS cache on a link-local address.
-    [dns] = [rule for rule in egress if "to" not in rule]
+    assert namespace == {"to": [{"podSelector": {}}]}
+    assert {peer["ipBlock"]["cidr"] for peer in internet["to"]} == {"0.0.0.0/0", "::/0"}
+    assert "ports" not in internet
+    for address in ("8.8.8.8", "142.250.74.78", "2a00:1450:4001:82a::200e"):
+        assert reachable(address, internet), address
+
+
+@pytest.mark.parametrize("address", [
+    # The home or office network around the cluster, and other namespaces' pods and Services.
+    "192.168.1.1", "10.0.0.5", "10.96.0.1", "172.16.0.1", "172.31.255.254",
+    # Carrier-grade NAT, as Tailscale and k3s on some networks use.
+    "100.64.0.1", "100.127.255.254",
+    # The clouds' metadata service, which answers with the machine's credentials.
+    "169.254.169.254", "fd00:ec2::254",
+    "fd12:3456::1", "fe80::1",
+])
+def test_pods_that_fetch_media_never_reach_private_addresses(address):
+    _, _, _, internet = egress_rules()
+
+    assert not reachable(address, internet)
+
+
+def test_names_resolve_only_through_the_clusters_dns():
+    _, dns, _, _ = egress_rules()
+
     assert {(port["port"], port["protocol"]) for port in dns["ports"]} == {(53, "UDP"), (53, "TCP")}
+    assert {"namespaceSelector": {}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}} in dns["to"]
+    # A node-local DNS cache, on its usual address and nothing else of that range.
+    assert reachable("169.254.20.10", dns) and not reachable("169.254.169.254", dns)
+    assert not reachable("192.168.1.1", dns)
 
 
 def test_the_rules_name_pods_that_exist():
@@ -336,6 +377,9 @@ def test_the_test_clusters_services_and_its_pc_get_in():
     assert local["services"]["spec"]["ingress"] == [{"from": [{"podSelector": {}}]}]
     # The API's container port behind the LoadBalancer, and the storage's.
     assert ports == {container("api")["ports"][0]["containerPort"], 8333}
+    # The storage at host.docker.internal, a private address, and only its port.
+    assert selected(local["to-this-pc"]) == selected(egress_rules()[0])
+    assert local["to-this-pc"]["spec"]["egress"] == [{"ports": [{"port": 8333, "protocol": "TCP"}]}]
 
 
 @pytest.mark.parametrize("service", ["api", "cloudflared"])

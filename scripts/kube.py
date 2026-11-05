@@ -41,6 +41,7 @@ Compose stack on this machine never reads them.
 import argparse
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import re
 import secrets
@@ -86,6 +87,7 @@ CLUSTER_CHOICES = {
     "KUBE_MAX_WAIT": "60s",
     "KUBE_KEDA_NAMESPACE": "keda",
     "KUBE_ADMIN_WEB_MODE": "disabled",
+    "KUBE_PRIVATE_EGRESS": "",
 }
 # KUBE_ADMIN_WEB_MODE's values, as ADMIN_WEB_MODE's, which it sets in settings.env.
 ADMIN_WEB_MODES = ("disabled", "read-only", "read-write")
@@ -93,6 +95,9 @@ ADMIN_WEB_MODES = ("disabled", "read-only", "read-write")
 LABEL_KEY = re.compile(r"(?:[a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?")
 LABEL_VALUE = re.compile(r"(?:[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?")
 NAMESPACE = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
+# A registry's host, with an optional port, and path, such as docker.io/me or
+# registry.local:5000/team: nothing that could end the line kube.py writes it to.
+REGISTRY = re.compile(r"[a-z0-9]([-a-z0-9.]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*")
 COMPONENT_HEADER = ("# Written by scripts/kube.py from cluster.env on every up, update, start, restart,\n"
                     "# and config: change cluster.env instead. See docs/kubernetes.md.\n")
 
@@ -361,6 +366,18 @@ def cluster_component(choices: dict[str, str | None]) -> str:
     if value["KUBE_ADMIN_WEB_MODE"] not in ADMIN_WEB_MODES:
         raise ValueError(f"KUBE_ADMIN_WEB_MODE must be one of {', '.join(ADMIN_WEB_MODES)}, "
                          f"not {value['KUBE_ADMIN_WEB_MODE']!r}")
+    if value["KUBE_REGISTRY"] and not valid_registry(value["KUBE_REGISTRY"]):
+        raise ValueError(f"KUBE_REGISTRY is not a registry such as docker.io/<user>: {value['KUBE_REGISTRY']!r}")
+    private = []
+    for text in filter(None, (part.strip() for part in value["KUBE_PRIVATE_EGRESS"].split(","))):
+        try:
+            network = ipaddress.ip_network(text, strict=False)
+        except ValueError:
+            raise ValueError(f"KUBE_PRIVATE_EGRESS must be addresses or ranges, such as 192.168.1.20/32, "
+                             f"separated by commas, not {text!r}") from None
+        if network.prefixlen == 0:
+            raise ValueError("KUBE_PRIVATE_EGRESS cannot open every address: name the services' own")
+        private.append(str(network))
 
     placement = []
     if label := value["KUBE_GPU_NODE_LABEL"]:
@@ -386,6 +403,11 @@ def cluster_component(choices: dict[str, str | None]) -> str:
                                       "kubernetes.io~1metadata.name", "value": namespace},
         ])},
     ]
+    if private:
+        patches.append({"target": {"kind": "NetworkPolicy", "name": "egress"}, "patch": json.dumps([
+            {"op": "add", "path": "/spec/egress/-", "value": {"to": [{"ipBlock": {"cidr": network}}
+                                                                     for network in private]}},
+        ])})
     if placement:
         patches.append({"target": {"kind": "Deployment", "name": "worker"}, "patch": json.dumps([
             {"op": "add", "path": f"/spec/template/spec/{field}", "value": setting} for field, setting in placement
@@ -395,6 +417,10 @@ def cluster_component(choices: dict[str, str | None]) -> str:
     if value["KUBE_ADMIN_WEB_MODE"] != "disabled":
         component["components"] = ["../components/admin-web"]
     return COMPONENT_HEADER + json.dumps(component, indent=2) + "\n"
+
+
+def valid_registry(registry: str) -> bool:
+    return bool(REGISTRY.fullmatch(registry))
 
 
 def redis_users(password: str, users_acl: Path) -> str:
@@ -635,6 +661,8 @@ class Kube:
             registry = self.console.ask("Registry to push the images to, such as docker.io/<user>: ").strip().rstrip("/")
             if not registry:
                 raise RuntimeError("No registry: the cluster cannot pull the images.")
+        if not valid_registry(registry):
+            raise RuntimeError(f"{registry!r} is not a registry such as docker.io/<user>.")
         if choices.get("KUBE_REGISTRY") != registry:
             choices.set("KUBE_REGISTRY", registry)
             choices.save()

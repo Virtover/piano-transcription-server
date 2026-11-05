@@ -55,6 +55,7 @@ What differs from one cluster to another, and is not the server's, is in `deploy
 | `KUBE_MAX_WAIT` | `60s` | One worker more while the oldest job has waited longer than this. |
 | `KUBE_KEDA_NAMESPACE` | `keda` | The namespace KEDA runs in, whose pods alone may read `/metrics` besides the tunnel. |
 | `KUBE_ADMIN_WEB_MODE` | `disabled` | The [admin web page](#-the-admin-web-page): `disabled`, `read-only`, or `read-write`. It deploys the page and sets `ADMIN_WEB_MODE` in `settings.env`. |
+| `KUBE_PRIVATE_EGRESS` | none | Private addresses the API and workers may reach, separated by commas, such as `10.0.4.0/24` for managed services in the cluster's private network, or `192.168.1.20/32` for a bucket on the local network. Every other private and link-local address is closed to them; see [Network rules](#-network-rules-and-spreading). |
 
 The tag of the images changes with every build, so `scripts/kube.py` writes it, with the registry, under `images` in `kustomization.yaml`.
 
@@ -65,7 +66,7 @@ The tag of the images changes with every build, so `scripts/kube.py` writes it, 
 * **Redis, PostgreSQL, and SeaweedFS** for the bucket, with random passwords in `secrets/kubernetes-local`, kept from one `up` to the next. Redis has the users and rules of `redis/users.acl`.
 * **The images built here**, which Docker Desktop's Kubernetes uses without a registry when it is set up with kubeadm; with kind, its node has images of its own and the pods cannot start. They keep the tag `local`: a rebuild replaces the last one, and `local up` and `update` restart the pods to use it.
 * **Two API replicas**, on `http://localhost:8080`, beside a Compose stack on `8000`.
-* **CPU workers, added by KEDA** as the queue grows, one job each and up to 3, as GPU workers on a real cluster; `local up` installs KEDA when it is missing.
+* **CPU workers, added by KEDA** as the queue grows, up to 3, each taking the jobs its CPU and memory allow, as GPU workers on a real cluster; `local up` installs KEDA when it is missing.
 * **Its own choices** in `local/kustomization.yaml`, without `cluster.env` or the admin web page.
 * **No tunnel, billing, outsourcing, or error reports:** `settings.env` is `server.env` with those off, and the services above. Storage is at `host.docker.internal:8333`, so signed links to results work from the pods and from a browser.
 
@@ -162,7 +163,9 @@ A rolling update interrupts nothing, so it needs no notice. To change settings, 
 `base/network-policy.yaml` lets each pod be reached only by what uses it. The rules need a network plugin that enforces them; elsewhere they change nothing.
 
 * **Nothing reaches a pod without a rule.** The API answers `cloudflared` and KEDA's namespace (`KUBE_KEDA_NAMESPACE`), on port 8000; the admin web page answers only `cloudflared`, on 8100. A Prometheus of your own that scrapes `/metrics` needs a rule like KEDA's.
-* **The API and the workers**, which fetch video links and decode untrusted media, reach the internet, DNS, and this namespace, but not link-local addresses, where clouds answer with the machine's credentials. `app/url_safety.py` refuses those addresses too; this rule still holds if a decoder is taken over.
+* **The API and the workers**, which fetch video links and decode untrusted media, reach the internet and this namespace, but no private or link-local address: not the machines of the network around the cluster, such as a home router or NAS, not other namespaces' pods, and not the address where clouds answer with the machine's credentials. `app/url_safety.py` refuses those addresses too; this rule still holds if a decoder is taken over.
+* **Private services the server uses**, such as a managed Redis reached over the provider's private network, or a bucket or database on the local network, need their addresses in `KUBE_PRIVATE_EGRESS`. Without them, `check --online`, which `up` runs, reports the service unreachable.
+* **Names** resolve only through the cluster's DNS pods (`k8s-app: kube-dns`, as CoreDNS is labelled on most clusters) or a node-local DNS cache on `169.254.20.10`.
 * **The test cluster** adds rules of its own for its Redis, PostgreSQL, and storage, and for this PC; Docker Desktop's Kubernetes enforces none of them.
 
 Replicas of the API and `cloudflared` are kept on different machines (`topologySpreadConstraints`), so one machine going away leaves the others serving, and spread across zones where the cluster has them. A cluster with one node still runs them both there; nodes whose taint keeps them off do not count. GPU workers prefer different machines, but never wait for one.

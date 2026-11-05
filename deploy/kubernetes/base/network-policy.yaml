@@ -39,13 +39,16 @@ spec:
           protocol: TCP
 ---
 # The pods that fetch video links or decode untrusted media reach the
-# internet and this namespace, but not the node's link-local addresses, where
-# clouds answer with the machine's credentials. app/url_safety.py refuses
-# them too; this holds should a decoder be taken over.
+# internet and this namespace, but no private or link-local address: not the
+# other machines of the network the cluster is in, other namespaces' pods,
+# or the address where clouds answer with the machine's credentials.
+# app/url_safety.py refuses them too; this holds should a decoder be taken
+# over. Private addresses the server needs, such as a Redis or bucket on the
+# local network, are KUBE_PRIVATE_EGRESS in cluster.env.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: no-metadata
+  name: egress
 spec:
   podSelector:
     matchExpressions:
@@ -54,9 +57,16 @@ spec:
         values: [api, worker, remote-worker]
   policyTypes: [Egress]
   egress:
-    # Names, from any address: a node-local DNS cache listens on a
-    # link-local one.
-    - ports:
+    # Names, from the cluster's DNS, or from a node-local DNS cache on its
+    # usual link-local address.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+        - ipBlock:
+            cidr: 169.254.20.10/32
+      ports:
         - port: 53
           protocol: UDP
         - port: 53
@@ -68,7 +78,7 @@ spec:
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
-            except: [169.254.0.0/16]
+            except: [10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16]
         - ipBlock:
             cidr: ::/0
-            except: [fe80::/10, fd00:ec2::254/128]
+            except: [fc00::/7, fe80::/10]

@@ -1,7 +1,9 @@
 # The test cluster's own rules, over those of ../base: its Redis, PostgreSQL,
 # and storage answer the pods here, and the API and storage this PC, through
-# their LoadBalancer Services. Docker Desktop's Kubernetes enforces none of
-# them, but they keep the base's rules from shutting these out elsewhere.
+# their LoadBalancer Services; the pods reach the storage at
+# host.docker.internal, a private address. Docker Desktop's Kubernetes
+# enforces none of them, but they keep the base's rules from shutting these
+# out elsewhere.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -32,5 +34,21 @@ spec:
     - ports:
         - port: 8000
           protocol: TCP
+        - port: 8333
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: to-this-pc
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [api, worker, remote-worker]
+  policyTypes: [Egress]
+  egress:
+    - ports:
         - port: 8333
           protocol: TCP
