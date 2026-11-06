@@ -1,6 +1,6 @@
-import numpy as np
 import pytest
 
+np = pytest.importorskip("numpy")
 pytest.importorskip("torch")
 pytest.importorskip("transkun")
 
