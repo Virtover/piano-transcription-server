@@ -61,13 +61,16 @@ def collect() -> dict:
         remote["limit"] = remote_job_limit(redis)
 
     namespace = tasks.broker.namespace
+    queue_names = [tasks.LOCAL_QUEUE, tasks.REMOTE_QUEUE]
+    if settings.worker.arrangement:
+        queue_names.append(tasks.ARRANGEMENT_QUEUE)
     queues = {
         queue: {
             # Messages not yet finished, including ones a worker has taken.
             "messages": redis.hlen(f"{namespace}:{queue}.msgs"),
             "dead": redis.zcard(f"{namespace}:{queue}.XQ"),
         }
-        for queue in (tasks.LOCAL_QUEUE, tasks.REMOTE_QUEUE)
+        for queue in queue_names
     }
 
     data_dir = Path(settings.service.data_dir)
@@ -103,9 +106,11 @@ def collect() -> dict:
             "count": len(workers),
             "capacity": capacity,
             "average_job_seconds": average if any(worker["average_job_seconds"] for worker in workers) else None,
+            "arranging": sum(1 for worker in workers if worker["arrangement"]),
             "updated_at": max(worker["updated_at"] for worker in workers),
         } if workers else None,
         "local_workers": workers,
+        "arrangement": settings.worker.arrangement,
         "api_leader": leader.current_leader(redis),
         "waiting": metrics.job_queues(redis),
         "video_checks": {"in_use": in_use(redis, VIDEO_CHECKS_KEY), "limit": settings.limits.max_video_checks},
@@ -144,14 +149,21 @@ def render(state: dict) -> str:
             f"Local worker  {count}{worker['capacity']} jobs at once, average job "
             f"{span(average) if average else 'unknown yet'}, heartbeat {ago(worker['updated_at'])}"
         )
+        if state["arrangement"]:
+            lines.append(f"              {worker['arranging']} of {worker['count']} arrange (piano arrangements are on)")
         if worker["count"] > 1:
             for each in state["local_workers"]:
                 each_average = each["average_job_seconds"]
                 lines.append(
                     f"              {each['id']}: {each['capacity']} at once, average "
                     f"{span(each_average) if each_average else 'unknown yet'}, heartbeat {ago(each['updated_at'])}"
+                    + (", arranges" if each["arrangement"] else "")
                 )
 
+    if worker is None and state["arrangement"]:
+        lines.append("Arrangements  on, but no worker is running to arrange")
+    elif not state["arrangement"]:
+        lines.append("Arrangements  off (WORKER_ARRANGEMENT=false)")
     api_leader = state["api_leader"]
     lines.append(
         f"API leader    {api_leader}: runs backups and the abandoned job watcher"

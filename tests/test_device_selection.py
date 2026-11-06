@@ -11,7 +11,8 @@ def gpus(monkeypatch):
 
     def capacities():
         state["capacity_calls"] += 1
-        return state["capacities"]
+        # As the real measurement: no GPUs with WORKER_ENFORCE_CPU.
+        return None if settings.worker.enforce_cpu else state["capacities"]
 
     monkeypatch.setattr(piano_transcription, "_cuda_capacities", None)
     monkeypatch.setattr(piano_transcription, "cuda_job_capacities", capacities)

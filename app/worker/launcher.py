@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from app.config import ensure_valid, settings
 from app.error_report import SERVICE_ENVIRONMENT
 from app.transcription.device import (
+    arrangement_fits,
     cpu_batch_size,
     cpu_thread_count,
     cuda_job_capacities,
@@ -20,6 +21,7 @@ from app.transcription.device import (
 # so that this module starts without connecting to Redis.
 LOCAL_QUEUE = "default"
 REMOTE_QUEUE = "remote"
+ARRANGEMENT_QUEUE = "arrangement"
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,8 @@ class WorkerPlan:
     cpu_threads: int | None
     summary: str
     warnings: tuple[str, ...] = ()
+    # Whether it consumes the arrangement queue (WORKER_ARRANGEMENT, and room on a GPU).
+    arrangement: bool = False
 
 
 def gpu_capacity(capacities: list[tuple[int, int, int, int]] | None) -> tuple[int, int, str] | None:
@@ -46,7 +50,8 @@ def gpu_capacity(capacities: list[tuple[int, int, int, int]] | None) -> tuple[in
     parts = []
     for index, capacity, free_memory, _ in capacities:
         batch = f"batch {gpu_batch_size(capacity)[0]}, " if capacity > 0 else ""
-        parts.append(f"GPU {index}: {capacity} job(s), {batch}{free_memory / 1024**3:.2f} GiB free")
+        arranges = "arrangements, " if capacity > 0 and arrangement_fits(free_memory) else ""
+        parts.append(f"GPU {index}: {capacity} job(s), {batch}{arranges}{free_memory / 1024**3:.2f} GiB free")
     summary = ", ".join(parts)
     return len(device_capacities), total_capacity, summary
 
@@ -65,12 +70,20 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPla
         threads = min(physical_cpu_count(), gpu_jobs)
         if settings.worker.max_concurrency:
             threads = min(threads, settings.worker.max_concurrency)
+        arrangement = any(
+            capacity > 0 and arrangement_fits(free_memory) for _, capacity, free_memory, _ in capacities
+        )
+        if settings.worker.arrangement and not arrangement:
+            warnings += ("WORKER_ARRANGEMENT is on, but no GPU has room for arrangements "
+                         f"(WORKER_ARRANGEMENT_MEMORY_GIB={settings.worker.arrangement_memory_gib:g} "
+                         "beside the reserves); arrangement jobs go to other workers or RunPod",)
         return WorkerPlan(
             processes=1,
             threads=threads,
             cpu_threads=None,
             summary=f"{device_count} GPU(s), up to {gpu_jobs} job(s) by VRAM ({gpu_summary})",
             warnings=warnings,
+            arrangement=arrangement,
         )
 
     return WorkerPlan(
@@ -78,6 +91,7 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPla
         threads=cpu_batch_size(),
         cpu_threads=cpu_thread_count(),
         summary=f"{physical_cpu_count()} CPU(s), no CUDA GPU detected, batch {cpu_batch_size()}",
+        arrangement=settings.worker.arrangement,
     )
 
 
@@ -129,11 +143,11 @@ def main(arguments: list[str] | None = None) -> None:
             return
         ensure_valid("remote")
         plan = remote_plan()
-        queue = REMOTE_QUEUE
+        queues = [REMOTE_QUEUE]
     else:
         ensure_valid("worker")
         plan = plan_worker(cuda_job_capacities())
-        queue = LOCAL_QUEUE
+        queues = [LOCAL_QUEUE, ARRANGEMENT_QUEUE] if plan.arrangement else [LOCAL_QUEUE]
 
     # Read by app.worker.tasks in each Dramatiq process, which reports its errors.
     os.environ[SERVICE_ENVIRONMENT] = "remote-worker" if role == "remote" else "worker"
@@ -144,7 +158,7 @@ def main(arguments: list[str] | None = None) -> None:
     for warning in plan.warnings:
         print(f"Warning: {warning}", flush=True)
     print(
-        f"Starting Dramatiq on queue {queue} with {plan.processes} process(es) and "
+        f"Starting Dramatiq on queue(s) {', '.join(queues)} with {plan.processes} process(es) and "
         f"{plan.threads} thread(s) per process ({plan.summary})",
         flush=True,
     )
@@ -163,7 +177,7 @@ def main(arguments: list[str] | None = None) -> None:
             "--threads",
             str(plan.threads),
             "--queues",
-            queue,
+            *queues,
         ],
     )
 

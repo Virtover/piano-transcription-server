@@ -35,11 +35,22 @@ from app.outsource import routing
 from app.worker import tasks
 
 STATUSES = ("queued", "processing", "completed", "failed", "cancelled")
+MODES = ("transcription", "arrangement")
 # Fields shown by `show` only as a summary: they are long.
 SUMMARISED_FIELDS = {"metadata"}
 
 
 # --- Data ---------------------------------------------------------------------
+
+def with_mode(row: dict) -> dict:
+    """The record with its mode named: rows from before arrangements existed
+    have none, and were transcriptions. An arrangement's style is added while
+    its Redis job still has it, since the record does not keep it."""
+    mode = row.get("mode") or "transcription"
+    row["mode"] = mode
+    row["style"] = tasks.redis.hget(tasks.job_key(row["job_id"]), "style") if mode == "arrangement" else None
+    return row
+
 
 def list_jobs(
     status: str | None = None,
@@ -47,10 +58,18 @@ def list_jobs(
     user: str | None = None,
     since: float | None = None,
     limit: int = 30,
+    mode: str | None = None,
 ) -> list[dict]:
     """Diagnostics records, newest first. user is an email address or user
-    ID; since is in seconds."""
+    ID; since is in seconds; mode is transcription or arrangement."""
     conditions, parameters = [], []
+    if mode == "arrangement":
+        conditions.append("j.mode = ?")
+        parameters.append("arrangement")
+    elif mode:
+        # NULL is a record from before arrangements.
+        conditions.append("(j.mode IS NULL OR j.mode <> ?)")
+        parameters.append("arrangement")
     if status:
         conditions.append("j.status = ?")
         parameters.append(status)
@@ -69,7 +88,7 @@ def list_jobs(
             {where} ORDER BY j.created_at DESC LIMIT ?""",
         (*parameters, limit),
     )
-    return [dict(row) for row in rows]
+    return [with_mode(dict(row)) for row in rows]
 
 
 def job_details(job: str) -> dict:
@@ -90,7 +109,7 @@ def job_details(job: str) -> dict:
     return {
         "job_id": job_id,
         "live": live or None,
-        "record": row_dict(records[0]) if records else None,
+        "record": with_mode(row_dict(records[0])) if records else None,
         "reservation": row_dict(reservations[0]) if reservations else None,
         "files": files,
     }
@@ -148,6 +167,17 @@ def requeue_plan(job: str, backend: routing.Backend | None = None) -> dict:
         raise AdminError("The uploaded file was deleted when the job failed; ask the user to upload it again")
     if backend == "remote" and not routing.outsourcing_enabled():
         raise AdminError("Outsourcing is off (OUTSOURCE_PROVIDER=none), so the job cannot run remotely")
+    if fields.get("mode") == tasks.ARRANGEMENT:
+        # The same check as a new arrangement: otherwise it could wait in a
+        # queue no worker consumes, holding its place and reservation.
+        from fastapi import HTTPException
+
+        from app.api.routes import transcriptions as transcription_routes
+
+        try:
+            transcription_routes.mode_fields("arrangement", tasks.arrangement_style(fields))
+        except HTTPException as error:
+            raise AdminError(f"The job cannot run again: {refusal_text(error)}") from error
     user_id = fields.get("user_id") or "anonymous"
     billed = billing_enabled() and user_id != "anonymous"
     return {
@@ -217,6 +247,10 @@ def refusal_text(error: Exception) -> str:
 
 # --- Command line -------------------------------------------------------------
 
+def mode_label(row: dict) -> str:
+    return f"arrangement {row['style']}" if row["style"] else row["mode"]
+
+
 def run_list(args) -> None:
     rows = list_jobs(
         "failed" if args.failed else args.status,
@@ -224,6 +258,7 @@ def run_list(args) -> None:
         args.user,
         parse_duration(args.since, "--since"),
         args.limit,
+        args.mode,
     )
     if args.json:
         print_json(rows)
@@ -233,13 +268,14 @@ def run_list(args) -> None:
         return
     print(
         table(
-            ["Created", "Job", "User", "Status", "Backend", "Length", "Error"],
+            ["Created", "Job", "User", "Status", "Mode", "Backend", "Length", "Error"],
             [
                 [
                     when(row["created_at"]),
                     row["job_id"][:8],
                     shorten(user_label(row["user_id"], row["email"]), 32),
                     row["status"],
+                    mode_label(row),
                     row["backend"],
                     span(row["duration_seconds"]),
                     shorten(row["error"], 60),
@@ -272,7 +308,7 @@ def run_show(args) -> None:
     record = details["record"]
     if record:
         print("\nDiagnostics record:")
-        for field in ("user_id", "email", "source", "source_url", "status", "backend", "requeue_reason"):
+        for field in ("user_id", "email", "source", "source_url", "status", "mode", "backend", "requeue_reason"):
             print(f"  {field}: {record[field] if record[field] is not None else '-'}")
         print(f"  outsourced: {'yes' if record['outsourced'] else 'no'}")
         print(f"  length: {span(record['duration_seconds'])}, cost: {record['cost_minutes'] or '-'} minutes")

@@ -123,6 +123,8 @@ class Billing:
                     CREATE INDEX IF NOT EXISTS minute_ledger_at_index ON minute_ledger (at);
                     CREATE INDEX IF NOT EXISTS job_diagnostics_user_index ON job_diagnostics (user_id);
                     CREATE INDEX IF NOT EXISTS job_diagnostics_created_index ON job_diagnostics (created_at);
+                    -- Added with piano arrangements; NULL in older rows means a transcription.
+                    ALTER TABLE job_diagnostics ADD COLUMN IF NOT EXISTS mode TEXT;
                     INSERT INTO billing_state (key, value) VALUES ('minute_ledger_since', '{ledger_since}')
                     ON CONFLICT (key) DO NOTHING
                     ;
@@ -229,6 +231,9 @@ class Billing:
                 connection.execute("ALTER TABLE purchases ADD COLUMN order_id TEXT")
             if "voided_at" not in purchase_columns:
                 connection.execute("ALTER TABLE purchases ADD COLUMN voided_at INTEGER")
+            job_columns = {row[1] for row in connection.execute("PRAGMA table_info(job_diagnostics)")}
+            if "mode" not in job_columns:
+                connection.execute("ALTER TABLE job_diagnostics ADD COLUMN mode TEXT")
 
     def _connect_raw(self):
         import psycopg
@@ -669,9 +674,10 @@ class Billing:
                 """INSERT INTO job_diagnostics
                    (job_id, user_id, source, source_url, duration_seconds, cost_minutes,
                     status, error, backend, outsourced, requeue_reason,
-                    created_at, started_at, finished_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, started_at, finished_at, updated_at, mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT (job_id) DO UPDATE SET
+                       mode = excluded.mode,
                        status = excluded.status,
                        error = excluded.error,
                        backend = excluded.backend,
@@ -702,6 +708,7 @@ class Billing:
                     now if status == "processing" else None,
                     now if status in TERMINAL_JOB_STATUSES else None,
                     now,
+                    "arrangement" if job.get("mode") == "arrangement" else "transcription",
                 ),
             )
 

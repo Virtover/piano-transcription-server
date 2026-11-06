@@ -239,7 +239,9 @@ class S3JobStorage:
             return False
         return True
 
-    def result_link(self, key: str) -> str:
+    def result_link(self, key: str, filename: str = RESULT_FILE_NAME) -> str:
+        """A signed link to a result, downloaded as filename: one of the
+        server's fixed names, never one a client chose."""
         try:
             return self.client.generate_presigned_url(
                 "get_object",
@@ -247,7 +249,7 @@ class S3JobStorage:
                     "Bucket": self.bucket,
                     "Key": key,
                     "ResponseContentType": "audio/midi",
-                    "ResponseContentDisposition": f'attachment; filename="{RESULT_FILE_NAME}"',
+                    "ResponseContentDisposition": f'attachment; filename="{filename}"',
                 },
                 ExpiresIn=RESULT_LINK_SECONDS,
             )

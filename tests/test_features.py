@@ -36,7 +36,10 @@ def test_every_reference_is_to_a_known_feature_setting_and_section():
         assert (ROOT / feature.docs.split("#")[0]).is_file(), feature.docs
 
 
-def test_a_basic_server_has_every_feature_off_and_no_problem(default_settings):
+def test_a_basic_server_has_every_optional_feature_off_and_no_problem(default_settings):
+    # Piano arrangements are the one feature that is on by default.
+    assert [feature.key for feature in FEATURES if feature.enabled(default_settings)] == ["arrangement"]
+    default_settings.worker.arrangement = False
     assert not any(feature.enabled(default_settings) for feature in FEATURES)
     assert all_problems(default_settings, "all") == []
 

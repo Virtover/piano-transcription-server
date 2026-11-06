@@ -22,12 +22,16 @@ from app.outsource import routing
 from app.transcription.audio import check_midi
 from app.errors import UserFacingError
 from app.transcription.cancellation import TranscriptionCancelled
+from app.transcription.styles import DEFAULT_STYLE, STYLES
 
 
 # Uploaded files are stored in the job directory under this name.
 UPLOAD_FILE_NAME = "upload.input"
 LOCAL_QUEUE = "default"
 REMOTE_QUEUE = "remote"
+# Local arrangement jobs: only workers that can arrange consume it.
+ARRANGEMENT_QUEUE = "arrangement"
+ARRANGEMENT = "arrangement"
 # A worker renews its job's lease while it runs. A processing job whose lease
 # has expired lost its worker, and is failed and refunded.
 LEASE_TTL = 60
@@ -333,6 +337,14 @@ def job_backend(job: dict[str, str]) -> routing.Backend:
     return "remote" if job.get("backend") == "remote" else "local"
 
 
+def arrangement_style(job: dict[str, str]) -> str | None:
+    """The style of an arrangement job, or None for a transcription, also
+    for jobs stored before arrangements existed."""
+    if job.get("mode") != ARRANGEMENT:
+        return None
+    return job.get("style") if job.get("style") in STYLES else DEFAULT_STYLE
+
+
 def fail_abandoned_job(job_id: str, reason: str) -> bool:
     """Fail and refund a processing job whose lease has expired: its worker
     stopped mid-job. Returns False if the job is not processing, or a worker
@@ -428,6 +440,9 @@ def check_completed_result(job_id: str, job: dict[str, str]) -> bool:
     return True
 
 
+ARRANGEMENT_OFF = "Piano arrangements were turned off on this server"
+
+
 def requeue_after_restart(job_id: str, job: dict[str, str], reason: str) -> None:
     backend = job_backend(job)
     if backend == "remote" and not routing.outsourcing_enabled():
@@ -435,17 +450,27 @@ def requeue_after_restart(job_id: str, job: dict[str, str], reason: str) -> None
         backend = "local"
         update_job(job_id, backend=backend)
     routing.mark_active(redis, backend, job_id)
+    if job.get("mode") == ARRANGEMENT and not settings.worker.arrangement:
+        # No worker would take it: nothing consumes the arrangement queue.
+        logger.warning("Job %s failed after the restart: %s", job_id, ARRANGEMENT_OFF)
+        fail_unqueued_job(job_id, job, backend, ARRANGEMENT_OFF)
+        return
     try:
         send_job(job_id, backend, *job_arguments(job))
     except Exception:
         logger.exception("Could not requeue job %s after the restart", job_id)
-        routing.mark_finished(redis, backend, job_id)
-        update_job(job_id, status="failed", error=reason, error_code=INTERRUPTED)
-        redis.expire(job_key(job_id), job_ttl())
-        record_job(job_id)
-        if job.get("user_id"):
-            billing.release(job_id)
-        delete_job_files(job_id)
+        fail_unqueued_job(job_id, job, backend, reason)
+
+
+def fail_unqueued_job(job_id: str, job: dict[str, str], backend: routing.Backend, reason: str) -> None:
+    """Fail and refund a queued job that could not be put in a queue."""
+    routing.mark_finished(redis, backend, job_id)
+    update_job(job_id, status="failed", error=reason, error_code=INTERRUPTED)
+    redis.expire(job_key(job_id), job_ttl())
+    record_job(job_id)
+    if job.get("user_id"):
+        billing.release(job_id)
+    delete_job_files(job_id)
 
 
 class JobContext:
@@ -460,12 +485,15 @@ class JobContext:
         output_dir: Path,
         progress_floor: float = 0.0,
         max_seconds: float | None = None,
+        arrangement_style: str | None = None,
     ):
         self.job_id = job_id
         self.output_dir = output_dir
         self.progress_floor = progress_floor
         # The duration the job was charged for; audio past it is not transcribed.
         self.max_seconds = max_seconds
+        # Set for an arrangement job, which runs AMT-APC instead of Transkun.
+        self.arrangement_style = arrangement_style
 
     def is_cancelled(self) -> bool:
         return is_job_cancelled(self.job_id)
@@ -537,7 +565,7 @@ def run_job(
             max_seconds = float(stored["duration"]) if stored.get("duration") else None
         except ValueError:
             max_seconds = None
-        context = JobContext(job_id, output_dir, floor, max_seconds)
+        context = JobContext(job_id, output_dir, floor, max_seconds, arrangement_style(stored))
 
         midi_path = transcribe(context)
 
@@ -628,6 +656,10 @@ def retry_backend(job_id: str, backend: routing.Backend, error: Exception) -> ro
 
     if backend == "remote":
         if isinstance(error, RemoteFailed) and settings.outsource.fallback_local:
+            if redis.hget(job_key(job_id), "mode") == ARRANGEMENT:
+                # Only to a worker that arranges, or it would wait in vain.
+                _, arranging = routing.arrangement_workers(redis)
+                return "local" if arranging else None
             return "local"
         return None
     if (
@@ -693,19 +725,19 @@ def job_arguments(job: dict[str, str]) -> tuple:
 
 
 def send_job(job_id: str, backend: routing.Backend, *arguments, **options) -> None:
-    actor = transcribe_job if backend == "local" else transcribe_remote_job
+    """Hand a stored job to its backend's queue. A local arrangement goes to
+    the queue only workers that can arrange consume; the mode is read from
+    the job, so every requeue keeps it."""
+    if backend == "remote":
+        actor = transcribe_remote_job
+    elif redis.hget(job_key(job_id), "mode") == ARRANGEMENT:
+        actor = arrange_job
+    else:
+        actor = transcribe_job
     actor.send(job_id, *arguments, **options)
 
 
-@dramatiq.actor(max_retries=0)
-def transcribe_job(
-    job_id: str,
-    source_url: str | None = None,
-    upload_title: str | None = None,
-):
-    """Transcribe a video URL, or the uploaded file in the job directory
-    when source_url is None, on this machine's GPU or CPU."""
-
+def run_local_job(job_id: str, source_url: str | None, upload_title: str | None) -> None:
     def transcribe(context: JobContext) -> Path:
         from app.transcription.pipeline import transcribe_source
 
@@ -718,9 +750,32 @@ def transcribe_job(
             metadata_callback=context.metadata,
             cancellation_callback=context.is_cancelled,
             max_seconds=context.max_seconds,
+            arrangement_style=context.arrangement_style,
         )
 
     run_job(job_id, "local", transcribe)
+
+
+@dramatiq.actor(max_retries=0)
+def transcribe_job(
+    job_id: str,
+    source_url: str | None = None,
+    upload_title: str | None = None,
+):
+    """Transcribe a video URL, or the uploaded file in the job directory
+    when source_url is None, on this machine's GPU or CPU."""
+    run_local_job(job_id, source_url, upload_title)
+
+
+@dramatiq.actor(queue_name=ARRANGEMENT_QUEUE, max_retries=0)
+def arrange_job(
+    job_id: str,
+    source_url: str | None = None,
+    upload_title: str | None = None,
+):
+    """Arrange a video URL, or the uploaded file, for piano, on this
+    machine's GPU or CPU. Only workers that can arrange consume its queue."""
+    run_local_job(job_id, source_url, upload_title)
 
 
 @dramatiq.actor(
@@ -748,6 +803,7 @@ def transcribe_remote_job(
                 upload_path=None if source_url else context.output_dir / UPLOAD_FILE_NAME,
                 upload_title=upload_title,
                 max_seconds=context.max_seconds,
+                arrangement_style=context.arrangement_style,
             )
         finally:
             routing.release_remote_slot(redis, job_id)
@@ -774,12 +830,13 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
         if not consumes(worker, LOCAL_QUEUE):
             return
         capacity = worker.worker_threads
+        arranges = consumes(worker, ARRANGEMENT_QUEUE) and settings.worker.arrangement
         stop = self._stop = threading.Event()
 
         def beat():
             while not stop.is_set():
                 try:
-                    routing.publish_heartbeat(redis, capacity, local_job_duration.value)
+                    routing.publish_heartbeat(redis, capacity, local_job_duration.value, arrangement=arranges)
                 except Exception:
                     logger.exception("Could not publish the worker heartbeat")
                 stop.wait(self.interval)
@@ -804,12 +861,18 @@ class LocalModelPreload(dramatiq.Middleware):
         if not consumes(worker, LOCAL_QUEUE):
             return
 
+        arranges = consumes(worker, ARRANGEMENT_QUEUE) and settings.worker.arrangement
+
         def preload():
             started = time.monotonic()
             try:
                 from app.transcription.piano_transcription import preload
 
                 preload()
+                if arranges:
+                    from app.transcription.arrangement import preload as preload_arrangement
+
+                    preload_arrangement()
             except Exception:
                 # The first job loads them again, and fails if they still cannot.
                 logger.exception("Could not load the models before the first job")

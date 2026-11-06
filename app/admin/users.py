@@ -18,6 +18,7 @@ from app.admin.common import (
     table,
     when,
 )
+from app.admin.jobs import mode_label, with_mode
 from app.billing import period_seconds
 from app.config import settings
 from app.worker import tasks
@@ -73,7 +74,7 @@ def account(who: str) -> dict:
         ],
         "reservations": reserved,
         "jobs": [
-            dict(row)
+            with_mode(dict(row))
             for row in billing.read(
                 "SELECT * FROM job_diagnostics WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
                 (user_id, RECENT),
@@ -196,12 +197,13 @@ def run_show(args) -> None:
     if data["jobs"]:
         print(
             table(
-                ["Created", "Job", "Status", "Length", "Cost", "Error"],
+                ["Created", "Job", "Status", "Mode", "Length", "Cost", "Error"],
                 [
                     [
                         when(row["created_at"]),
                         row["job_id"][:8],
                         row["status"],
+                        mode_label(row),
                         span(row["duration_seconds"]),
                         row["cost_minutes"],
                         shorten(row["error"], 50),

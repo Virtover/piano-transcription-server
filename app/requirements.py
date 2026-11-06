@@ -276,6 +276,8 @@ def storage_sections(config) -> list[Section]:
 
 
 def outsourcing_sections(config) -> list[Section]:
+    from app.config import gpu_reserve_gib
+
     enabled = config.outsource.provider == "runpod"
     note = "enabled (OUTSOURCE_PROVIDER=runpod)" if enabled else "not enabled; set OUTSOURCE_PROVIDER=runpod to use it"
     endpoint = _or_placeholder(config.storage.endpoint, "STORAGE_ENDPOINT")
@@ -345,8 +347,18 @@ def outsourcing_sections(config) -> list[Section]:
                 "GPU memory",
                 f"{GPU_SIZES_GIB[0]} GB or more",
                 f"About {small} jobs fit on {GPU_SIZES_GIB[0]} GB and {large} on {GPU_SIZES_GIB[1]} GB "
-                f"(WORKER_MODEL_MEMORY_GIB={config.worker.model_memory_gib:g}, "
+                f"(WORKER_GPU_RESERVE_GIB={gpu_reserve_gib(config.worker):g}, "
                 f"WORKER_MEMORY_PER_JOB_GIB={config.worker.memory_per_job_gib:g}).",
+            ),
+            *(
+                [Requirement(
+                    "Environment variable",
+                    "WORKER_ARRANGEMENT unset or true",
+                    "Piano arrangements are on here, and the endpoint only arranges with it (the default); "
+                    "arrangement jobs sent to it fail if it is false.",
+                    True,
+                )]
+                if config.worker.arrangement else []
             ),
             Requirement(
                 "Host CUDA version",

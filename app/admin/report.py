@@ -95,7 +95,8 @@ def job_time(billing, start: float, period: str, price_per_hour: float | None) -
     periods = []
     remote_seconds = 0.0
     for row in rows:
-        seconds = row["seconds"] or 0
+        # PostgreSQL sums integers as numeric, which psycopg reads as Decimal.
+        seconds = float(row["seconds"] or 0)
         cost = None
         if row["backend"] == "remote":
             remote_seconds += seconds

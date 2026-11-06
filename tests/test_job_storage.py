@@ -20,6 +20,8 @@ class FakeS3:
 
     def __init__(self):
         self.objects: dict[str, dict] = {}
+        # The parameters of every signed link.
+        self.signed: list[dict] = []
 
     def _missing(self, operation):
         return ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, operation)
@@ -59,6 +61,7 @@ class FakeS3:
             self.objects.pop(item["Key"], None)
 
     def generate_presigned_url(self, operation, Params, ExpiresIn):
+        self.signed.append(Params)
         return f"https://storage.example/{Params['Bucket']}/{Params['Key']}?expires={ExpiresIn}"
 
 
@@ -246,6 +249,24 @@ def test_the_result_is_a_signed_link_to_the_bucket(api_context, bucket):
         f"https://storage.example/jobs-bucket/{PREFIX}job/transcription.mid?expires={job_storage.RESULT_LINK_SECONDS}"
     )
     assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    ("fields", "name"),
+    [({}, "transcription.mid"), ({"mode": "transcription"}, "transcription.mid"), ({"mode": "arrangement", "style": "level2"}, "arrangement.mid")],
+)
+def test_the_signed_link_names_the_download_by_the_jobs_mode(api_context, bucket, fields, name):
+    client, _, _ = api_context
+    store(bucket, "job", "transcription.mid", b"MThd")
+    tasks.redis.hset(
+        tasks.job_key("job"), mapping={"status": "completed", "result": f"s3:{PREFIX}job/transcription.mid", **fields}
+    )
+
+    assert client.get("/api/transcriptions/job/midi", follow_redirects=False).status_code == 307
+
+    [params] = bucket.signed
+    assert params["ResponseContentDisposition"] == f'attachment; filename="{name}"'
+    assert params["ResponseContentType"] == "audio/midi"
 
 
 def test_a_result_missing_from_the_bucket_is_gone(api_context, bucket):

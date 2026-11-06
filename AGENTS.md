@@ -34,6 +34,9 @@ python scripts/kube.py restart 5m                               # server.py's an
 | `app/worker/tasks.py` | Job lifecycle, billing settlement, local and remote actors |
 | `app/outsource/` | Routing between local and RunPod, storage, the RunPod client |
 | `app/transcription/` | Audio, batching, and the model |
+| `app/transcription/amt_apc/` | Vendored AMT-APC inference (MIT), for piano arrangements; weights `apc.pth` are fetched, with a sha256, at image build |
+| `app/transcription/arrangement.py`, `styles.py` | The arrangement batcher, and the styles a request may ask for |
+| `app/transcription/budget.py` | The per-device memory budget that transcription and arrangement steps share |
 | `app/billing.py` | Billing database (PostgreSQL; SQLite only for legacy installs), also job diagnostics |
 | `app/backups.py` | `python -m app.backups`: billing backups, which are kept, and the encrypted off-site copies |
 | `app/error_report.py` | Optional error reports of the API and workers to `ERROR_REPORT_URL`, with secrets redacted |
@@ -75,6 +78,10 @@ People can run `python scripts/setup.py`. For guided setup by an agent, use the 
 ## Pitfalls
 
 - `Set-Content -NoNewline <file> <value>` swaps its arguments in Windows PowerShell 5.1 and creates a file named after the secret. Always use `Set-Content -Path <file> -Value <value> -NoNewline`.
+- The worker venv's tests import `torch` and `transkun`; in the repo `.venv` they are skipped (`pkg_resources` is missing). Run them in a worker image (`docs/testing.md`).
+- AMT-APC input must be resampled with torchaudio's `Resample`, not soxr: with soxr about 30% of the notes change.
+- Piano arrangements are on by default (`WORKER_ARRANGEMENT`). An arrangement job runs only on a worker that consumes the `arrangement` queue: the setting on, and room on a GPU (or a CPU worker). Otherwise it waits.
+- The RunPod endpoint must run an image with `apc.pth` and reads the same `WORKER_ARRANGEMENT` default; with `false` there it fails the arrangements sent to it.
 - Only `secrets/` is git-ignored for secrets: check `git status` for stray files after writing one.
 - The services run as user ID 10001. The `prepare` Compose service (`app/prepare.py`) gives them `/data` and `billing-data` before every start; it must never touch the PostgreSQL cluster.
 - Starting without `secrets/postgres_password` or a file in `secrets/redis` makes Docker create an empty folder in its place. `scripts/server.py start` and `restart` replace it with a generated password.

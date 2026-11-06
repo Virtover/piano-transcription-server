@@ -1,4 +1,4 @@
-from concurrent.futures import Future
+﻿from concurrent.futures import Future
 from dataclasses import dataclass, field
 
 import pytest
@@ -242,6 +242,8 @@ def test_fixed_batch_size_is_clamped_with_warning_at_startup(default_settings, m
 
 
 def test_cpu_batch_size_uses_cpu_and_ram(default_settings, monkeypatch):
+    # Transcriptions only: arrangements, on by default, ask for more RAM per job.
+    default_settings.worker.arrangement = False
     monkeypatch.setattr(device, "physical_cpu_count", lambda: 8)
     memory = type("Memory", (), {"available": 16 * 1024**3})()
     monkeypatch.setattr(
@@ -254,10 +256,32 @@ def test_cpu_batch_size_uses_cpu_and_ram(default_settings, monkeypatch):
     assert device.cpu_batch_size() == 6
     assert launcher.plan_worker(None).threads == 6
 
-    default_settings.worker.cpu_model_memory_gib = 4
+    default_settings.worker.cpu_reserve_gib = 4
     default_settings.worker.cpu_memory_per_job_gib = 3
     memory.available = 5 * 1024**3
     assert device.cpu_batch_size() == 1
 
     default_settings.worker.batch_size = 3
     assert launcher.plan_worker(None).threads == 3
+
+
+def test_cpu_batch_size_makes_room_for_arrangements_when_they_are_on(default_settings, monkeypatch):
+    monkeypatch.setattr(device, "physical_cpu_count", lambda: 8)
+    memory = type("Memory", (), {"available": 16 * 1024**3})()
+    monkeypatch.setattr(
+        device,
+        "psutil",
+        type("Psutil", (), {"cpu_count": lambda logical=False: 8, "virtual_memory": lambda: memory}),
+    )
+
+    default_settings.worker.arrangement = False
+    # (16 - 2 GiB reserve) / 2 GiB per transcription = 7, capped by the 6 threads.
+    assert device.cpu_batch_size() == 6
+    default_settings.worker.arrangement = True
+    # Any thread may arrange: (16 - 2) / 2.5 GiB = 5.
+    assert device.cpu_batch_size() == 5
+    default_settings.worker.cpu_arrangement_memory_gib = 1.0
+    # The larger of the two per-job figures counts.
+    assert device.cpu_batch_size() == 6
+    default_settings.worker.cpu_memory_per_job_gib = 4.0
+    assert device.cpu_batch_size() == 3

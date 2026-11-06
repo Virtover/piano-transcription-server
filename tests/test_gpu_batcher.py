@@ -1,4 +1,4 @@
-import threading
+﻿import threading
 from concurrent.futures import Future
 
 import pytest
@@ -12,6 +12,7 @@ torch = piano_transcription.torch
 
 from app.config import settings  # noqa: E402
 from app.transcription.batching import GpuOutOfMemory  # noqa: E402
+from app.transcription.budget import DeviceBudget  # noqa: E402
 from app.transcription.cancellation import TranscriptionCancelled  # noqa: E402
 
 
@@ -51,7 +52,7 @@ def test_batch_out_of_memory_propagates_without_resolving_requests():
     requests = [request(), request()]
 
     with pytest.raises(torch.cuda.OutOfMemoryError):
-        piano_transcription._transcribe_audio_batch(FakeModel(limit=1), requests)
+        piano_transcription._transcribe_audio_batch(FakeModel(limit=1), requests, DeviceBudget(100.0), 1.0)
 
     assert not any(item.result.done() for item in requests)
 
@@ -65,7 +66,7 @@ def test_progress_callback_failure_fails_only_that_request():
     progress = []
     healthy = request(progress=progress)
 
-    piano_transcription._transcribe_audio_batch(FakeModel(limit=8), [failing, healthy])
+    piano_transcription._transcribe_audio_batch(FakeModel(limit=8), [failing, healthy], DeviceBudget(100.0), 1.0)
 
     assert isinstance(failing.result.exception(), TranscriptionCancelled)
     assert healthy.result.result() == []

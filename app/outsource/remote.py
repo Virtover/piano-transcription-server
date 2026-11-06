@@ -105,8 +105,10 @@ def transcribe_remotely(
     provider: RemoteProvider | None = None,
     storage: AudioStorage | None = None,
     max_seconds: float | None = None,
+    arrangement_style: str | None = None,
 ) -> Path:
     """Fetch and convert audio, transcribe it remotely, and write the MIDI.
+    With arrangement_style, the endpoint arranges it for piano instead.
 
     Provider and storage problems raise RemoteFailed, which the job lifecycle
     can turn into a local retry. The storage object is always deleted.
@@ -133,7 +135,10 @@ def transcribe_remotely(
         url = storage.presigned_url(key, int(settings.outsource.timeout) + URL_GRACE_SECONDS)
         context.progress(0.10)
 
-        remote_id = provider.submit({"audio_url": url, "job_id": context.job_id})
+        request = {"audio_url": url, "job_id": context.job_id}
+        if arrangement_style is not None:
+            request.update(mode="arrangement", style=arrangement_style)
+        remote_id = provider.submit(request)
         context.set(remote_id=remote_id)
         output = wait_for_result(context, provider, remote_id)
 

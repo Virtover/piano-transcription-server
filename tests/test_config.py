@@ -52,10 +52,52 @@ def test_invalid_auto_integer_names_the_variable(tmp_path, value):
 
 def test_errors_are_collected_across_groups(tmp_path):
     with pytest.raises(ConfigError) as error:
-        load(tmp_path, "WORKER_MODEL_MEMORY_GIB=-1\nCLEANUP_INTERVAL=often\nBILLING_PROVIDER=stripe\nFREE_MINUTES=x\n")
+        load(tmp_path, "WORKER_GPU_RESERVE_GIB=-1\nCLEANUP_INTERVAL=often\nBILLING_PROVIDER=stripe\nFREE_MINUTES=x\n")
 
     names = sorted(problem.split(":")[0] for problem in error.value.problems)
-    assert names == ["BILLING_PROVIDER", "CLEANUP_INTERVAL", "FREE_MINUTES", "WORKER_MODEL_MEMORY_GIB"]
+    assert names == ["BILLING_PROVIDER", "CLEANUP_INTERVAL", "FREE_MINUTES", "WORKER_GPU_RESERVE_GIB"]
+
+
+@pytest.mark.parametrize(
+    ("text", "arrangement", "reserve"),
+    [
+        ("", True, 1.25),
+        ("WORKER_ARRANGEMENT=false\n", False, 1.0),
+        ("WORKER_ARRANGEMENT=true\n", True, 1.25),
+        ("WORKER_ARRANGEMENT=true\nWORKER_GPU_RESERVE_GIB=auto\n", True, 1.25),
+        ("WORKER_ARRANGEMENT=true\nWORKER_GPU_RESERVE_GIB=0.6\n", True, 0.6),
+    ],
+)
+def test_gpu_reserve_auto_covers_the_models_loaded(tmp_path, text, arrangement, reserve):
+    worker = load(tmp_path, text).worker
+
+    assert worker.arrangement is arrangement
+    assert config.gpu_reserve_gib(worker) == reserve
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "lots", "inf", "nan"])
+def test_gpu_reserve_must_be_auto_or_positive(tmp_path, value):
+    with pytest.raises(ConfigError, match=r"WORKER_GPU_RESERVE_GIB: must be 'auto' or a positive number"):
+        load(tmp_path, f"WORKER_GPU_RESERVE_GIB={value}\n")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "field"),
+    [
+        ("WORKER_MODEL_MEMORY_GIB", "WORKER_GPU_RESERVE_GIB", "gpu_reserve_gib"),
+        ("WORKER_CPU_MODEL_MEMORY_GIB", "WORKER_CPU_RESERVE_GIB", "cpu_reserve_gib"),
+    ],
+)
+def test_the_old_reserve_names_still_work(tmp_path, caplog, old, new, field):
+    with caplog.at_level(logging.WARNING, logger="app.config"):
+        worker = load(tmp_path, f"{old}=1.5\n").worker
+
+    assert getattr(worker, field) == 1.5
+    assert f"{old} is deprecated; use {new} instead" in caplog.text
+    with pytest.raises(ConfigError, match=f"{old} and {new} are both set; remove {old}"):
+        load(tmp_path, f"{old}=1.5\n{new}=2\n")
+    with pytest.raises(ConfigError, match=rf"{old} \(deprecated name of {new}\)"):
+        load(tmp_path, f"{old}=-1\n")
 
 
 def test_plain_number_needs_a_unit_for_new_names(tmp_path):

@@ -3,7 +3,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
@@ -20,8 +20,11 @@ from app.api.routes.billing import check_video, ensure_accepting, ensure_allowed
 from app.auth import AuthenticatedUser, current_user
 from app.media import UnsupportedMedia, probe_audio
 from app.outsource import routing
+from app.transcription.styles import DEFAULT_STYLE, STYLES
 from app.worker.tasks import (
+    ARRANGEMENT,
     UPLOAD_FILE_NAME,
+    arrangement_style,
     cancel_job,
     job_key,
     record_job,
@@ -58,8 +61,16 @@ def enable_transcription_submissions() -> None:
     transcription_submissions_enabled = True
 
 
+Mode = Literal["transcription", "arrangement"]
+Style = Literal[STYLES]
+
+
 class CreateTranscriptionRequest(BaseModel):
     source_url: HttpUrl
+    # arrangement: a piano cover of the song instead of a transcription of
+    # its piano; style from sparse (level1) to dense (level3).
+    mode: Mode = "transcription"
+    style: Style | None = None
 
 
 class CreateTranscriptionResponse(BaseModel):
@@ -95,6 +106,9 @@ class TranscriptionStatusResponse(BaseModel):
     # Where the model runs: local or remote. Absent for jobs queued before
     # outsourcing existed.
     backend: str | None = None
+    mode: Mode = "transcription"
+    # Set for an arrangement.
+    style: str | None = None
     # A planned server restart or shutdown, if one is pending.
     maintenance: NoticeResponse | None = None
 
@@ -254,6 +268,36 @@ def ensure_minimum_balance(user: AuthenticatedUser | None) -> None:
         )
 
 
+ARRANGEMENT_UNAVAILABLE = "arrangement_unavailable"
+
+
+def mode_fields(mode: str, style: str | None) -> dict[str, str]:
+    """The job fields of a submission's mode, after checking that it can
+    run. An arrangement needs WORKER_ARRANGEMENT, and somewhere to run: a
+    live worker that arranges, or RunPod. Without any live worker it is
+    queued, as a transcription is, for when one starts."""
+    if mode != "arrangement":
+        if style is not None:
+            raise HTTPException(status_code=422, detail="style is only used with mode arrangement")
+        return {}
+    if not settings.worker.arrangement:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "Piano arrangements are off on this server", "error_code": ARRANGEMENT_UNAVAILABLE},
+        )
+    if not routing.outsourcing_enabled():
+        live, arranging = routing.arrangement_workers(redis)
+        if live and not arranging:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "No worker of this server has room for piano arrangements",
+                    "error_code": ARRANGEMENT_UNAVAILABLE,
+                },
+            )
+    return {"mode": ARRANGEMENT, "style": style or DEFAULT_STYLE}
+
+
 def current_notice() -> NoticeResponse | None:
     notice = maintenance.current(redis)
     return notice.as_response() if notice else None
@@ -305,7 +349,9 @@ def queue_job(
     # Queued jobs do not expire; an upload placeholder had a TTL.
     redis.persist(job_key(job_id))
     if backend is None:
-        backend = routing.choose_backend(redis, job_id)
+        # From the stored job, which an administrator's requeue keeps.
+        arrangement = redis.hget(job_key(job_id), "mode") == ARRANGEMENT
+        backend = routing.choose_backend(redis, job_id, arrangement)
     else:
         routing.mark_active(redis, backend, job_id)
     redis.hset(job_key(job_id), "backend", backend)
@@ -346,13 +392,14 @@ def create_transcription(
     if idempotency_key is not None and (earlier := earlier_submission(job_id, user)) is not None:
         return earlier
     ensure_no_maintenance_pending()
+    modes = mode_fields(request.mode, request.style)
     ensure_accepting(user_id, link=True, source_url=str(request.source_url))
     # The place is held during the video check too, which runs yt-dlp.
     earlier = claim_submission(job_id, user, "preparing")
     if earlier is not None:
         return earlier
     try:
-        return submit_link(job_id, str(request.source_url), user)
+        return submit_link(job_id, str(request.source_url), user, fields=modes)
     except BaseException:
         give_back_place(job_id, user_id)
         delete_job_files(job_id)
@@ -375,8 +422,10 @@ def submit_link(
     source_url: str,
     user: AuthenticatedUser | None,
     backend: routing.Backend | None = None,
+    fields: dict[str, str] | None = None,
 ) -> CreateTranscriptionResponse:
-    """Check a video link and queue it, for a job whose place is held."""
+    """Check a video link and queue it, for a job whose place is held, with
+    fields such as its mode."""
     video = check_video(source_url)
     # The worker downloads with this info instead of asking the site again.
     folder = job_storage.storage().workspace(job_id)
@@ -386,7 +435,7 @@ def submit_link(
         # Freed before the job is queued, so it cannot remove what a worker
         # on this machine fetched.
         job_storage.storage().release(folder)
-    fields = {"source_url": source_url}
+    fields = {**(fields or {}), "source_url": source_url}
     # Clients see the title while the job waits; the download updates it.
     metadata = video_info.video_metadata(video.info, source_url)
     if metadata["title"]:
@@ -413,6 +462,8 @@ async def upload_transcription(
         max_length=255,
         description="Original file name; used as the transcription title.",
     ),
+    mode: Mode = Query("transcription", description="arrangement: a piano cover instead of a transcription."),
+    style: Style | None = Query(None, description="Arrangement style, from sparse (level1) to dense (level3)."),
     user: AuthenticatedUser | None = Depends(current_user),
     idempotency_key: str | None = IDEMPOTENCY_KEY,
 ):
@@ -426,6 +477,7 @@ async def upload_transcription(
         if earlier is not None:
             return earlier
     ensure_no_maintenance_pending()
+    modes = await run_in_threadpool(mode_fields, mode, style)
     await run_in_threadpool(ensure_accepting, user.user_id if user else "anonymous", False)
 
     size_limit = (
@@ -480,7 +532,7 @@ async def upload_transcription(
             job_id,
             user,
             duration,
-            {"source": "upload", "title": title, "upload_title": title},
+            {**modes, "source": "upload", "title": title, "upload_title": title},
             (),
             {"upload_title": title},
         )
@@ -530,6 +582,8 @@ def get_transcription(
         error_code=job.get("error_code"),
         minutes=current_user_balance(job.get("user_id")),
         backend=job.get("backend"),
+        mode="arrangement" if job.get("mode") == ARRANGEMENT else "transcription",
+        style=arrangement_style(job),
         maintenance=current_notice(),
     )
 
@@ -603,7 +657,7 @@ def get_midi(
             bucket = job_storage.s3()
             if not bucket.result_exists(key):
                 raise HTTPException(status_code=404, detail="MIDI result is no longer available")
-            return RedirectResponse(bucket.result_link(key), status_code=307)
+            return RedirectResponse(bucket.result_link(key, result_filename(job)), status_code=307)
         except StorageUnavailable as error:
             raise HTTPException(status_code=503, detail=STORAGE_UNAVAILABLE) from error
 
@@ -627,5 +681,9 @@ def get_midi(
     return FileResponse(
         result_path,
         media_type="audio/midi",
-        filename="transcription.mid",
+        filename=result_filename(job),
     )
+
+
+def result_filename(job: dict[str, str]) -> str:
+    return "arrangement.mid" if job.get("mode") == ARRANGEMENT else "transcription.mid"

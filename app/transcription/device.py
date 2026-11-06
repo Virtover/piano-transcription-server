@@ -2,7 +2,7 @@ import logging
 import os
 import subprocess
 
-from app.config import settings
+from app.config import gpu_reserve_gib, settings
 
 try:
     import psutil
@@ -44,9 +44,12 @@ def cpu_batch_size() -> int:
 
     available_memory = psutil.virtual_memory().available
     worker = settings.worker
+    # Any thread may run an arrangement when they are on.
+    per_job = max(worker.cpu_memory_per_job_gib, worker.cpu_arrangement_memory_gib) if worker.arrangement \
+        else worker.cpu_memory_per_job_gib
     memory_limit = int(
-        max(0, available_memory - worker.cpu_model_memory_gib * 1024**3)
-        // (worker.cpu_memory_per_job_gib * 1024**3)
+        max(0, available_memory - worker.cpu_reserve_gib * 1024**3)
+        // (per_job * 1024**3)
     )
     return max(1, min(cpu_limit, memory_limit))
 
@@ -124,13 +127,35 @@ def device_free_memory(
     return free_memory, total_memory
 
 
-def job_capacity(free_memory: float, config=None) -> int:
-    """Jobs that fit in free_memory bytes of VRAM next to one model, and the
-    beat tracker of the tempo map when it is on."""
+def gpu_budget_gib(free_memory: float, config=None) -> float:
+    """GiB of free_memory bytes of VRAM left for model steps, after what is
+    loaded once (WORKER_GPU_RESERVE_GIB) and the beat tracker of the tempo
+    map when it is on. Transcription jobs and arrangement steps share it."""
     worker = (config or settings).worker
-    reserved = worker.model_memory_gib + (TEMPO_MAP_MEMORY_GIB if worker.tempo_map else 0)
-    available_memory = max(0, free_memory - reserved * 1024**3)
-    return int(available_memory // (worker.memory_per_job_gib * 1024**3))
+    reserved = gpu_reserve_gib(worker) + (TEMPO_MAP_MEMORY_GIB if worker.tempo_map else 0)
+    return max(0.0, free_memory / 1024**3 - reserved)
+
+
+def job_capacity(free_memory: float, config=None) -> int:
+    """Transcription jobs that fit in free_memory bytes of VRAM."""
+    worker = (config or settings).worker
+    # Rounded, so that a budget of exactly n jobs is not lost to float error.
+    return int(round(gpu_budget_gib(free_memory, config) / worker.memory_per_job_gib, 9))
+
+
+def arrangement_fits(free_memory: float, config=None) -> bool:
+    """Whether a GPU with free_memory bytes free takes arrangement jobs: the
+    feature is on and one arrangement step fits in its budget."""
+    worker = (config or settings).worker
+    return worker.arrangement and gpu_budget_gib(free_memory, config) + 1e-9 >= worker.arrangement_memory_gib
+
+
+def cpu_budget_gib() -> float:
+    """GiB of system RAM for CPU steps, after WORKER_CPU_RESERVE_GIB. Steps
+    run one at a time on the CPU, so this only limits what one step takes."""
+    if psutil is None:
+        return float("inf")
+    return max(0.0, psutil.virtual_memory().available / 1024**3 - settings.worker.cpu_reserve_gib)
 
 
 def cuda_job_capacities() -> list[tuple[int, int, int, int]] | None:

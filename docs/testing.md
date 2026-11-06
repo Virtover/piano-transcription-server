@@ -37,6 +37,14 @@ python -m pytest -q tests/test_account_api.py
 python -m pytest -q -k cancellation
 ```
 
+## 🐳 Tests that need the worker's packages
+
+Tests that import `torch` or `transkun` (`tests/test_arrangement*.py`, `tests/test_budget.py`, `tests/test_amt_apc.py`, and the batching and device tests) are skipped in the test environment above, which does not install them. Run them in a worker image, which has the packages and `apc.pth`. The image has no pytest and no tests, so mount the tests and install pytest in the container:
+
+```shell
+docker compose run --rm --no-deps -v ./tests:/app/tests:ro -v ./pytest.ini:/app/pytest.ini:ro worker sh -c "python3 -m pip install -q pytest && python3 -m pytest -q tests/test_amt_apc.py tests/test_budget.py tests/test_arrangement.py"
+```
+
 ## ⚡ Benchmarking CPU versus GPU
 
 The repository includes [scripts/benchmark_transcription.py](../scripts/benchmark_transcription.py).
@@ -112,6 +120,8 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 
 | File | Covers |
 | --- | --- |
+| `test_arrangement.py`, `test_arrangement_api.py`, `test_arrangement_tasks.py` | Piano arrangements: the arrangement batcher and styles, the `mode` and `style` request fields and their refusals, and the arrangement job lifecycle and routing. The first needs the worker's packages. |
+| `test_budget.py`, `test_amt_apc.py` | The shared per-device memory budget, and the vendored AMT-APC inference. Both need the worker's packages. |
 | `test_transcriptions_api.py` | Job creation, status, cancellation, MIDI download, path checks, job ownership, reservations, and startup and worker errors. |
 | `test_billing_api.py` | Server info, cost, balance, Google Play purchase verification, and free-minute grants. |
 | `test_account_api.py` | Account deletion: removed data, kept anonymous purchases, running jobs, free-minute abuse protection, and deletion with `app.admin user ... delete`. |

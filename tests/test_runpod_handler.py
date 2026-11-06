@@ -25,7 +25,13 @@ def handler():
     # Loaded from its file: the directory name `runpod` is also the SDK's package name.
     spec = importlib.util.spec_from_file_location("runpod_handler", HANDLER_PATH)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # These tests are about transcriptions; the arrangement weights are not in every test image.
+    arrangement = settings.worker.arrangement
+    settings.worker.arrangement = False
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        settings.worker.arrangement = arrangement
     return module
 
 
@@ -36,9 +42,9 @@ def requests_in(handler, monkeypatch):
     sizes = []
     original = piano_transcription._transcribe_audio_batch
 
-    def recording(model, requests):
+    def recording(model, requests, *budget):
         sizes.append(len(requests))
-        return original(model, requests)
+        return original(model, requests, *budget)
 
     monkeypatch.setattr(piano_transcription, "_transcribe_audio_batch", recording)
 

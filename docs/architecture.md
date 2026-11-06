@@ -16,7 +16,7 @@ cleanup service: deletes expired job files and stale routing entries
 ```
 
 * `api` accepts requests and uploaded files, serves status and MIDI files, and decides whether each job runs locally or remotely. It checks uploads with `ffprobe`.
-* `worker` consumes the `default` queue: it downloads audio, or reads the uploaded file, and runs the model on this machine's GPU or CPU.
+* `worker` consumes the `default` queue, and the `arrangement` queue when it can make [piano arrangements](#-piano-arrangements): it downloads audio, or reads the uploaded file, and runs the model on this machine's GPU or CPU.
 * `remote-worker` consumes the `remote` queue when `OUTSOURCE_PROVIDER` is set; with `none` it only idles. It always starts, so `server.env` is the one switch. It downloads and converts audio here, then runs the model on RunPod. It runs on the API image and never loads torch or the model.
 * `cleanup` removes files whose Redis job state has expired.
 * `redis` stores job state and queues work.
@@ -52,6 +52,21 @@ Transkun gives every note's time in seconds; by itself the MIDI file would be at
 * Measured on 142 s of audio: 0.23 s on an RTX 3060 Ti, 4.2 s on 4 CPU threads; 60 minutes take 7 s on that GPU.
 * Safeguards: the weights are checked against their SHA-256 when the image is built and never downloaded at run time. Before the file is replaced, every event of the new MIDI is checked to play at its original time. The new file is written beside the old one and moved over it, so a failed write, such as on a full disk, leaves the MIDI as Transkun wrote it; the whole result is then synced to disk before it replaces the job's MIDI, as without a tempo map.
 * Limits: the beat is the level Beat This! hears, usually the quarter note but sometimes the half or eighth note. Compound meters such as 6/8 become 2/4 with triplets. Free passages without a pulse, such as cadenzas, can make the beats too irregular for a map.
+
+## 🎹 Piano arrangements
+
+Unless `WORKER_ARRANGEMENT=false`, a job can have `mode` `arrangement`: instead of transcribing a piano recording, the worker makes a piano cover of a song, whatever the song's instruments. The model is [AMT-APC](https://github.com/310hz/amt-apc) ([paper](https://arxiv.org/abs/2409.14086)), which hears the audio and writes the notes of a piano arrangement. Its code is MIT-licensed and vendored in `app/transcription/amt_apc`; its weights, `apc.pth`, are part of the worker and RunPod images, checked against their SHA-256 when the image is built and loaded as plain tensors (`weights_only`), never downloaded at run time. For how to ask for one, see [Piano arrangements](api.md#-piano-arrangements) in the API guide.
+
+* **Job path.** The job is created, billed, downloaded, and converted like a transcription, and bills the same minutes for the same length. Only the step that makes the notes differs: AMT-APC instead of Transkun. The audio is resampled with torchaudio's `Resample`, as in AMT-APC's training; with soxr about 30% of the notes differed. The MIDI is named `arrangement.mid`.
+* **Queue.** Arrangements use their own Dramatiq queue, `arrangement`. A worker consumes it only if it can arrange: `WORKER_ARRANGEMENT` is not `false` and, on a GPU, one arrangement step fits the memory budget; a CPU worker always can. The worker log says `Starting Dramatiq on queue(s) default, arrangement`, and a GPU that takes arrangements shows `arrangements,` in its summary. Heartbeats carry `arrangement` as `1` or `0`.
+* **Routing.** The API refuses an arrangement with `409` when `WORKER_ARRANGEMENT` is off. Without outsourcing, it refuses with `503` when live workers exist and none has room for arrangements; with no live worker the job is queued, as a transcription is. With outsourcing, an arrangement goes to RunPod when no live local worker arranges, or when the local wait is long, as for [any job](#routing). A remote arrangement that fails goes back to the local queue only if a local worker arranges. After a restart with `WORKER_ARRANGEMENT` turned off, queued arrangements fail with `Piano arrangements were turned off on this server` and their minutes are given back. On RunPod the endpoint reads the same default, so it arranges unless `WORKER_ARRANGEMENT=false` is set on it; set it on both or neither.
+* **Memory budget.** Every model step on a device runs in one shared budget (`app/transcription/budget.py`): a Transkun step takes its jobs times `WORKER_MEMORY_PER_JOB_GIB`, an arrangement step `WORKER_ARRANGEMENT_MEMORY_GIB`. A step waits for memory instead of running out of it, steps are served in the order they arrived so none starves, and a step larger than the whole budget runs alone. This is how transcriptions and arrangements share one GPU; see [GPU memory and batching](configuration.md#-gpu-memory-and-batching) for the numbers. On CPU, steps of both models run one at a time: both at once took 296 s on an i7-10700K, against 84 s and 175 s one after the other.
+* **Audio windows.** AMT-APC reads 512 frames, about 8.2 s of audio, at a time, with no overlap. A step is one window, whatever the song's length, so memory does not grow with it, and the worker takes each job's next window in turn so every arrangement progresses. The original code needed about 3.1 GiB for a window; the vendored model computes the same results in chunks of 64 frames and 22 notes, which was checked to give the same notes, one for one.
+* **Styles.** `level1` is sparse and `level3` dense; `level2` is the default. On five pop songs they gave about 5.7, 7.0, and 7.4 notes per second. The style does not change speed or memory.
+* **Tempo map.** The result gets the same [tempo map](#-tempo-map) as a transcription, from Beat This!, with `WORKER_TEMPO_MAP`.
+* **Speed.** On an RTX 3060 Ti, about 9.5 s for a 4-minute song alone, 27 times real time. With a transcription running at the same time in the same process, the transcription takes about 50% longer. On CPU (an i7-10700K, 8 threads) about 173 s for 4 minutes, 1.4 times real time; CPU times are approximate.
+* **Quality.** A note held across a window boundary is sometimes cut and struck again: about one boundary in seven in measurements. This was measured and accepted rather than overlapping the windows. An arrangement is a new piece in the style of the song, not a transcription: its notes are the model's choice and need not match the recording.
+* **Licence.** AMT-APC's code is MIT-licensed. Its weights come with no licence file of their own and descend from hFT-Transformer, whose checkpoints Sony distributes under CC BY-NC-SA 4.0, and which was trained on MAESTRO, also CC BY-NC-SA 4.0. Whether those terms bind weights fine-tuned from them is legally unsettled. Check it before using arrangements commercially; this guide is not legal advice.
 
 ## 🗄️ Job retention and restart behavior
 
@@ -202,12 +217,14 @@ Overload means a long **expected wait**, not low VRAM. The worker's thread count
 
 A local job that does not fit in GPU memory even on its own is also sent remote, once, if outsourcing is enabled and a remote slot is free.
 
+[Piano arrangements](#-piano-arrangements) use the same routing, but only workers that arrange count for their wait, and the heartbeat says whether a worker does.
+
 ### Remote flow
 
 1. `remote-worker` claims the job like a local worker would, and downloads and converts the audio with `yt-dlp` and `ffmpeg`. Downloads stay on this server because video sites often block datacenter IPs.
 2. It compresses the WAV to FLAC, uploads it to the bucket under a random key, and creates a presigned GET URL valid for `OUTSOURCE_TIMEOUT` plus five minutes.
 3. It submits `{"audio_url": ..., "job_id": ...}` to RunPod `/run`, then polls `/status` every 2 seconds. RunPod progress (0 to 1) is shown as 0.15 to 0.95, the same range as model progress for local jobs.
-4. The handler downloads only from the storage host and transcribes the audio in the same batcher as the local worker: one RunPod worker takes several requests at once and runs them as one batch, up to its GPU's job capacity. It adds the [tempo map](#-tempo-map) and returns the MIDI as base64.
+4. The handler downloads only from the storage host and transcribes (or, for an arrangement, arranges) the audio in the same batcher as the local worker: one RunPod worker takes several requests at once and runs them as one batch, up to its GPU's job capacity. It adds the [tempo map](#-tempo-map) and returns the MIDI as base64.
 5. The dispatcher writes the MIDI to the job directory and completes the job. The storage object is deleted in every case.
 
 When the user cancels, the dispatcher calls RunPod `/cancel` and stops. A remote-pending job waits for a remote concurrency slot and can be cancelled while waiting. When a remote job fails or exceeds `OUTSOURCE_TIMEOUT`, it is cancelled on RunPod; with `OUTSOURCE_FALLBACK_LOCAL=true` it is put back on the local queue with a flag that stops it from being sent remote again. Otherwise it fails. Short network errors while polling are retried up to five times. Download and conversion errors are not retried locally, because they would fail the same way.
@@ -222,7 +239,7 @@ Remote and local jobs share one lifecycle (`run_job` in `app/worker/tasks.py`), 
 
 | Metric | Labels | Meaning |
 | --- | --- | --- |
-| `piano_queue_jobs` | `queue`, `backend` | Jobs waiting to start: `default` (local workers) or `remote` (RunPod). |
+| `piano_queue_jobs` | `queue`, `backend` | Jobs waiting to start: `default` (local workers, arrangements included) or `remote` (RunPod). |
 | `piano_queue_oldest_job_age_seconds` | `queue`, `backend` | How long the oldest waiting job has waited, counted from when it entered that queue; 0 when none waits. |
 | `piano_jobs_running` | `queue`, `backend` | Jobs being transcribed. |
 | `piano_queue_active_jobs` | `queue`, `backend` | Both together: what workers are needed for. |

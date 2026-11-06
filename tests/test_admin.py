@@ -975,3 +975,159 @@ def test_an_unreachable_service_is_reported_without_a_traceback(billed, capsys, 
     assert code == 2 and "cannot be reached" in output and "Traceback" not in output
     with pytest.raises(ConnectionError):
         main(["--debug", "limits"])
+
+
+# --- piano arrangements ---------------------------------------------------------
+
+@pytest.fixture
+def arranging(billed, monkeypatch):
+    client, settings, billing = billed
+    settings.worker.arrangement = True
+    monkeypatch.setattr(tasks.arrange_job, "send", lambda *args, **kwargs: None)
+    return client, settings, billing
+
+
+def submit_arrangement(client, style="level3", token="user"):
+    response = client.post(
+        "/api/transcriptions", headers=auth(token),
+        json={"source_url": "https://example.com/video", "mode": "arrangement", "style": style},
+    )
+    assert response.status_code == 202
+    return response.json()["job_id"]
+
+
+def test_jobs_show_their_mode_and_filter_by_it(arranging, capsys):
+    client, _, billing = arranging
+    plain = submit(client)
+    arranged = submit_arrangement(client)
+    # A record from before arrangements existed has no mode.
+    with billing._connect() as connection:
+        connection.execute("UPDATE job_diagnostics SET mode = NULL WHERE job_id = ?", (plain,))
+
+    _, output = admin(capsys, "jobs")
+    assert "arrangement level3" in output and "transcription" in output
+
+    _, output = admin(capsys, "jobs", "--mode", "arrangement")
+    assert arranged[:8] in output and plain[:8] not in output
+
+    _, output = admin(capsys, "jobs", "--mode", "transcription")
+    assert plain[:8] in output and arranged[:8] not in output
+
+
+def test_old_records_without_a_mode_are_transcriptions(arranging):
+    from app.admin import jobs
+
+    client, _, billing = arranging
+    plain = submit(client)
+    arranged = submit_arrangement(client)
+    with billing._connect() as connection:
+        connection.execute("UPDATE job_diagnostics SET mode = NULL")
+
+    assert [row["mode"] for row in jobs.list_jobs(mode="transcription")] == ["transcription", "transcription"]
+    assert jobs.list_jobs(mode="arrangement") == []
+    rows = {row["job_id"]: row for row in jobs.list_jobs()}
+    assert (rows[plain]["mode"], rows[plain]["style"]) == ("transcription", None)
+    assert rows[arranged]["mode"] == "transcription"
+    assert jobs.job_details(plain)["record"]["mode"] == "transcription"
+
+
+def test_the_style_is_shown_while_redis_has_the_job(arranging):
+    from app.admin import jobs
+
+    client, _, _ = arranging
+    job_id = submit_arrangement(client, "level1")
+
+    [row] = jobs.list_jobs(mode="arrangement")
+    assert (row["mode"], row["style"]) == ("arrangement", "level1")
+    tasks.redis.delete(tasks.job_key(job_id))
+    [row] = jobs.list_jobs(mode="arrangement")
+    assert (row["mode"], row["style"]) == ("arrangement", None)
+    assert jobs.job_details(job_id)["record"]["mode"] == "arrangement"
+
+
+def test_job_show_and_user_show_the_mode(arranging, capsys):
+    client, _, _ = arranging
+    job_id = submit_arrangement(client, "level1")
+
+    _, output = admin(capsys, "jobs", "show", job_id[:8])
+    assert "mode: arrangement" in output and "style: level1" in output
+
+    _, output = admin(capsys, "user", "user@example.com")
+    assert "arrangement level1" in output
+
+
+def test_jobs_mode_must_be_known(arranging, capsys):
+    with pytest.raises(SystemExit):
+        main(["jobs", "--mode", "remix"])
+    capsys.readouterr()
+
+
+def test_the_mode_filter_does_not_take_sql(arranging):
+    from app.admin import jobs
+
+    client, _, _ = arranging
+    submit_arrangement(client)
+
+    # Anything but arrangement is a parameter for the transcription condition.
+    assert jobs.list_jobs(mode="x' OR '1'='1") == []
+
+
+def test_status_tells_how_many_workers_arrange(arranging, capsys):
+    routing.publish_heartbeat(tasks.redis, 2, 30.0, worker="gpu-a:7", arrangement=True)
+    routing.publish_heartbeat(tasks.redis, 1, 60.0, worker="gpu-b:9")
+
+    _, output = admin(capsys, "status")
+
+    assert "1 of 2 arrange (piano arrangements are on)" in output
+    assert "gpu-a:7: 2 at once, average 30 s, heartbeat" in output and ", arranges" in output
+    assert "arrangement " in output  # the arrangement queue
+    _, output = admin(capsys, "status", "--json")
+    state = json.loads(output)
+    assert state["arrangement"] is True
+    assert state["local_worker"]["arranging"] == 1
+    assert [worker["arrangement"] for worker in state["local_workers"]] == [True, False]
+    assert state["queues"]["arrangement"] == {"messages": 0, "dead": 0}
+
+
+def test_status_says_when_arrangements_are_off(billed, capsys):
+    billed[1].worker.arrangement = False
+    routing.publish_heartbeat(tasks.redis, 2, 30.0, worker="gpu-a:7")
+
+    _, output = admin(capsys, "status")
+    assert "Arrangements  off (WORKER_ARRANGEMENT=false)" in output
+    state = json.loads(admin(capsys, "status", "--json")[1])
+    assert state["arrangement"] is False and "arrangement" not in state["queues"]
+
+
+def test_status_says_when_arrangements_are_on_without_a_worker(arranging, capsys):
+    _, output = admin(capsys, "status")
+
+    assert "Arrangements  on, but no worker is running to arrange" in output
+
+
+# --- job time on PostgreSQL ---------------------------------------------------------
+
+@pytest.mark.parametrize("provider", ["none", "google_play"])
+def test_job_time_reads_the_decimal_sums_of_postgresql(billed, monkeypatch, provider):
+    from decimal import Decimal
+
+    from app.admin import report
+
+    _, settings, billing = billed
+    settings.billing.provider = provider
+    rows = [
+        {"period": "2026-11-01", "backend": "local", "jobs": 2, "seconds": Decimal("120")},
+        {"period": "2026-11-01", "backend": "remote", "jobs": 1, "seconds": Decimal("1800")},
+        {"period": "2026-11-02", "backend": "remote", "jobs": 1, "seconds": None},
+    ]
+    original = billing.read
+    monkeypatch.setattr(billing, "read", lambda query, parameters=(): rows if "job_diagnostics" in query and "SUM(finished_at" in query else original(query, parameters))
+
+    result = report.billing_report(per="day", remote_price_per_hour=2.0)
+
+    jobs = result["jobs"]
+    assert result["billing"] is (provider != "none")
+    assert [type(period["seconds"]) for period in jobs["periods"]] == [float, float, float]
+    assert type(jobs["remote_seconds"]) is float and jobs["remote_seconds"] == 1800.0
+    assert jobs["remote_cost"] == pytest.approx(1.0)
+    assert [period["remote_cost"] for period in jobs["periods"]] == [None, pytest.approx(1.0), 0.0]

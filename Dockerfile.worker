@@ -57,6 +57,15 @@ RUN mkdir -p /opt/beat-this \
     && echo "${BEAT_THIS_CHECKPOINT_SHA256}  /opt/beat-this/final0.ckpt" | sha256sum -c - \
     && python3 -c "from beat_this.inference import load_model; load_model('/opt/beat-this/final0.ckpt')"
 
+# AMT-APC weights for piano arrangements (app/transcription/arrangement.py),
+# checked against their checksum, and loaded as plain tensors, never as code.
+ARG AMT_APC_WEIGHTS_URL=https://github.com/310hz/amt-apc/releases/download/beta/apc.pth
+ARG AMT_APC_WEIGHTS_SHA256=78ebe9a28d65ec3849132adef6c38de599692abed0ae00191753a5032554fe7b
+RUN mkdir -p /opt/amt-apc \
+    && python3 -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], '/opt/amt-apc/apc.pth')" "$AMT_APC_WEIGHTS_URL" \
+    && echo "${AMT_APC_WEIGHTS_SHA256}  /opt/amt-apc/apc.pth" | sha256sum -c - \
+    && python3 -c "import torch; torch.load('/opt/amt-apc/apc.pth', map_location='cpu', weights_only=True)"
+
 # The worker runs untrusted media through yt-dlp and ffmpeg, so not as root.
 # New volumes mounted at /data and /billing take the ownership below; see
 # "Running as a non-root user" in docs/setup.md for older volumes.

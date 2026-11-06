@@ -28,6 +28,21 @@ curl -X POST http://localhost:8000/api/transcriptions \
 
 The endpoint returns `202 Accepted`, a `job_id`, and `queued` status. The job's title and metadata are available from the start, read when the link is checked. PowerShell keeps the response in `$job`, which the examples below use. With curl, keep the ID for them: `JOB_ID=<job_id from the response>`.
 
+### 🎹 Piano arrangements
+
+With [piano arrangements](architecture.md#-piano-arrangements) on (the default; `WORKER_ARRANGEMENT=false` turns them off), a job can make a piano cover of a song instead of transcribing a piano recording. Add `mode` and, if you like, `style` to the request:
+
+```shell
+curl -X POST http://localhost:8000/api/transcriptions   -H 'Content-Type: application/json'   -d '{"source_url":"https://example.com/video","mode":"arrangement","style":"level3"}'
+```
+
+* `mode` is `transcription` (the default) or `arrangement`.
+* `style` is only for arrangements: `level1` (sparse), `level2` (the default), or `level3` (dense). On five pop songs the levels gave about 5.7, 7.0, and 7.4 notes per second. Every level takes the same time and memory. `style` with `mode` `transcription` is refused with `422`.
+* An upload takes the same two as query parameters: `POST /api/transcriptions/upload?filename=Song.mp3&mode=arrangement&style=level1`.
+* The status response has `mode` and `style`; `style` is `null` for a transcription. The MIDI of an arrangement downloads as `arrangement.mid`.
+* An arrangement costs the same minutes as a transcription of that length, and its minutes are given back when it fails.
+* `GET /api/server-info` has `arrangement`: `true` when arrangements are on, so an app can offer the option. `409` with `error_code` `arrangement_unavailable` means they are off on this server. `503` with the same code means no live worker of this server has room for them and outsourcing is off; try again later. With no live worker at all the job is queued, as a transcription is.
+
 ### 📁 Uploading a file
 
 Send an audio or video file as the raw request body, and its original name as `filename`:
@@ -102,7 +117,7 @@ Invoke-RestMethod "http://localhost:8000/api/transcriptions/$($job.job_id)"
 curl "http://localhost:8000/api/transcriptions/$JOB_ID"
 ```
 
-Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. The `error` is written for users, for example `The video could not be downloaded: Video unavailable. This video is private`; the full technical error is only in the server's logs and [job diagnostics](architecture.md#-job-diagnostics). `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens. `maintenance` announces a planned restart or shutdown; see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns). A failed job also has an `error_code`, for the app to act on; see [Error codes](#-error-codes).
+Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. The `error` is written for users, for example `The video could not be downloaded: Video unavailable. This video is private`; the full technical error is only in the server's logs and [job diagnostics](architecture.md#-job-diagnostics). `mode` is `transcription` or `arrangement`, and `style` says which style an arrangement has. `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens. `maintenance` announces a planned restart or shutdown; see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns). A failed job also has an `error_code`, for the app to act on; see [Error codes](#-error-codes).
 
 Cancel a queued or processing job:
 
@@ -219,14 +234,15 @@ A failed job has an `error_code` next to its `error`. Refusals of a link, and `4
 | `source_unsupported` | `422` | The link is not one the server can read: a site it does not accept, or an address it must not open. | Ask for an upload. |
 | `source_failed` | `422`, or a failed job | The video could not be read for another reason. | Show the message; offer an upload. |
 | `insufficient_minutes` | `402` | Not enough minutes; `required_minutes` says how many the job needs. | Offer to buy minutes. |
-| `transcription_failed` | a failed job | Converting or transcribing the audio failed. | Show the message. |
+| `arrangement_unavailable` | `409`, or `503` | Piano arrangements are off on this server (`409`), or no live worker has room for them and outsourcing is off (`503`). | Hide or disable the arrangement option; on `503`, retry later. |
+| `transcription_failed` | a failed job | Converting, transcribing, or arranging the audio failed. | Show the message. |
 | `transcription_interrupted` | a failed job | A restart or a stopped worker interrupted the job. | Submit it again. |
 
 A failed job's minutes are always given back. A request the API cannot parse gets FastAPI's own `422`, whose `detail` is a list, without a code.
 
 ## 💳 Billing endpoints
 
-* `GET /api/server-info` returns billing provider, available offers, how long finished jobs and their MIDI files can be retrieved (`result_retention_seconds`), the cleanup interval, free-minute policy, maximum video length, the upload size limit (`max_upload_size_mb`), and a pending restart or shutdown (`maintenance`, see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns)).
+* `GET /api/server-info` returns billing provider, available offers, how long finished jobs and their MIDI files can be retrieved (`result_retention_seconds`), the cleanup interval, free-minute policy, maximum video length, the upload size limit (`max_upload_size_mb`), whether piano arrangements are on (`arrangement`), and a pending restart or shutdown (`maintenance`, see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns)).
 * `GET /api/billing/cost?source_url=...` reads video duration and returns the transcription cost before submission. For a file, use `?duration_seconds=...` instead. Pass exactly one of the two. When billing is enabled, it needs the `Authorization` header like other requests.
 * `GET /api/billing/balance` returns the authenticated user's balance and free-minute timing. `minutes` is negative when a refunded purchase's minutes were already used; see [Refunds and chargebacks](google-play-billing.md#-refunds-and-chargebacks). Show the user that they owe minutes, and offer to buy more.
 * `POST /api/billing/google-play/verify` verifies and credits a completed Google Play purchase.

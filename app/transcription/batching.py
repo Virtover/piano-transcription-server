@@ -60,6 +60,23 @@ def report_progress(request: Any, value: float) -> bool:
     return True
 
 
+class BatcherStopped(RuntimeError):
+    """The thread that runs a model's steps ended, so no request would finish."""
+
+
+def wait_for(result: Any, thread: Any, interval: float = 5.0) -> Any:
+    """The result of a request a batcher thread runs. Raises BatcherStopped
+    instead of waiting forever if that thread ends without resolving it."""
+    from concurrent.futures import TimeoutError as FutureTimeout
+
+    while True:
+        try:
+            return result.result(timeout=interval)
+        except FutureTimeout:
+            if not thread.is_alive():
+                raise BatcherStopped(f"{thread.name} stopped") from None
+
+
 def run_splitting_on_out_of_memory(
     requests: Sequence[Any],
     transcribe: Callable[[list[Any]], None],

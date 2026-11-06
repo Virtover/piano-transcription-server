@@ -30,7 +30,7 @@ import runpod  # noqa: E402
 import soundfile  # noqa: E402
 
 from app.config import settings  # noqa: E402
-from app.outsource.handler_input import InvalidInput, download, validate_input  # noqa: E402
+from app.outsource.handler_input import InvalidInput, download, requested_style, validate_input  # noqa: E402
 from app.transcription.batching import GpuOutOfMemory  # noqa: E402
 from app.transcription.piano_transcription import (  # noqa: E402
     audio_for_model,
@@ -56,6 +56,21 @@ try:
 except Exception:
     # Each request tries again, and keeps its MIDI at 120 BPM if it cannot.
     logger.warning("Could not load the beat tracker", exc_info=True)
+# Arrangements (WORKER_ARRANGEMENT on the endpoint), beside Transkun on the
+# same GPU and in the same memory budget.
+ARRANGEMENT_DEVICE = None
+if settings.worker.arrangement:
+    from app.transcription import arrangement  # noqa: E402
+
+    try:
+        ARRANGEMENT_DEVICE = arrangement.select_arrangement_device()
+        arrangement.get_batcher(ARRANGEMENT_DEVICE)
+    except arrangement.ArrangementUnavailable:
+        logger.warning("WORKER_ARRANGEMENT is on, but this GPU has no room for arrangements")
+    except Exception:
+        # Transcriptions still run; arrangement requests are refused.
+        ARRANGEMENT_DEVICE = None
+        logger.exception("Could not load the arrangement model; arrangements are off on this worker")
 # One thread per request in flight; most of them wait on the batcher.
 EXECUTOR = ThreadPoolExecutor(max_workers=max(4, BATCHER.batch_size * 2), thread_name_prefix="request")
 
@@ -82,6 +97,9 @@ def transcribe_job(job: dict) -> dict:
     started = time.monotonic()
     try:
         audio_url, job_id = validate_input(job.get("input"), settings.storage.endpoint)
+        style = requested_style(job["input"])
+        if style is not None and ARRANGEMENT_DEVICE is None:
+            raise InvalidInput("Arrangements are off on this endpoint: set WORKER_ARRANGEMENT=true")
         with tempfile.TemporaryDirectory() as directory:
             audio_path = Path(directory) / "audio.flac"
             size = download(audio_url, audio_path, int(settings.outsource.max_audio_mb * 1024 * 1024))
@@ -91,13 +109,17 @@ def transcribe_job(job: dict) -> dict:
             except RuntimeError as error:
                 raise InvalidInput("The audio file cannot be decoded") from error
 
-            model_audio = audio_for_model(MODEL, sample_rate, audio)
-            events = BATCHER.submit(model_audio, Progress(job), None)
-            transcribed = time.monotonic()
-
             midi_path = Path(directory) / "transcription.mid"
-            # Beat tracking on the GPU, in memory its job capacity reserves.
-            write_midi(events, midi_path, model_audio, MODEL.fs, DEVICE)
+            if style is not None:
+                events = arrangement.arrange(audio, sample_rate, style, ARRANGEMENT_DEVICE, Progress(job), None)
+                transcribed = time.monotonic()
+                write_midi(events, midi_path, audio, sample_rate, ARRANGEMENT_DEVICE)
+            else:
+                model_audio = audio_for_model(MODEL, sample_rate, audio)
+                events = BATCHER.submit(model_audio, Progress(job), None)
+                transcribed = time.monotonic()
+                # Beat tracking on the GPU, in memory its job capacity reserves.
+                write_midi(events, midi_path, model_audio, MODEL.fs, DEVICE)
             midi = midi_path.read_bytes()
 
         encoded = base64.b64encode(midi).decode("ascii")
@@ -115,7 +137,8 @@ def transcribe_job(job: dict) -> dict:
                 "inference_seconds": round(transcribed - downloaded, 2),
                 "total_seconds": round(time.monotonic() - started, 2),
                 "audio_bytes": size,
-                "device": DEVICE,
+                "device": ARRANGEMENT_DEVICE if style is not None else DEVICE,
+                "mode": "transcription" if style is None else "arrangement",
             },
         }
     except (InvalidInput, GpuOutOfMemory) as error:

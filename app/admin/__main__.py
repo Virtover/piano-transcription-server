@@ -62,6 +62,7 @@ def parser() -> argparse.ArgumentParser:
     job_commands.add_argument("--failed", action="store_true", help="only failed jobs")
     job_commands.add_argument("--status", choices=jobs.STATUSES)
     job_commands.add_argument("--backend", choices=["local", "remote"])
+    job_commands.add_argument("--mode", choices=jobs.MODES, help="transcriptions or piano arrangements")
     job_commands.add_argument("--user", help="email address or user ID")
     job_commands.add_argument("--since", help="only jobs created within this time, for example 1d")
     job_commands.add_argument("--limit", type=int, default=30, help="most jobs to list (default: 30)")

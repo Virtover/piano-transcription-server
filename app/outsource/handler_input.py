@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 
 import requests
 
+from app.transcription.styles import DEFAULT_STYLE, STYLES
+
 
 DOWNLOAD_TIMEOUT = 60
 CHUNK_SIZE = 1024 * 1024
@@ -49,6 +51,20 @@ def validate_input(job_input: Any, storage_endpoint: str | None) -> tuple[str, s
     if (scheme, host, port) != allowed:
         raise InvalidInput("The audio URL is not on the configured storage host")
     return audio_url, job_id
+
+
+def requested_style(job_input: dict) -> str | None:
+    """The arrangement style of the request, or None for a transcription.
+    Only known values pass: the server sends nothing else."""
+    mode = job_input.get("mode", "transcription")
+    if mode == "transcription":
+        return None
+    if mode != "arrangement":
+        raise InvalidInput("mode must be transcription or arrangement")
+    style = job_input.get("style", DEFAULT_STYLE)
+    if style not in STYLES:
+        raise InvalidInput(f"style must be one of {', '.join(STYLES)}")
+    return style
 
 
 def download(url: str, destination: Path, max_bytes: int, session: Any = None) -> int:

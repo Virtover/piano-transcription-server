@@ -258,6 +258,7 @@ def test_gpu_job_capacity_reserves_the_beat_tracker(monkeypatch):
     from app.transcription import device
 
     free = 5.86 * 1024**3
+    monkeypatch.setattr(tempo.settings.worker, "arrangement", False)
     monkeypatch.setattr(tempo.settings.worker, "memory_per_job_gib", 0.5)
     with_map = device.job_capacity(free)
     monkeypatch.setattr(tempo.settings.worker, "tempo_map", False)

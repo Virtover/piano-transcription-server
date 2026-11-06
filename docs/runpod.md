@@ -130,7 +130,7 @@ Logs: `docker compose logs remote-worker` on this server, and the worker logs in
 
 ## 🧮 Batching on RunPod
 
-A worker takes several requests at once and transcribes them together, in the same batcher as the local worker. How many is its GPU's job capacity, calculated from free VRAM with `WORKER_MEMORY_PER_JOB_GIB` like on the server, capped by `WORKER_MAX_CONCURRENCY` if set on the endpoint. Requests that arrive within `WORKER_BATCH_TIMEOUT` (2 s) of each other share a batch. If a batch runs out of GPU memory, it is split and retried, and the worker takes fewer requests from then on.
+A worker takes several requests at once and transcribes them (and, with [piano arrangements](architecture.md#-piano-arrangements) on, arranges) together, in the same batcher as the local worker. How many is its GPU's job capacity, calculated from free VRAM with `WORKER_GPU_RESERVE_GIB` and `WORKER_MEMORY_PER_JOB_GIB` like on the server, capped by `WORKER_MAX_CONCURRENCY` if set on the endpoint. Requests that arrive within `WORKER_BATCH_TIMEOUT` (2 s) of each other share a batch. If a batch runs out of GPU memory, it is split and retried, and the worker takes fewer requests from then on.
 
 Batching makes busy periods cheaper: four 5-minute songs take about 10 s of GPU time each in one batch instead of 14 s each, and they share one cold start and idle period instead of paying for four. At low traffic, requests rarely overlap and each runs alone.
 
@@ -142,6 +142,8 @@ Optional environment variables on the endpoint:
 | `WORKER_MEMORY_PER_JOB_GIB` | `1.1` | Workers run out of GPU memory. |
 | `WORKER_BATCH_TIMEOUT` | `2s` | Requests should wait longer or shorter for a batch. |
 | `WORKER_TEMPO_MAP` | `true` | The MIDI should keep a fixed 120 BPM instead of the recording's beats and bars: `false`. |
+| `WORKER_ARRANGEMENT` | `true` | The endpoint should not make [piano arrangements](architecture.md#-piano-arrangements): `false`. They are on by default, as in `server.env`; an endpoint with `false` fails the arrangements sent to it, so set both the same. The same image serves both. |
+| `WORKER_ARRANGEMENT_MEMORY_GIB` | `0.8` | Workers run out of GPU memory while arranging. It is the VRAM of one arrangement step; see [GPU memory and batching](configuration.md#-gpu-memory-and-batching). |
 | `OUTSOURCE_MAX_AUDIO_MB` | `512` | Long recordings are rejected. |
 
 ## ⏱️ Start-up time

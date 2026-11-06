@@ -28,7 +28,7 @@ Each part works on one machine too, so each can be turned on and checked before 
 * **Shared limits.** Video checks are counted across replicas (`MAX_VIDEO_CHECKS`), as video site downloads already were.
 * **Job storage** in the bucket (`JOB_STORAGE=s3`): uploads, video information, and results, with a scratch folder per attempt. See [Job storage](architecture.md#job-storage).
 * **Managed Redis and PostgreSQL**, over TLS. See [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql).
-* **Metrics** for the autoscaler: jobs waiting and running per queue, and the oldest job's wait, at `/metrics` with `metrics_token`. See [Metrics for scaling](architecture.md#-metrics-for-scaling).
+* **Metrics** for the autoscaler: jobs waiting and running per queue, arrangements included, and the oldest job's wait, at `/metrics` with `metrics_token`. See [Metrics for scaling](architecture.md#-metrics-for-scaling).
 
 `python -m app.config requirements` lists what each external service must provide for the settings in use: the sections Redis, PostgreSQL, and Storage cover several machines. `--json` gives the same for agents.
 

@@ -591,6 +591,8 @@ async function overview() {
       stat("Processing", fmt(jobs.processing), `${fmt(state.backends.local)} local · ${fmt(state.backends.remote)} remote`),
       stat("Local worker", worker ? (worker.count > 1 ? `${fmt(worker.count)} online` : "Online") : "No heartbeat",
         worker ? `${worker.capacity} at once · avg ${span(worker.average_job_seconds)} · seen ${ago(worker.updated_at)}` : "Check the worker's log", worker ? "" : "alarm"),
+      stat("Arrangements", state.arrangement ? "On" : "Off",
+        state.arrangement ? (worker ? `${fmt(worker.arranging)} of ${fmt(worker.count)} workers arrange` : "No worker is running") : "WORKER_ARRANGEMENT=false"),
       stat("Remote", remote.enabled ? unit(fmt(remote.in_use), `/ ${fmt(remote.limit)}`) : "Off", remote.enabled ? "jobs on RunPod" : "OUTSOURCE_PROVIDER=none")),
     el("div", { class: "ov-grid" },
       section("jobs", "jobs", "blue", "Jobs", "Recent jobs with their full errors; cancel a stuck one.", `${fmt(jobs.queued)} queued · ${fmt(jobs.processing)} processing`),
@@ -628,8 +630,13 @@ async function overview() {
 
 // --- Jobs ------------------------------------------------------------------------------------
 
+// "transcription", or "arrangement level2" while the job still has its style.
+function modeLabel(row) {
+  return row.mode === "arrangement" ? (row.style ? `arrangement ${row.style}` : "arrangement") : "transcription";
+}
+
 function jobs() {
-  const filters = { status: "", backend: "", user: "", since: "1d" };
+  const filters = { status: "", backend: "", mode: "", user: "", since: "1d" };
   const results = el("div");
   const load = async () => {
     fill(results, skeleton());
@@ -640,6 +647,7 @@ function jobs() {
         { label: "Job", render: (row) => el("span", { class: "mono", text: shortId(row.job_id) }) },
         { label: "User", render: (row) => row.email || row.user_id || "–" },
         { label: "Status", render: (row) => statusBadge(row.status) },
+        { label: "Mode", render: modeLabel },
         { label: "Backend", key: "backend" },
         { label: "Length", num: true, render: (row) => span(row.duration_seconds) },
         { label: "Error", render: (row) => (row.error ? el("span", { class: "err", text: String(row.error).split("\n")[0].slice(0, 70) }) : "–") },
@@ -652,6 +660,8 @@ function jobs() {
   user.box.addEventListener("change", () => { filters.user = user.box.value.trim(); load(); });
   const backend = select([["", "Any backend"], ["local", "Local"], ["remote", "Remote"]], "");
   backend.addEventListener("change", () => { filters.backend = backend.value; load(); });
+  const mode = select([["", "Any mode"], ["transcription", "Transcriptions"], ["arrangement", "Arrangements"]], "");
+  mode.addEventListener("change", () => { filters.mode = mode.value; load(); });
   const since = select([["1h", "Last hour"], ["1d", "Last day"], ["7d", "Last 7 days"], ["30d", "Last 30 days"]], "1d");
   since.addEventListener("change", () => { filters.since = since.value; load(); });
   fill(main,
@@ -659,7 +669,7 @@ function jobs() {
     el("div", { class: "toolbar" }, chips([["", "All", "c-grey"], ["queued", "Queued", "c-blue"], ["processing", "Processing", "c-gold"],
       ["failed", "Failed", "c-red"], ["completed", "Completed", "c-green"], ["cancelled", "Cancelled", "c-violet"]],
       "", (value) => { filters.status = value; load(); })),
-    el("div", { class: "filters" }, field("User", user.node), field("Backend", backend), field("Created", since)),
+    el("div", { class: "filters" }, field("User", user.node), field("Backend", backend), field("Mode", mode), field("Created", since)),
     results);
   load();
 }
@@ -675,7 +685,7 @@ async function openJob(job) {
     const error = record.error || live.error_detail || live.error;
     fill(modal.body,
       facts([["Status", statusBadge(status)], ["User", record.email || record.user_id || live.user_id],
-        ["Source", record.source_url || live.source_url || record.source], ["Backend", live.backend || record.backend],
+        ["Source", record.source_url || live.source_url || record.source], ["Mode", modeLabel({ mode: live.mode || record.mode, style: live.style || record.style })], ["Backend", live.backend || record.backend],
         ["Progress", live.progress !== undefined ? `${Math.round(Number(live.progress) * 100)}%` : undefined],
         ["Created", when(record.created_at)], ["Started", when(record.started_at)], ["Finished", when(record.finished_at)],
         ["Length", span(record.duration_seconds)], ["Cost", record.cost_minutes !== undefined && record.cost_minutes !== null ? `${fmt(record.cost_minutes)} minutes` : undefined],
@@ -772,6 +782,7 @@ async function openUser(who) {
       { label: "Created", render: (row) => when(row.created_at) },
       { label: "Job", render: (row) => el("span", { class: "mono", text: shortId(row.job_id) }) },
       { label: "Status", render: (row) => statusBadge(row.status) },
+      { label: "Mode", render: modeLabel },
       { label: "Length", num: true, render: (row) => span(row.duration_seconds) },
       { label: "Cost", num: true, render: (row) => fmt(row.cost_minutes) },
     ], account.jobs, { onRow: (row) => openJob(row.job_id), empty: "No jobs", emptyIcon: "jobs" })));

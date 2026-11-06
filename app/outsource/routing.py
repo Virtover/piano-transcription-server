@@ -49,8 +49,10 @@ def publish_heartbeat(
     capacity: int,
     average_job_seconds: float | None,
     worker: str | None = None,
+    arrangement: bool = False,
 ) -> None:
-    """Called periodically by each GPU worker. Expires if the worker stops."""
+    """Called periodically by each GPU worker. Expires if the worker stops.
+    arrangement: whether it consumes the arrangement queue."""
     worker = worker or worker_id()
     now = time.time()
     with redis.pipeline() as pipe:
@@ -59,6 +61,7 @@ def publish_heartbeat(
             mapping={
                 "capacity": capacity,
                 "average_job_seconds": average_job_seconds or "",
+                "arrangement": "1" if arrangement else "0",
                 "updated_at": now,
             },
         )
@@ -103,15 +106,22 @@ def local_workers(redis: Redis) -> list[dict]:
             updated_at = float(heartbeat.get("updated_at") or 0)
         except (TypeError, ValueError):
             updated_at = 0.0
-        alive.append({"id": worker, "capacity": capacity, "average_job_seconds": average, "updated_at": updated_at})
+        alive.append({
+            "id": worker,
+            "capacity": capacity,
+            "average_job_seconds": average,
+            "arrangement": heartbeat.get("arrangement") == "1",
+            "updated_at": updated_at,
+        })
     return alive
 
 
-def local_capacity(redis: Redis) -> tuple[int, float]:
-    """(job capacity, average job seconds) of all local workers together.
-    Capacity is 0 without a heartbeat. The average weighs each worker by its
-    capacity, because it runs that share of the jobs."""
-    workers = local_workers(redis)
+def local_capacity(redis: Redis, arrangement: bool = False) -> tuple[int, float]:
+    """(job capacity, average job seconds) of all local workers together, or
+    with arrangement of those that arrange. Capacity is 0 without a
+    heartbeat. The average weighs each worker by its capacity, because it
+    runs that share of the jobs."""
+    workers = [worker for worker in local_workers(redis) if worker["arrangement"] or not arrangement]
     capacity = sum(worker["capacity"] for worker in workers)
     timed = [worker for worker in workers if worker["average_job_seconds"] and worker["capacity"] > 0]
     weight = sum(worker["capacity"] for worker in timed)
@@ -120,9 +130,11 @@ def local_capacity(redis: Redis) -> tuple[int, float]:
     return capacity, sum(worker["average_job_seconds"] * worker["capacity"] for worker in timed) / weight
 
 
-def estimated_local_wait(redis: Redis) -> float:
-    """Seconds a new local job would wait before it starts."""
-    capacity, average = local_capacity(redis)
+def estimated_local_wait(redis: Redis, arrangement: bool = False) -> float:
+    """Seconds a new local job would wait before it starts; with arrangement,
+    on the workers that arrange, which share their capacity with
+    transcriptions."""
+    capacity, average = local_capacity(redis, arrangement)
     if capacity < 1:
         return math.inf
     active = redis.scard(ACTIVE_KEYS["local"])
@@ -165,8 +177,16 @@ def reserve_remote_slot(redis: Redis, job_id: str) -> bool:
             continue
 
 
-def choose_backend(redis: Redis, job_id: str) -> Backend:
-    """Pick the backend for a newly queued job and count it as active there."""
+def arrangement_workers(redis: Redis) -> tuple[int, int]:
+    """(live local workers, those of them that arrange)."""
+    workers = local_workers(redis)
+    return len(workers), sum(1 for worker in workers if worker["arrangement"])
+
+
+def choose_backend(redis: Redis, job_id: str, arrangement: bool = False) -> Backend:
+    """Pick the backend for a newly queued job and count it as active there.
+    An arrangement goes remote when no live local worker arranges, as when
+    the local wait is too long."""
     mode = settings.outsource.routing
     if outsourcing_enabled() and mode.startswith("remote_first"):
         if mode == "remote_first_fallback" or reserve_remote_slot(redis, job_id):
@@ -174,7 +194,7 @@ def choose_backend(redis: Redis, job_id: str) -> Backend:
             return "remote"
         redis.sadd(ACTIVE_KEYS["local"], job_id)
         return "local"
-    if outsourcing_enabled() and estimated_local_wait(redis) > settings.outsource.local_first_max_wait:
+    if outsourcing_enabled() and estimated_local_wait(redis, arrangement) > settings.outsource.local_first_max_wait:
         if reserve_remote_slot(redis, job_id):
             return "remote"
     redis.sadd(ACTIVE_KEYS["local"], job_id)

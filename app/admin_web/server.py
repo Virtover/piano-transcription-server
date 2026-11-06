@@ -206,6 +206,7 @@ def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.t
         email: str = Depends(readable),
         job_status: str | None = Query(None, alias="status"),
         backend: str | None = None,
+        mode: str | None = None,
         user: str | None = None,
         since: str | None = None,
         limit: int = Query(30, ge=1, le=MAX_LIMIT),
@@ -214,7 +215,9 @@ def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.t
             raise AdminError(f"status must be one of {', '.join(jobs.STATUSES)}")
         if backend not in (None, "local", "remote"):
             raise AdminError("backend must be local or remote")
-        return jobs.list_jobs(job_status, backend, user, parse_duration(since, "since"), limit)
+        if mode not in (None, *jobs.MODES):
+            raise AdminError(f"mode must be one of {', '.join(jobs.MODES)}")
+        return jobs.list_jobs(job_status, backend, user, parse_duration(since, "since"), limit, mode)
 
     @app.get("/api/jobs/{job}")
     def get_job(job: str, email: str = Depends(readable)):

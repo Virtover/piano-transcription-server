@@ -35,6 +35,7 @@ The first thing to look at when users say the server is slow:
 
 * **Jobs:** places used out of `MAX_ACTIVE_JOBS`, jobs by status (being checked, uploading, queued, processing), and how many are assigned to the local and the remote backend.
 * **Local worker:** its heartbeat, with how many jobs it runs at once and its average job time. With several local workers, their totals and then one line for each, named by container and process. No heartbeat means the worker is stopped or not consuming the local queue.
+* **Arrangements:** whether [piano arrangements](api.md#-piano-arrangements) are on (`WORKER_ARRANGEMENT`), and how many of the local workers arrange. Each worker's line says "arranges" when it does, and the queues include the arrangement queue while the feature is on. Arrangements are on but none of the workers arranges when no GPU has room; the worker's log says so.
 * **Waiting:** jobs queued but not running yet, per backend, and how long the oldest has waited. A wait that keeps growing means too few workers; see [Metrics for scaling](architecture.md#-metrics-for-scaling).
 * **Video checks:** links being checked for their length right now, by every API replica together, out of `MAX_VIDEO_CHECKS`. When all places stay taken, users get `503` when they submit or price a link.
 * **API leader:** the API replica that runs backups and the abandoned job check, by container. `none` means no API is running, or it lost Redis; see [Several API replicas](architecture.md#several-api-replicas).
@@ -53,9 +54,11 @@ python scripts/admin.py jobs --failed --since 1d
 python scripts/admin.py jobs show 3f2a9c1e
 ```
 
-`jobs` lists recent jobs from their [diagnostics records](architecture.md#-job-diagnostics), newest first, so jobs that ended long ago are included until `JOB_DIAGNOSTICS_RETENTION`. Filter with `--failed` or `--status`, `--user` (email address or user ID), `--backend local` or `remote`, and `--since` (a duration such as `2h` or `7d`). `--limit` sets how many are listed (default 30).
+`jobs` lists recent jobs from their [diagnostics records](architecture.md#-job-diagnostics), newest first, so jobs that ended long ago are included until `JOB_DIAGNOSTICS_RETENTION`. Filter with `--failed` or `--status`, `--user` (email address or user ID), `--backend local` or `remote`, `--mode transcription` or `arrangement`, and `--since` (a duration such as `2h` or `7d`). `--limit` sets how many are listed (default 30).
 
 A job is named by its ID or its first characters, as the list shows them.
+
+Each job shows its mode: `transcription`, or `arrangement` with its style while the job is still in Redis. Records from before arrangements existed read as transcriptions.
 
 * **`jobs show <job>`** prints everything known about the job: its live fields in Redis while they exist, the diagnostics record with the full error that users never see, its billing reservation, and the files in its folder.
 * **`jobs cancel <job>`** cancels a queued or processing job, for example one stuck after a crash. It is charged like a job the user cancels: nothing below 5% progress, then part of its cost. `--refund` charges nothing, for a job that is stuck through no fault of the user. A worker running the job stops at its next progress update. Jobs being checked or uploaded are not queued yet; their placeholder expires on its own.
@@ -135,6 +138,8 @@ The [admin web page](#-admin-web-page) logs as `web:<email>`: `web.user_view` wh
 ## 🌐 Admin web page
 
 Optional: a page that shows what `status`, `jobs`, `user`, `billing`, `limits`, and `audit` show, for running the server from anywhere: an overview that refreshes itself, jobs with their full errors, accounts, charts of minutes and jobs per day or month, limits, and the audit log. It runs in a service of its own, `admin`, reached through the [Cloudflare Tunnel](cloudflare-tunnel.md) on a hostname of its own, behind Cloudflare Access.
+
+The jobs view has a mode filter next to the backend filter, a mode in every job list and detail, and the overview shows whether arrangements are on and how many workers arrange.
 
 The charts are drawn from what the server already keeps (balance changes, and job records for `JOB_DIAGNOSTICS_RETENTION`) and from what is live now; the page collects and stores nothing of its own for them.
 

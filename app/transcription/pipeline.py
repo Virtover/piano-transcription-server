@@ -28,9 +28,11 @@ def transcribe_source(
     upload_path: Path | None = None,
     upload_title: str | None = None,
     max_seconds: float | None = None,
+    arrangement_style: str | None = None,
 ) -> Path:
     """Transcribe source_url, or upload_path when it is given, at most about
-    max_seconds of it: the duration the job was charged for."""
+    max_seconds of it: the duration the job was charged for. With
+    arrangement_style, arrange it for piano in that style instead."""
     from app.transcription.piano_transcription import transcribe_piano
 
     try:
@@ -47,12 +49,23 @@ def transcribe_source(
 
         midi_path = output_dir / "transcription.mid"
 
-        transcribe_piano(
-            audio_path=downloaded.path,
-            output_path=midi_path,
-            progress_callback=progress_callback,
-            cancellation_callback=cancellation_callback,
-        )
+        if arrangement_style is not None:
+            from app.transcription.arrangement import arrange_piano
+
+            arrange_piano(
+                audio_path=downloaded.path,
+                output_path=midi_path,
+                style=arrangement_style,
+                progress_callback=progress_callback,
+                cancellation_callback=cancellation_callback,
+            )
+        else:
+            transcribe_piano(
+                audio_path=downloaded.path,
+                output_path=midi_path,
+                progress_callback=progress_callback,
+                cancellation_callback=cancellation_callback,
+            )
 
         check_midi(midi_path)
 

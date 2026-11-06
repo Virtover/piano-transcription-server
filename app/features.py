@@ -323,6 +323,18 @@ FEATURES: tuple[Feature, ...] = (
         requirement_sections=("Storage", "Image registry", "GPU endpoint"),
     ),
     Feature(
+        key="arrangement",
+        title="Piano arrangements",
+        summary="A piano cover of a song by AMT-APC, as well as transcriptions of piano recordings.",
+        switch="WORKER_ARRANGEMENT=true",
+        enabled=lambda config: config.worker.arrangement,
+        docs="docs/architecture.md#-piano-arrangements",
+        turn_on={"WORKER_ARRANGEMENT": "true"},
+        turn_off={"WORKER_ARRANGEMENT": "false"},
+        settings=("WORKER_ARRANGEMENT_MEMORY_GIB", "WORKER_CPU_ARRANGEMENT_MEMORY_GIB"),
+        roles=("api", "worker", "remote", "all"),
+    ),
+    Feature(
         key="error_reports",
         title="Error reports",
         summary="Errors of the API and workers go to a website's error monitor, with secrets removed.",

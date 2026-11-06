@@ -128,6 +128,23 @@ def _auto_or_positive_int(value: Any) -> int | None:
     return value
 
 
+def _auto_or_positive(value: Any) -> float | None:
+    """Parse a positive number or `auto`, represented internally as None."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "auto"):
+            return None
+        try:
+            value = float(text)
+        except ValueError as error:
+            raise ValueError("must be 'auto' or a positive number") from error
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < float("inf"):
+        raise ValueError("must be 'auto' or a positive number")
+    return float(value)
+
+
 def _unlimited_or_positive(value: Any) -> int | float | None:
     """Parse a positive number or `unlimited`, represented internally as None."""
     if value is None:
@@ -161,6 +178,7 @@ OptionalDuration = Annotated[float | None, BeforeValidator(_optional_duration)]
 DurationText = Annotated[str | None, BeforeValidator(_duration_text)]
 # None means `auto`.
 AutoInt = Annotated[int | None, BeforeValidator(_auto_or_positive_int)]
+AutoNumber = Annotated[float | None, BeforeValidator(_auto_or_positive)]
 UnlimitedNumber = Annotated[float | None, BeforeValidator(_unlimited_or_positive)]
 UnlimitedInt = Annotated[int | None, BeforeValidator(_unlimited_or_positive_int)]
 
@@ -261,17 +279,38 @@ class WorkerSettings(BaseSettings):
     threads: AutoInt = None
     # Ignore CUDA devices and run the local worker on CPU.
     enforce_cpu: bool = False
-    model_memory_gib: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    # Piano arrangements (AMT-APC) beside transcriptions.
+    arrangement: bool = True
+    # VRAM reserved on each GPU for what is loaded once; auto: gpu_reserve.
+    gpu_reserve_gib: AutoNumber = None
     memory_per_job_gib: float = Field(default=1.1, gt=0, allow_inf_nan=False)
-    # System RAM reserved for the model and each additional CPU job.
-    cpu_model_memory_gib: float = Field(default=2.0, gt=0, allow_inf_nan=False)
+    arrangement_memory_gib: float = Field(default=0.8, gt=0, allow_inf_nan=False)
+    # System RAM reserved for the models, and for each CPU transcription and
+    # arrangement job.
+    cpu_reserve_gib: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     cpu_memory_per_job_gib: float = Field(default=2.0, gt=0, allow_inf_nan=False)
+    cpu_arrangement_memory_gib: float = Field(default=2.5, gt=0, allow_inf_nan=False)
     # auto: each GPU's job capacity; CPU and RAM dependent in CPU mode.
     batch_size: AutoInt = None
     batch_timeout: Duration = 2.0
     max_concurrency: AutoInt = None
     # Give the MIDI the beats and bars of the recording (app/transcription/tempo.py).
     tempo_map: bool = True
+
+
+# WORKER_GPU_RESERVE_GIB=auto: Transkun and the GPU libraries, and the
+# arrangement model's weights and kernels when it is on (measured 0.17 to
+# 0.23 GiB on an RTX 3060 Ti); see docs/configuration.md.
+GPU_RESERVE_GIB = 1.0
+ARRANGEMENT_RESERVE_GIB = 0.25
+
+
+def gpu_reserve_gib(worker: "WorkerSettings") -> float:
+    """WORKER_GPU_RESERVE_GIB resolved: a number as given, or the reserve of
+    the models this worker loads."""
+    if worker.gpu_reserve_gib is not None:
+        return worker.gpu_reserve_gib
+    return GPU_RESERVE_GIB + (ARRANGEMENT_RESERVE_GIB if worker.arrangement else 0.0)
 
 
 class JobSettings(BaseSettings):
@@ -627,6 +666,9 @@ ALIASES: dict[str, Alias] = {
     "CLEANUP_INTERVAL_SECONDS": Alias("CLEANUP_INTERVAL", _seconds_or_duration),
     "WORKER_BATCH_TIMEOUT_SECONDS": Alias("WORKER_BATCH_TIMEOUT", _seconds_or_duration),
     "OUTSOURCE_MAX_WAIT": Alias("OUTSOURCE_LOCAL_FIRST_MAX_WAIT", str),
+    # The reserves cover every loaded model now, not one.
+    "WORKER_MODEL_MEMORY_GIB": Alias("WORKER_GPU_RESERVE_GIB", str),
+    "WORKER_CPU_MODEL_MEMORY_GIB": Alias("WORKER_CPU_RESERVE_GIB", str),
     # The bucket also keeps job files now, not only outsourced audio.
     "OUTSOURCE_STORAGE_ENDPOINT": Alias("STORAGE_ENDPOINT", str),
     "OUTSOURCE_STORAGE_BUCKET": Alias("STORAGE_BUCKET", str),
@@ -1045,6 +1087,8 @@ def shown_value(group: BaseSettings, field: str) -> Any:
         return "********"
     if value is None and type(group) is WorkerSettings and field == "batch_size":
         return "auto (each GPU's job capacity, CPU/RAM dependent; resolved at worker start)"
+    if value is None and type(group) is WorkerSettings and field == "gpu_reserve_gib":
+        return f"auto ({gpu_reserve_gib(group):g})"
     if value is None:
         return "auto" if field in ("threads", "max_concurrency") else "(unset)"
     if is_duration(type(group), field):

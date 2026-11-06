@@ -71,6 +71,8 @@ class ServerInfoResponse(BaseModel):
     result_retention_seconds: int
     max_video_length_minutes: int | None = None
     max_upload_size_mb: float | None
+    # Whether piano arrangements are on (WORKER_ARRANGEMENT), so an app can offer them.
+    arrangement: bool = False
     # only present when billing is enabled
     free_minutes: int | None = None
     free_minutes_period: str | None = None
@@ -246,6 +248,7 @@ def server_info() -> ServerInfoResponse:
         result_retention_seconds=int(settings.limits.result_retention),
         max_video_length_minutes=settings.limits.max_video_length_minutes,
         max_upload_size_mb=settings.limits.max_upload_size_mb,
+        arrangement=settings.worker.arrangement,
     )
     # Always present, null when nothing is planned.
     notice = maintenance.current(redis)

@@ -868,3 +868,69 @@ def test_lowering_needs_the_new_access_name_typed_exactly(writable):
         assert lower(client, planned, confirm=typed, reason="travelling").status_code == 400, typed
     assert billing.admin_web_caps() == []
     assert lower(client, planned, confirm="read-only", reason="travelling").status_code == 200
+
+
+# --- Piano arrangements ------------------------------------------------------------
+
+def test_jobs_can_be_filtered_by_mode(page, monkeypatch):
+    client, settings, billing = page
+    settings.worker.arrangement = True
+    ids = {}
+    fields = {"transcription": {}, "arrangement": {"mode": "arrangement", "style": "level1"}}
+    for mode, extra in fields.items():
+        job_id = "a1b2c3d4e5f60718293a4b5c6d7e8f90" if mode == "transcription" else "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+        tasks.redis.hset(tasks.job_key(job_id), mapping={"status": "queued", "user_id": "user", **extra})
+        ids[mode] = job_id
+        tasks.record_job(job_id)
+    with billing._connect() as connection:
+        connection.execute("UPDATE job_diagnostics SET mode = NULL WHERE job_id = ?", (ids["transcription"],))
+
+    def listed(query):
+        response = client.get(f"/api/jobs?{query}", headers=signed_in())
+        assert response.status_code == 200
+        return {row["job_id"]: (row["mode"], row["style"]) for row in response.json()}
+
+    assert listed("") == {"a1b2c3d4e5f60718293a4b5c6d7e8f90": ("transcription", None), "0f1e2d3c4b5a69788796a5b4c3d2e1f0": ("arrangement", "level1")}
+    assert listed("mode=arrangement") == {"0f1e2d3c4b5a69788796a5b4c3d2e1f0": ("arrangement", "level1")}
+    assert listed("mode=transcription") == {"a1b2c3d4e5f60718293a4b5c6d7e8f90": ("transcription", None)}
+    refused = client.get("/api/jobs?mode=everything", headers=signed_in())
+    assert refused.status_code == 400 and "mode must be one of" in refused.json()["detail"]
+    detail = client.get("/api/jobs/0f1e2d3c4b5a69788796a5b4c3d2e1f0", headers=signed_in())
+    assert detail.status_code == 200, detail.text
+    detail = detail.json()
+    assert detail["live"]["mode"] == "arrangement" and detail["record"]["mode"] == "arrangement"
+
+
+def test_the_status_says_whether_arrangements_are_on_and_who_arranges(page):
+    client, settings, _ = page
+    from app.outsource import routing
+
+    routing.publish_heartbeat(tasks.redis, 2, 30.0, "a", arrangement=True)
+    routing.publish_heartbeat(tasks.redis, 2, 30.0, "b")
+
+    settings.worker.arrangement = False
+    off = client.get("/api/status", headers=signed_in()).json()
+    settings.worker.arrangement = True
+    on = client.get("/api/status", headers=signed_in()).json()
+
+    assert off["arrangement"] is False and on["arrangement"] is True
+    assert on["local_worker"]["arranging"] == 1
+    assert [worker["arrangement"] for worker in on["local_workers"]] == [True, False]
+
+
+def test_the_page_shows_the_mode_as_text():
+    script = (STATIC / "admin.js").read_text(encoding="utf-8")
+
+    # Through el(), which sets text, never markup.
+    assert 'field("Mode", mode)' in script and 'label: "Mode", render: modeLabel' in script
+    assert "state.arrangement" in script and "worker.arranging" in script
+
+
+def test_the_billing_page_answers_without_billing(page):
+    client, settings, _ = page
+    settings.billing.provider = "none"
+
+    response = client.get("/api/billing", headers=signed_in())
+
+    assert response.status_code == 200
+    assert response.json()["billing"] is False and response.json()["minutes"] is None

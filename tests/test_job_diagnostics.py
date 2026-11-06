@@ -171,3 +171,44 @@ def test_diagnostics_retention_default(api_context):
     _, settings, _ = api_context
 
     assert settings.jobs.diagnostics_retention == 30 * 24 * 60 * 60
+
+
+# --- piano arrangements -----------------------------------------------------------
+
+@pytest.mark.parametrize(("fields", "mode"), [({}, "transcription"), ({"mode": "arrangement", "style": "level1"}, "arrangement")])
+def test_the_job_record_stores_the_mode(worker, monkeypatch, fields, mode):
+    client, settings, _ = worker
+    settings.worker.arrangement = True
+    monkeypatch.setattr(tasks.arrange_job, "send", lambda *args, **kwargs: None)
+
+    response = client.post("/api/transcriptions", headers=auth("user"), json={"source_url": "https://example.com/video", **fields})
+
+    assert diagnostics(settings, response.json()["job_id"])["mode"] == mode
+
+
+def test_a_database_without_the_mode_column_gets_it_on_the_next_start(tmp_path):
+    from app.billing import Billing
+
+    path = str(tmp_path / "old.sqlite3")
+    with Billing(path)._connect():
+        pass
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE job_diagnostics DROP COLUMN mode")
+        connection.execute(
+            "INSERT INTO job_diagnostics (job_id, source, status, outsourced, created_at, updated_at) "
+            "VALUES ('old', 'url', 'completed', 0, 1, 1)"
+        )
+        assert "mode" not in {row[1] for row in connection.execute("PRAGMA table_info(job_diagnostics)")}
+
+    billing = Billing(path)
+    # Starting again changes nothing.
+    with Billing(path)._connect():
+        pass
+
+    [old] = billing.read("SELECT job_id, mode FROM job_diagnostics")
+    assert (old["job_id"], old["mode"]) == ("old", None)
+    billing.record_job("new", {"status": "queued", "mode": "arrangement"})
+    billing.record_job("old", {"status": "completed"})
+    modes = {row["job_id"]: row["mode"] for row in billing.read("SELECT job_id, mode FROM job_diagnostics")}
+    # A job recorded again takes the mode of its Redis job.
+    assert modes == {"old": "transcription", "new": "arrangement"}

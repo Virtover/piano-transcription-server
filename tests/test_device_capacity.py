@@ -12,8 +12,11 @@ MiB = 1024**2
 
 
 @pytest.fixture
-def gpus(monkeypatch):
-    """Fake torch with configurable GPUs: (uuid, CUDA free bytes, total bytes)."""
+def gpus(monkeypatch, default_settings):
+    """Fake torch with configurable GPUs: (uuid, CUDA free bytes, total bytes).
+    Arrangements, on by default, are off here: the capacities are those of
+    transcriptions alone."""
+    default_settings.worker.arrangement = False
     state = {"devices": [], "smi": "", "smi_error": None}
 
     cuda = types.SimpleNamespace(
@@ -108,3 +111,47 @@ def test_launcher_uses_cpu_when_no_job_fits(gpus, monkeypatch):
     gpus["smi"] = "GPU-aaaa-1, 1500\n"
 
     assert launcher.gpu_capacity(device.cuda_job_capacities()) is None
+
+
+# --- piano arrangements -----------------------------------------------------------
+
+def test_arrangement_fits_at_its_threshold(default_settings):
+    worker = default_settings.worker
+    worker.arrangement = True
+    # Reserves: 1.0 models + 0.25 arrangement models + 0.25 tempo map = 1.5 GiB.
+    assert device.gpu_budget_gib(3 * GiB) == pytest.approx(1.5)
+    threshold = (1.5 + worker.arrangement_memory_gib) * GiB
+
+    assert device.arrangement_fits(threshold)
+    assert device.arrangement_fits(threshold + 1)
+    assert not device.arrangement_fits(threshold - 0.01 * GiB)
+    assert not device.arrangement_fits(0)
+
+
+def test_arrangement_never_fits_when_it_is_off(default_settings):
+    default_settings.worker.arrangement = False
+    assert not device.arrangement_fits(80 * GiB)
+
+
+def test_the_arrangement_models_and_the_tempo_map_shrink_the_budget(default_settings):
+    worker = default_settings.worker
+    worker.arrangement = False
+    assert device.gpu_budget_gib(4 * GiB) == pytest.approx(2.75)
+    worker.arrangement = True
+    assert device.gpu_budget_gib(4 * GiB) == pytest.approx(2.5)
+    worker.tempo_map = False
+    assert device.gpu_budget_gib(4 * GiB) == pytest.approx(2.75)
+    worker.gpu_reserve_gib = 2.0
+    assert device.gpu_budget_gib(4 * GiB) == pytest.approx(2.0)
+    assert device.gpu_budget_gib(1 * GiB) == 0.0
+
+
+def test_job_capacity_counts_whole_jobs_in_the_budget(default_settings):
+    worker = default_settings.worker
+    worker.arrangement = True
+    worker.memory_per_job_gib = 1.0
+    worker.tempo_map = False
+
+    assert device.job_capacity((1.25 + 3) * GiB) == 3
+    assert device.job_capacity((1.25 + 3.9) * GiB) == 3
+    assert device.job_capacity(1 * GiB) == 0
