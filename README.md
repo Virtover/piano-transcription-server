@@ -72,4 +72,4 @@ If you find this project useful, support is always appreciated:
 
 ## 📄 License
 
-Piano Transcription Server is an independent open-source project. See [LICENSE](LICENSE).
+Piano Transcription Server is an independent open-source project, licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attributions; versions up to commit `fcda07f` were released under the MIT License. Contributions are accepted under the same license (section 5 of the license).
