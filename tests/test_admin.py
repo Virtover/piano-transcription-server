@@ -360,11 +360,11 @@ def test_user_shows_balance_purchases_and_history(billed, capsys, monkeypatch):
     code, output = admin(capsys, "user", "USER@example.com")
 
     assert code == 0
-    assert "balance: 30 minutes, 0 reserved by running jobs, 30 available" in output
+    assert "balance: 30 paid and 0 monthly minutes, 0 reserved by running jobs, 30 available" in output
     assert "GPA.1" in output
     # Purchase tokens are never printed.
     assert "secret-token" not in output
-    assert "purchase  +30" in output
+    assert "purchase  paid     +30" in output
     assert job_id[:8] in output
 
 
@@ -449,7 +449,7 @@ def test_delete_asks_first(billed, capsys, monkeypatch):
 def test_billing_report_totals_minutes_per_period(billed, capsys, monkeypatch):
     client, settings, billing = billed
     settings.billing.free_minutes = 5
-    billing.grant_free_minutes("fresh", "fresh@example.com")
+    billing.renew_monthly_minutes("fresh", "fresh@example.com")
     job_id = submit(client)
     tasks.redis.hset(tasks.job_key(job_id), "status", "completed")
     billing.settle_success(job_id)
@@ -460,8 +460,9 @@ def test_billing_report_totals_minutes_per_period(billed, capsys, monkeypatch):
 
     assert code == 0
     total = next(line for line in output.splitlines() if line.startswith("Total"))
-    # Sold, free, used, voided, by hand.
-    assert total.split() == ["Total", "30", "5", "2", "30", "+3"]
+    # Sold, free, used, expired, voided, by hand. Both users got their
+    # monthly minutes.
+    assert total.split() == ["Total", "30", "10", "2", "0", "30", "+3"]
     assert "Negative balances: none" in output
 
 

@@ -55,6 +55,17 @@ See the **Google Play** section of its output: the API, the service account and 
 
    A 401 or 403 right after giving the service account access is usually Google's delay in applying new permissions, which can take up to a day.
 
+## 🗓️ Monthly and paid minutes
+
+Each user has two balances:
+
+* **Monthly minutes**, from `FREE_MINUTES`. Every `FREE_MINUTES_PERIOD`, counted from the user's last renewal, the ones left unused expire and the balance is renewed to `FREE_MINUTES`. Paying users get them too.
+* **Paid minutes**, bought or added by hand. They never expire.
+
+A job is paid from the monthly minutes first and from the paid ones for the rest. A job that is running when the period ends keeps the monthly minutes it holds. When it ends, the ones it did not use expire; they never carry over into the new period. The renewal, each reservation, and each settlement are single database transactions, so a crash or power cut leaves either the state before or the state after, never a mix. The database refuses a negative monthly balance.
+
+On upgrading, existing balances become paid minutes, and the current period counts as already given. Each user's first monthly minutes come when that period ends.
+
 ## 🔄 Purchase flow
 
 The Android client sends the completed purchase's product ID and purchase token to `POST /api/billing/google-play/verify` with the user's Google ID token:
@@ -91,7 +102,7 @@ The server verifies the purchase with Google Play, credits the configured minute
 When a purchase is refunded, charged back, or cancelled, Google Play reports it as voided. The API reads voided purchases when it starts and then every `GOOGLE_PLAY_VOIDED_PURCHASES_INTERVAL` (default `1h`), and takes each one's minutes back once.
 
 * **The balance can go below zero** when the minutes were already used. The user then cannot start transcriptions until a purchase brings the balance back above zero, and `GET /api/billing/balance` returns the negative `minutes`.
-* **Free minutes do not pay off a negative balance.** The free top-up waits until the balance is zero or more, so "buy, use, refund" cannot be repeated for free.
+* **Monthly minutes do not pay off a negative balance.** Their renewal waits until the paid balance is zero or more, so "buy, use, refund" cannot be repeated for free. Monthly minutes left from before the refund still count against what is owed.
 * Each voided purchase is logged as a warning with the order ID, the minutes taken back, and the user ID.
 * A voided purchase stays recorded, so its token can never be credited again.
 * Google keeps voided purchases for 30 days. If the API was stopped for longer, older ones are missed, and the API logs a warning.

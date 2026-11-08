@@ -14,7 +14,14 @@ from app.config import duration_seconds as parse_duration, settings
 DELETED_USER_ID = "deleted"
 TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 # Kinds of minute_ledger entries. Each change to a balance is one entry.
-LEDGER_KINDS = ("purchase", "free", "used", "voided", "admin")
+# "free" renews the monthly minutes and "expired" takes back the ones left
+# unused at the end of the period.
+LEDGER_KINDS = ("purchase", "free", "used", "voided", "admin", "expired")
+# A user's two balances, the minute_ledger pools: monthly minutes, renewed
+# every FREE_MINUTES_PERIOD and spent first, and paid minutes, which never
+# expire.
+MONTHLY = "monthly"
+PAID = "paid"
 # billing_state key: when this database started recording minute_ledger.
 LEDGER_SINCE_KEY = "minute_ledger_since"
 SCHEMA_VERSION = 1
@@ -125,6 +132,16 @@ class Billing:
                     CREATE INDEX IF NOT EXISTS job_diagnostics_created_index ON job_diagnostics (created_at);
                     -- Added with piano arrangements; NULL in older rows means a transcription.
                     ALTER TABLE job_diagnostics ADD COLUMN IF NOT EXISTS mode TEXT;
+                    -- Added with monthly minutes. A reservation holds monthly_minutes of
+                    -- its cost from the monthly balance; monthly_ended is 1 once their
+                    -- period has ended, so that those it does not use expire.
+                    ALTER TABLE users ADD COLUMN IF NOT EXISTS monthly_minutes INTEGER NOT NULL DEFAULT 0
+                        CHECK (monthly_minutes >= 0);
+                    ALTER TABLE transcription_reservations ADD COLUMN IF NOT EXISTS monthly_minutes INTEGER NOT NULL DEFAULT 0
+                        CHECK (monthly_minutes >= 0);
+                    ALTER TABLE transcription_reservations ADD COLUMN IF NOT EXISTS monthly_ended INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE minute_ledger ADD COLUMN IF NOT EXISTS pool TEXT NOT NULL DEFAULT 'paid'
+                        CHECK (pool IN ('paid', 'monthly'));
                     INSERT INTO billing_state (key, value) VALUES ('minute_ledger_since', '{ledger_since}')
                     ON CONFLICT (key) DO NOTHING
                     ;
@@ -234,6 +251,28 @@ class Billing:
             job_columns = {row[1] for row in connection.execute("PRAGMA table_info(job_diagnostics)")}
             if "mode" not in job_columns:
                 connection.execute("ALTER TABLE job_diagnostics ADD COLUMN mode TEXT")
+            if "monthly_minutes" not in columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN monthly_minutes INTEGER NOT NULL DEFAULT 0 CHECK (monthly_minutes >= 0)"
+                )
+            reservation_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(transcription_reservations)")
+            }
+            if "monthly_minutes" not in reservation_columns:
+                connection.execute(
+                    "ALTER TABLE transcription_reservations ADD COLUMN monthly_minutes INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK (monthly_minutes >= 0)"
+                )
+            if "monthly_ended" not in reservation_columns:
+                connection.execute(
+                    "ALTER TABLE transcription_reservations ADD COLUMN monthly_ended INTEGER NOT NULL DEFAULT 0"
+                )
+            ledger_columns = {row[1] for row in connection.execute("PRAGMA table_info(minute_ledger)")}
+            if "pool" not in ledger_columns:
+                connection.execute(
+                    "ALTER TABLE minute_ledger ADD COLUMN pool TEXT NOT NULL DEFAULT 'paid' "
+                    "CHECK (pool IN ('paid', 'monthly'))"
+                )
 
     def _connect_raw(self):
         import psycopg
@@ -324,51 +363,51 @@ class Billing:
                 (email, user_id),
             )
 
-    def grant_free_minutes(self, user_id: str, email: str | None = None) -> int:
-        free_minutes = settings.billing.free_minutes or 0
-        if settings.billing.provider == "none" or free_minutes <= 0:
-            return 0
-
-        now = int(time.time())
-        with self._connect() as connection:
-            self._begin_write(connection)
-            self._ensure_user(connection, user_id, email)
-            user = connection.execute(
-                "SELECT minutes, free_grant_at FROM users WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-            if now - user["free_grant_at"] < period_seconds():
-                return 0
-            if user["minutes"] < 0:
-                # Minutes owed for a refunded purchase are not paid off with
-                # free minutes; the grant waits until the balance is positive.
-                return 0
-            grant = max(0, free_minutes - user["minutes"])
-            connection.execute(
-                "UPDATE users SET minutes = minutes + ?, free_grant_at = ? WHERE user_id = ?",
-                (grant, now, user_id),
-            )
-            _log_minutes(connection, user_id, "free", grant)
-            return grant
-
-    def get_balance(self, user_id: str) -> int:
-        """Available minutes. Negative after a refunded purchase whose minutes
-        were already used."""
+    def renew_monthly_minutes(self, user_id: str, email: str | None = None) -> int:
+        """Renew the user's monthly minutes if their period has ended: the
+        unused ones expire and FREE_MINUTES are given. Returns the minutes
+        given. It is one transaction, so a crash leaves either the old
+        period or the new one."""
         if settings.billing.provider == "none":
             return 0
+        if not _free_minutes_enabled():
+            # Then this only lets left-over ones expire. Job status polls
+            # call it, so it takes the write lock only when there are some.
+            with closing(self._connect()) as connection:
+                user = connection.execute(
+                    "SELECT monthly_minutes FROM users WHERE user_id = ?", (user_id,)
+                ).fetchone()
+            if user is None or user["monthly_minutes"] <= 0:
+                return 0
         with self._connect() as connection:
+            self._begin_write(connection)
+            if _free_minutes_enabled():
+                self._ensure_user(connection, user_id, email)
+            return _renew_monthly(connection, user_id)
+
+    def balances(self, user_id: str) -> dict[str, int]:
+        """Available minutes, less what running jobs hold: in all, monthly,
+        and paid. Paid minutes, and with them the total, are negative after
+        a refunded purchase whose minutes were already used."""
+        empty = {"minutes": 0, "monthly_minutes": 0, "paid_minutes": 0}
+        if settings.billing.provider == "none":
+            return empty
+        with closing(self._connect()) as connection:
             user = connection.execute(
-                """SELECT u.minutes - COALESCE(
-                           (SELECT SUM(reserved_minutes)
-                            FROM transcription_reservations
-                            WHERE user_id = ? AND status = 'reserved'),
-                           0
-                       ) AS available_minutes
-                    FROM users AS u
-                    WHERE u.user_id = ?""",
-                (user_id, user_id),
+                "SELECT minutes, monthly_minutes FROM users WHERE user_id = ?",
+                (user_id,),
             ).fetchone()
-            return int(user["available_minutes"]) if user else 0
+            if user is None:
+                return empty
+            held = _held(connection, user_id)
+        monthly = int(user["monthly_minutes"]) - held["monthly"]
+        paid = int(user["minutes"]) - (held["total"] - held["monthly"])
+        return {"minutes": monthly + paid, "monthly_minutes": monthly, "paid_minutes": paid}
+
+    def get_balance(self, user_id: str) -> int:
+        """Available minutes, monthly and paid. Negative after a refunded
+        purchase whose minutes were already used."""
+        return self.balances(user_id)["minutes"]
 
     def free_minutes_status(self, user_id: str) -> dict[str, int | None]:
         if settings.billing.provider == "none" or (settings.billing.free_minutes or 0) <= 0:
@@ -389,39 +428,45 @@ class Billing:
         }
 
     def reserve(self, user_id: str, job_id: str, cost: int, email: str | None = None) -> int | None:
+        """Hold the job's cost until it is settled or released: from the
+        monthly minutes first, the rest from the paid ones. Returns the
+        minutes still available."""
         if settings.billing.provider == "none" or cost <= 0:
             return None
         with self._connect() as connection:
             self._begin_write(connection)
             self._ensure_user(connection, user_id, email)
+            # In the same transaction, so a job is never paid with minutes
+            # of a period that has just ended.
+            _renew_monthly(connection, user_id)
             user = connection.execute(
-                "SELECT minutes FROM users WHERE user_id = ?",
+                "SELECT minutes, monthly_minutes FROM users WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
-            reserved = connection.execute(
-                """SELECT COALESCE(SUM(reserved_minutes), 0) AS total
-                   FROM transcription_reservations WHERE user_id = ? AND status = 'reserved'""",
-                (user_id,),
-            ).fetchone()["total"]
-            if user["minutes"] - reserved < cost:
+            held = _held(connection, user_id)
+            available = user["minutes"] + user["monthly_minutes"] - held["total"]
+            if available < cost:
                 raise InsufficientMinutes()
+            from_monthly = min(cost, max(0, user["monthly_minutes"] - held["monthly"]))
             # A failed job, whose reservation was released, can be queued
             # again under its ID (python -m app.admin jobs requeue).
             reserved_now = connection.execute(
                 """INSERT INTO transcription_reservations
-                   (job_id, user_id, reserved_minutes, status)
-                   VALUES (?, ?, ?, 'reserved')
+                   (job_id, user_id, reserved_minutes, monthly_minutes, monthly_ended, status)
+                   VALUES (?, ?, ?, ?, 0, 'reserved')
                    ON CONFLICT (job_id) DO UPDATE SET
                        reserved_minutes = excluded.reserved_minutes,
+                       monthly_minutes = excluded.monthly_minutes,
+                       monthly_ended = 0,
                        charged_minutes = NULL,
                        status = 'reserved'
                    WHERE transcription_reservations.status = 'released'
                      AND transcription_reservations.user_id = excluded.user_id""",
-                (job_id, user_id, cost),
+                (job_id, user_id, cost, from_monthly),
             ).rowcount
             if not reserved_now:
                 raise ValueError(f"Job {job_id} already has a reservation")
-            return int(user["minutes"] - reserved - cost)
+            return int(available - cost)
 
     def settle_success(self, job_id: str) -> None:
         self._settle(job_id, None)
@@ -431,10 +476,18 @@ class Billing:
 
     def release(self, job_id: str) -> None:
         with self._connect() as connection:
+            self._begin_write(connection)
+            reservation = connection.execute(
+                "SELECT * FROM transcription_reservations WHERE job_id = ? AND status = 'reserved'",
+                (job_id,),
+            ).fetchone()
+            if not reservation:
+                return
             connection.execute(
-                "UPDATE transcription_reservations SET status = 'released' WHERE job_id = ? AND status = 'reserved'",
+                "UPDATE transcription_reservations SET status = 'released' WHERE job_id = ?",
                 (job_id,),
             )
+            _expire_stale_hold(connection, reservation, 0)
 
     def job_seen(self, job_id: str) -> bool:
         """Whether a job with this ID was ever queued: it has a diagnostics
@@ -466,16 +519,26 @@ class Billing:
             charge = reservation["reserved_minutes"] if charged_minutes is None else min(
                 max(0, charged_minutes), reservation["reserved_minutes"]
             )
+            user = connection.execute(
+                "SELECT monthly_minutes FROM users WHERE user_id = ?",
+                (reservation["user_id"],),
+            ).fetchone()
+            # Monthly minutes first, never more than the reservation holds
+            # of them or the balance has.
+            from_monthly = min(charge, reservation["monthly_minutes"] or 0, user["monthly_minutes"] if user else 0)
+            from_paid = charge - from_monthly
             connection.execute(
-                "UPDATE users SET minutes = minutes - ? WHERE user_id = ?",
-                (charge, reservation["user_id"]),
+                "UPDATE users SET minutes = minutes - ?, monthly_minutes = monthly_minutes - ? WHERE user_id = ?",
+                (from_paid, from_monthly, reservation["user_id"]),
             )
             connection.execute(
                 """UPDATE transcription_reservations
                    SET status = 'settled', charged_minutes = ? WHERE job_id = ?""",
                 (charge, job_id),
             )
-            _log_minutes(connection, reservation["user_id"], "used", -charge, job_id)
+            _log_minutes(connection, reservation["user_id"], "used", -from_monthly, job_id, MONTHLY)
+            _log_minutes(connection, reservation["user_id"], "used", -from_paid, job_id)
+            _expire_stale_hold(connection, reservation, from_monthly)
 
     def credit_purchase(
         self,
@@ -831,7 +894,8 @@ ADMIN_WEB_WRITES = {
     "read-write": {
         "admin_actions": "INSERT",
         "admin_web_caps": "INSERT",
-        "users": "UPDATE (minutes)",
+        # monthly_minutes only to settle the jobs it cancels.
+        "users": "UPDATE (minutes, monthly_minutes)",
         "minute_ledger": "INSERT",
         "transcription_reservations": "UPDATE (status, charged_minutes)",
         "job_diagnostics": "INSERT, UPDATE",
@@ -904,12 +968,87 @@ def _log_admin_action(
     )
 
 
-def _log_minutes(connection: sqlite3.Connection, user_id: str, kind: str, minutes: int, note: str | None = None) -> None:
+def _log_minutes(
+    connection: sqlite3.Connection,
+    user_id: str,
+    kind: str,
+    minutes: int,
+    note: str | None = None,
+    pool: str = PAID,
+) -> None:
     if minutes:
         connection.execute(
-            "INSERT INTO minute_ledger (user_id, kind, minutes, at, note) VALUES (?, ?, ?, ?, ?)",
-            (user_id, kind, minutes, int(time.time()), note),
+            "INSERT INTO minute_ledger (user_id, kind, minutes, at, note, pool) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, kind, minutes, int(time.time()), note, pool),
         )
+
+
+def _held(connection: sqlite3.Connection, user_id: str) -> dict[str, int]:
+    """Minutes the user's running jobs hold: in all, and of those, the
+    monthly ones."""
+    row = connection.execute(
+        """SELECT COALESCE(SUM(reserved_minutes), 0) AS total, COALESCE(SUM(monthly_minutes), 0) AS monthly
+           FROM transcription_reservations WHERE user_id = ? AND status = 'reserved'""",
+        (user_id,),
+    ).fetchone()
+    return {"total": int(row["total"]), "monthly": int(row["monthly"])}
+
+
+def _renew_monthly(connection: sqlite3.Connection, user_id: str) -> int:
+    """Start a new monthly period if the user's has ended, in the caller's
+    write transaction. Monthly minutes that running jobs hold stay until the
+    jobs end (_expire_stale_hold); the others expire. Returns the minutes
+    given."""
+    user = connection.execute(
+        "SELECT minutes, monthly_minutes, free_grant_at FROM users WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    now = int(time.time())
+    if user is None or now - user["free_grant_at"] < period_seconds():
+        return 0
+    if user["minutes"] < 0:
+        # Minutes owed for a refunded purchase are not paid off with
+        # monthly minutes; the renewal waits until the debt is paid.
+        return 0
+    kept = min(user["monthly_minutes"], _held(connection, user_id)["monthly"])
+    expired = user["monthly_minutes"] - kept
+    grant = (settings.billing.free_minutes or 0) if _free_minutes_enabled() else 0
+    if not expired and not grant:
+        return 0
+    connection.execute(
+        "UPDATE users SET monthly_minutes = ?, free_grant_at = ? WHERE user_id = ?",
+        (kept + grant, now, user_id),
+    )
+    connection.execute(
+        "UPDATE transcription_reservations SET monthly_ended = 1 "
+        "WHERE user_id = ? AND status = 'reserved' AND monthly_minutes > 0",
+        (user_id,),
+    )
+    _log_minutes(connection, user_id, "expired", -expired, None, MONTHLY)
+    _log_minutes(connection, user_id, "free", grant, None, MONTHLY)
+    return grant
+
+
+def _expire_stale_hold(connection: sqlite3.Connection, reservation, used: int) -> None:
+    """When a job that held monthly minutes of an ended period ends, the
+    ones it did not use expire, as that period's others did at renewal."""
+    held = reservation["monthly_minutes"] or 0
+    if held <= used or not reservation["monthly_ended"]:
+        return
+    user = connection.execute(
+        "SELECT monthly_minutes FROM users WHERE user_id = ?",
+        (reservation["user_id"],),
+    ).fetchone()
+    if user is None:
+        return
+    expired = min(held - used, user["monthly_minutes"])
+    if expired <= 0:
+        return
+    connection.execute(
+        "UPDATE users SET monthly_minutes = monthly_minutes - ? WHERE user_id = ?",
+        (expired, reservation["user_id"]),
+    )
+    _log_minutes(connection, reservation["user_id"], "expired", -expired, reservation["job_id"], MONTHLY)
 
 
 def _free_minutes_enabled() -> bool:

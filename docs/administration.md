@@ -78,8 +78,8 @@ python scripts/admin.py users find example.com
 
 A user is named by email address or user ID. The email must belong to someone who has signed in at least once. If a name matches two accounts, which happens only when one account's ID is another's email address, the command stops and asks for the user ID.
 
-* **`user <user>`** shows the balance, minutes reserved by running jobs, the last and next free-minute grant, a block, purchases with order IDs and whether they were voided, the latest balance changes, and recent jobs. A negative balance means a refunded purchase's minutes were already used; see [Refunds and chargebacks](google-play-billing.md#-refunds-and-chargebacks).
-* **`credit <minutes>`** adds minutes, or takes them away with a negative number. It shows the balance before and after, and asks first. The balance can go below zero. The reason is kept with the balance change and in the audit log.
+* **`user <user>`** shows the paid and monthly balances, minutes reserved by running jobs, the last and next renewal of the monthly minutes, a block, purchases with order IDs and whether they were voided, the latest balance changes, and recent jobs. A negative balance means a refunded purchase's minutes were already used; see [Refunds and chargebacks](google-play-billing.md#-refunds-and-chargebacks).
+* **`credit <minutes>`** adds paid minutes, which never expire, or takes them away with a negative number. It shows the balance before and after, and asks first. The balance can go below zero. The reason is kept with the balance change and in the audit log.
 * **`delete`** deletes the account and its data, the same as `DELETE /api/account`, including running jobs and remaining minutes, and cannot be undone. It asks you to type the account's email address, or its user ID if it has none. See **Account deletion** in the [API guide](api.md#-account-deletion) for what is kept. Use it for deletion requests that arrive by email or a web form.
 * **`users find <text>`** lists the accounts whose email address or user ID contains the text, at least 3 characters, for when you know only part of an address. `%` and `_` are matched as written.
 
@@ -92,7 +92,7 @@ python scripts/admin.py billing --remote-price-per-hour 1.2
 
 Whether the price per minute covers the GPU time:
 
-* **Minutes** per day or month (`--per`): sold, given free, used by transcriptions, taken back for voided purchases, and changed by hand. `--since` sets how far back (default `30d`). Balance changes are recorded from the version that added this command on; earlier ones are not in the report, and it says so.
+* **Minutes** per day or month (`--per`): sold, given free as monthly minutes, used by transcriptions, expired unused at a monthly renewal, taken back for voided purchases, and changed by hand. `--since` sets how far back (default `30d`). Balance changes are recorded from the version that added this command on; earlier ones are not in the report, and it says so.
 * **Negative balances:** how many users owe minutes, and the largest.
 * **Voided purchases:** when the API last read them from Google Play.
 * **Completed jobs and their run time** per backend. Run time is from start to finish, including the download, so it overstates the time a remote GPU is billed for. With `--remote-price-per-hour`, your provider's price per hour of the GPU you use, it estimates the remote cost. Job records are kept for `JOB_DIAGNOSTICS_RETENTION`, which limits how far back this goes.
@@ -216,7 +216,7 @@ A function that cannot do what was asked raises `AdminError` (in `app.admin.comm
 
 Two tables of the billing database support these commands:
 
-* **`minute_ledger`**: every change to a balance, with its kind (purchase, free grant, use, voided purchase, change by hand), the minutes, the time, and a note: the order ID, the job ID, or the reason given.
+* **`minute_ledger`**: every change to a balance, with its kind (purchase, free grant, use, expired monthly minutes, voided purchase, change by hand), its pool (`paid` or `monthly`; each pool adds up to that balance), the minutes, the time, and a note: the order ID, the job ID, or the reason given.
 * **`admin_actions`**: the audit log.
 
 When an account is deleted, its ledger entries are kept without the user, so totals stay right, like its purchases. Audit entries about it, including the deletion, name it by a hash of its ID instead of the ID. Reasons are kept as written, so do not put an email address in one.

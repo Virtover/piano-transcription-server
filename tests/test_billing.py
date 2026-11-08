@@ -1,6 +1,9 @@
+import sqlite3
+from contextlib import closing
+
 import pytest
 
-from app.billing import InsufficientMinutes, cancelled_cost, period_seconds, transcription_cost
+from app.billing import Billing, InsufficientMinutes, cancelled_cost, period_seconds, transcription_cost
 
 
 @pytest.fixture
@@ -32,7 +35,7 @@ def test_billing_is_inactive_without_provider(api_context):
 
     assert billing.reserve("anonymous", "job", 5) is None
     assert billing.get_balance("anonymous") == 0
-    assert billing.grant_free_minutes("anonymous") == 0
+    assert billing.renew_monthly_minutes("anonymous") == 0
 
 
 def test_reserve_settle_and_release(billed):
@@ -77,28 +80,197 @@ def test_cancellation_charge_is_capped_by_reservation(billed):
     assert billing.get_balance("user") == 8
 
 
-def test_free_minutes_top_up_once_per_period(billed):
+@pytest.fixture
+def monthly(billed):
     settings, billing = billed
     settings.billing.free_minutes = 5
     settings.billing.free_minutes_period = "1d"
-    billing.credit_purchase("user", "starter", "token", "order")
-    billing.reserve("user", "job", 8)
-    billing.settle_success("job")
+    return settings, billing
 
-    assert billing.grant_free_minutes("user") == 3
-    assert billing.grant_free_minutes("user") == 0
-    assert billing.get_balance("user") == 5
+
+def end_period(settings, user_id="user"):
+    """Move the user's monthly period back, so that it has ended."""
+    with closing(sqlite3.connect(settings.database.path)) as connection, connection:
+        connection.execute(
+            "UPDATE users SET free_grant_at = free_grant_at - 86400 WHERE user_id = ?",
+            (user_id,),
+        )
+
+
+def test_monthly_minutes_renew_once_per_period(monthly):
+    _, billing = monthly
+
+    assert billing.renew_monthly_minutes("user") == 5
+    assert billing.renew_monthly_minutes("user") == 0
+    assert billing.balances("user") == {"minutes": 5, "monthly_minutes": 5, "paid_minutes": 0}
     status = billing.free_minutes_status("user")
     assert 0 < status["free_minutes_seconds_until_next_grant"] <= 24 * 60 * 60
 
 
-def test_free_minutes_never_exceed_the_configured_amount(billed):
-    settings, billing = billed
-    settings.billing.free_minutes = 5
+def test_monthly_minutes_come_beside_paid_ones(monthly):
+    # Paying users get them too: they are their own balance.
+    _, billing = monthly
     billing.credit_purchase("user", "starter", "token", "order")
 
-    assert billing.grant_free_minutes("user") == 0
-    assert billing.get_balance("user") == 10
+    assert billing.renew_monthly_minutes("user") == 5
+    assert billing.balances("user") == {"minutes": 15, "monthly_minutes": 5, "paid_minutes": 10}
+
+
+def test_monthly_minutes_are_spent_first(monthly):
+    _, billing = monthly
+    billing.credit_purchase("user", "starter", "token", "order")
+    billing.renew_monthly_minutes("user")
+
+    assert billing.reserve("user", "job-1", 3) == 12
+    assert billing.balances("user") == {"minutes": 12, "monthly_minutes": 2, "paid_minutes": 10}
+    assert billing.reserve("user", "job-2", 4) == 8
+    assert billing.balances("user") == {"minutes": 8, "monthly_minutes": 0, "paid_minutes": 8}
+    billing.settle_success("job-2")
+    billing.settle_success("job-1")
+
+    assert billing.balances("user") == {"minutes": 8, "monthly_minutes": 0, "paid_minutes": 8}
+
+
+def test_unused_monthly_minutes_expire_and_paid_ones_stay(monthly):
+    settings, billing = monthly
+    billing.credit_purchase("user", "starter", "token", "order")
+    billing.renew_monthly_minutes("user")
+    billing.reserve("user", "job", 2)
+    billing.settle_success("job")
+    end_period(settings)
+
+    assert billing.renew_monthly_minutes("user") == 5
+    # 3 left over expired; the new period starts again from 5.
+    assert billing.balances("user") == {"minutes": 15, "monthly_minutes": 5, "paid_minutes": 10}
+    assert ledger(billing)[-2:] == [("user", "expired", -3, None), ("user", "free", 5, None)]
+
+
+def test_reserving_renews_an_ended_period_first(monthly):
+    settings, billing = monthly
+    billing.renew_monthly_minutes("user")
+    billing.reserve("user", "job", 5)
+    billing.settle_success("job")
+    end_period(settings)
+
+    # Without asking for the balance first.
+    assert billing.reserve("user", "next", 5) == 0
+
+
+def test_a_running_job_keeps_its_monthly_minutes_across_a_renewal(monthly):
+    settings, billing = monthly
+    billing.credit_purchase("user", "starter", "token", "order")
+    billing.renew_monthly_minutes("user")
+    billing.reserve("user", "job", 4)
+    end_period(settings)
+
+    billing.renew_monthly_minutes("user")
+    # The 1 unheld minute expired; the job still holds its 4.
+    assert billing.balances("user") == {"minutes": 15, "monthly_minutes": 5, "paid_minutes": 10}
+    billing.settle_success("job")
+
+    assert billing.balances("user") == {"minutes": 15, "monthly_minutes": 5, "paid_minutes": 10}
+    assert_ledger_adds_up(billing)
+
+
+def test_monthly_minutes_of_an_ended_period_expire_when_its_job_is_released(monthly):
+    settings, billing = monthly
+    billing.renew_monthly_minutes("user")
+    billing.reserve("user", "job", 4)
+    end_period(settings)
+    billing.renew_monthly_minutes("user")
+
+    billing.release("job")
+
+    # Not carried into the new period.
+    assert billing.balances("user") == {"minutes": 5, "monthly_minutes": 5, "paid_minutes": 0}
+    assert_ledger_adds_up(billing)
+
+
+def test_cancellation_across_a_renewal_charges_old_minutes_and_expires_the_rest(monthly):
+    settings, billing = monthly
+    billing.renew_monthly_minutes("user")
+    billing.reserve("user", "job", 4)
+    end_period(settings)
+    billing.renew_monthly_minutes("user")
+
+    billing.settle_cancellation("job", 1)
+
+    assert billing.balances("user") == {"minutes": 5, "monthly_minutes": 5, "paid_minutes": 0}
+    assert_ledger_adds_up(billing)
+
+
+def test_a_job_paid_partly_from_each_balance(monthly):
+    _, billing = monthly
+    billing.credit_purchase("user", "starter", "token", "order")
+    billing.renew_monthly_minutes("user")
+
+    billing.reserve("user", "job", 8)
+    billing.settle_cancellation("job", 6)
+
+    # 5 monthly first, then 1 paid.
+    assert billing.balances("user") == {"minutes": 9, "monthly_minutes": 0, "paid_minutes": 9}
+    assert ("user", "used", -5, "job") in ledger(billing)
+    assert ("user", "used", -1, "job") in ledger(billing)
+    assert_ledger_adds_up(billing)
+
+
+def test_a_requeued_job_holds_monthly_minutes_again(monthly):
+    _, billing = monthly
+    billing.renew_monthly_minutes("user")
+    billing.reserve("user", "job", 3)
+    billing.release("job")
+
+    billing.reserve("user", "job", 3)
+    billing.settle_success("job")
+
+    assert billing.balances("user") == {"minutes": 2, "monthly_minutes": 2, "paid_minutes": 0}
+
+
+def test_left_over_monthly_minutes_expire_when_free_minutes_are_turned_off(monthly):
+    settings, billing = monthly
+    billing.renew_monthly_minutes("user")
+    settings.billing.free_minutes = None
+    end_period(settings)
+
+    assert billing.renew_monthly_minutes("user") == 0
+    assert billing.balances("user")["monthly_minutes"] == 0
+
+
+def test_without_free_minutes_no_account_is_created(billed):
+    _, billing = billed
+
+    assert billing.renew_monthly_minutes("stranger") == 0
+    assert billing.read("SELECT * FROM users") == []
+
+
+def test_an_older_database_gains_monthly_minutes_keeping_its_balances(tmp_path, monthly):
+    settings, _ = monthly
+    path = tmp_path / "old.sqlite3"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.executescript(
+            """
+            CREATE TABLE users (user_id TEXT PRIMARY KEY, email TEXT, minutes INTEGER NOT NULL DEFAULT 0,
+                                free_grant_at INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE transcription_reservations (job_id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                reserved_minutes INTEGER NOT NULL, charged_minutes INTEGER, status TEXT NOT NULL);
+            CREATE TABLE minute_ledger (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL,
+                minutes INTEGER NOT NULL, at INTEGER NOT NULL, note TEXT);
+            INSERT INTO users VALUES ('user', NULL, 7, strftime('%s', 'now'));
+            INSERT INTO transcription_reservations VALUES ('old-job', 'user', 2, NULL, 'reserved');
+            INSERT INTO minute_ledger VALUES (1, 'user', 'free', 7, 0, NULL);
+            """
+        )
+    billing = Billing(str(path))
+
+    # What they had stays, as paid minutes; this period was already given.
+    assert billing.balances("user") == {"minutes": 5, "monthly_minutes": 0, "paid_minutes": 5}
+    assert billing.renew_monthly_minutes("user") == 0
+    billing.settle_success("old-job")
+    assert billing.balances("user") == {"minutes": 5, "monthly_minutes": 0, "paid_minutes": 5}
+    assert billing.read("SELECT pool FROM minute_ledger WHERE id = 1")[0]["pool"] == "paid"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("UPDATE users SET free_grant_at = 0")
+    assert billing.renew_monthly_minutes("user") == 5
 
 
 def test_free_minutes_period_defaults_to_30_days(api_context):
@@ -136,7 +308,7 @@ def test_every_balance_change_is_in_the_ledger(billed):
     settings.billing.free_minutes = 5
     settings.billing.free_minutes_period = "1d"
 
-    billing.grant_free_minutes("user")
+    billing.renew_monthly_minutes("user")
     billing.credit_purchase("user", "starter", "token", "GPA.1")
     billing.reserve("user", "job-1", 3)
     billing.settle_success("job-1")
@@ -154,6 +326,19 @@ def test_every_balance_change_is_in_the_ledger(billed):
     ]
     # The ledger adds up to the balance.
     assert sum(entry[2] for entry in ledger(billing)) == billing.get_balance("user")
+    assert_ledger_adds_up(billing)
+
+
+def assert_ledger_adds_up(billing, user_id="user"):
+    """Each pool of the ledger adds up to its balance."""
+    user = billing.read("SELECT minutes, monthly_minutes FROM users WHERE user_id = ?", (user_id,))[0]
+    pools = {
+        row["pool"]: row["total"]
+        for row in billing.read(
+            "SELECT pool, SUM(minutes) AS total FROM minute_ledger WHERE user_id = ? GROUP BY pool", (user_id,)
+        )
+    }
+    assert (pools.get("paid", 0), pools.get("monthly", 0)) == (user["minutes"], user["monthly_minutes"])
 
 
 def test_released_reservation_can_be_reserved_again(billed):

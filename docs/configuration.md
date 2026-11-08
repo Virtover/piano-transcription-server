@@ -130,8 +130,8 @@ Prints what a setting or secret is without reading the code and this page: the f
 | --- | --- | --- |
 | `BILLING_PROVIDER` | `none` | `none` or `google_play`. |
 | `BILLING_PRODUCTS` | `{}` | JSON mapping of Google Play product IDs to transcription minutes. |
-| `FREE_MINUTES` | unset | Free minutes granted per period; omit to disable. |
-| `FREE_MINUTES_PERIOD` | `30d` | How often free minutes are topped up. |
+| `FREE_MINUTES` | unset | Each user's monthly minutes: their own balance, renewed to this amount every period and spent before paid minutes. Unused ones expire. Omit to disable. |
+| `FREE_MINUTES_PERIOD` | `30d` | How often monthly minutes are renewed, counted from each user's last renewal. |
 | `DATABASE_BACKUPS` | `server` | Who backs up the billing database. `server`: the API, every `DATABASE_BACKUP_INTERVAL`, as described in [Billing database backups](#-billing-database-backups). `provider`: the provider of a [managed database](architecture.md#managed-redis-and-postgresql), which must then keep point-in-time backups; the server makes none, off-site copies cannot be on, and `check` warns as a reminder. |
 | `DATABASE_BACKUP_INTERVAL` | `15m` | How often the server backs up the billing database, with `DATABASE_BACKUPS=server`. |
 | `DATABASE_BACKUP_KEEP_ALL` | `1d` | Every backup younger than this is kept. See [Which backups are kept](#which-backups-are-kept). |

@@ -12,7 +12,10 @@ from app.worker import tasks
 PERIOD_FORMATS = {"day": "%Y-%m-%d", "month": "%Y-%m"}
 # Column order. Used and voided minutes are shown as positive numbers;
 # changes by hand go both ways and keep their sign.
-COLUMNS = (("purchase", "Sold"), ("free", "Free"), ("used", "Used"), ("voided", "Voided"), ("admin", "By hand"))
+COLUMNS = (
+    ("purchase", "Sold"), ("free", "Free"), ("used", "Used"), ("expired", "Expired"), ("voided", "Voided"),
+    ("admin", "By hand"),
+)
 SIGNED = {"admin"}
 NEGATIVE_SHOWN = 10
 

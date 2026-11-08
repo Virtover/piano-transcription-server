@@ -83,7 +83,12 @@ class ServerInfoResponse(BaseModel):
 
 class BalanceResponse(BaseModel):
     user_id: str
+    # Available in all: monthly_minutes, spent first, plus paid_minutes.
     minutes: int
+    # Renewed to free_minutes every free_minutes_period; unused ones expire.
+    monthly_minutes: int = 0
+    # Bought or given by hand; they never expire. Negative after a refund.
+    paid_minutes: int = 0
     free_minutes_seconds_until_next_grant: int | None = None
     free_minutes_next_grant_at: int | None = None
 
@@ -265,10 +270,10 @@ def balance(user: AuthenticatedUser | None = Depends(current_user)) -> BalanceRe
     user_id = user.user_id if user else "anonymous"
     email = user.email if user else None
     if settings.billing.provider != "none":
-        billing.grant_free_minutes(user_id, email)
+        billing.renew_monthly_minutes(user_id, email)
     return BalanceResponse(
         user_id=user_id,
-        minutes=billing.get_balance(user_id),
+        **billing.balances(user_id),
         **billing.free_minutes_status(user_id),
     )
 

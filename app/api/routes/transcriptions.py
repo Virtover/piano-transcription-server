@@ -116,7 +116,7 @@ class TranscriptionStatusResponse(BaseModel):
 def current_user_balance(user_id: str | None) -> int | None:
     if settings.billing.provider == "none" or not user_id:
         return None
-    billing.grant_free_minutes(user_id)
+    billing.renew_monthly_minutes(user_id)
     return billing.get_balance(user_id)
 
 
@@ -255,7 +255,7 @@ def ensure_minimum_balance(user: AuthenticatedUser | None) -> None:
     their upload is read."""
     if user is None:
         return
-    billing.grant_free_minutes(user.user_id, user.email)
+    billing.renew_monthly_minutes(user.user_id, user.email)
     required = transcription_cost(0)
     if billing.get_balance(user.user_id) < required:
         raise HTTPException(
@@ -319,7 +319,7 @@ def queue_job(
     email = user.email if user else None
     cost = transcription_cost(duration)
     if email:
-        billing.grant_free_minutes(current_user, email)
+        billing.renew_monthly_minutes(current_user, email)
     current_user_balance(current_user)
     try:
         current_balance = billing.reserve(current_user, job_id, cost, email)

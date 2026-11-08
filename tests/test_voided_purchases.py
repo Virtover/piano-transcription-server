@@ -106,34 +106,38 @@ def test_deleted_accounts_purchase_is_marked_without_a_balance(billed):
         assert connection.execute("SELECT voided_at IS NOT NULL FROM purchases").fetchone() == (1,)
 
 
-def test_free_minutes_do_not_pay_off_a_refund(billed):
-    settings, billing = billed
+def owe_ten_minutes(settings, billing):
     settings.billing.free_minutes = 5
     settings.billing.free_minutes_period = "1d"
     billing.credit_purchase("user", "starter", "token-1", "order-1")
-    billing.reserve("user", "job", 10)
+    billing.renew_monthly_minutes("user")
+    billing.reserve("user", "job", 15)
     billing.settle_success("job")
     billing.void_purchase("token-1")
+    with sqlite3.connect(settings.database.path) as connection:
+        connection.execute("UPDATE users SET free_grant_at = free_grant_at - 86400 WHERE user_id = 'user'")
 
-    assert billing.grant_free_minutes("user") == 0
-    assert billing.get_balance("user") == -10
+
+def test_free_minutes_do_not_pay_off_a_refund(billed):
+    settings, billing = billed
+    owe_ten_minutes(settings, billing)
+
+    assert billing.renew_monthly_minutes("user") == 0
+    assert billing.balances("user") == {"minutes": -10, "monthly_minutes": 0, "paid_minutes": -10}
+    with pytest.raises(InsufficientMinutes):
+        billing.reserve("user", "next", 1)
 
 
 def test_free_minutes_come_once_the_debt_is_paid(billed):
-    # The refused grant did not use up the period.
+    # The refused renewal did not use up the period.
     settings, billing = billed
-    settings.billing.free_minutes = 5
-    settings.billing.free_minutes_period = "1d"
-    billing.credit_purchase("user", "starter", "token-1", "order-1")
-    billing.reserve("user", "job", 10)
-    billing.settle_success("job")
-    billing.void_purchase("token-1")
-    assert billing.grant_free_minutes("user") == 0
+    owe_ten_minutes(settings, billing)
+    assert billing.renew_monthly_minutes("user") == 0
 
     with sqlite3.connect(settings.database.path) as connection:
         connection.execute("UPDATE users SET minutes = 0 WHERE user_id = 'user'")
 
-    assert billing.grant_free_minutes("user") == 5
+    assert billing.renew_monthly_minutes("user") == 5
 
 
 def test_negative_balance_is_reported(api_context, billed):

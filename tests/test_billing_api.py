@@ -12,6 +12,8 @@ def test_none_provider_exposes_balance_and_rejects_google_play(api_context):
     assert balance.json() == {
         "user_id": "anonymous",
         "minutes": 0,
+        "monthly_minutes": 0,
+        "paid_minutes": 0,
         "free_minutes_seconds_until_next_grant": None,
         "free_minutes_next_grant_at": None,
     }
@@ -331,3 +333,18 @@ def test_server_info_tells_how_long_results_are_kept(api_context):
 
     settings.limits.result_retention = "7d"
     assert client.get("/api/server-info").json()["result_retention_seconds"] == 7 * 24 * 60 * 60
+
+
+def test_balance_shows_monthly_and_paid_minutes(api_context):
+    client, settings, billing = api_context
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 10}
+    settings.billing.free_minutes = 5
+    billing.credit_purchase("user", "starter", "token", "order")
+
+    response = client.get("/api/billing/balance", headers={"Authorization": "Bearer user"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["minutes"], body["monthly_minutes"], body["paid_minutes"]) == (15, 5, 10)
+    assert body["free_minutes_seconds_until_next_grant"] > 0

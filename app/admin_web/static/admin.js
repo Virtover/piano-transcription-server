@@ -759,16 +759,18 @@ async function openUser(who) {
         el("div", {}, el("h1", { text: name }), el("p", { text: account.user_id }))),
       el("div", { class: "adm-head-right" }, account.blocked ? badge("blocked", "bad") : badge("active", "good"), el("div", { class: "chips" }, actions))),
     account.blocked ? alertBox("error", `Blocked${account.blocked.expires_in ? ` for ${span(account.blocked.expires_in)} more` : ""}: ${account.blocked.reason || "no reason given"}`) : null,
-    account.minutes < 0 ? alertBox("warn", "The balance is negative: a refunded purchase's minutes were already used.") : null,
+    account.minutes < 0 ? alertBox("warn", "The paid balance is negative: a refunded purchase's minutes were already used.") : null,
     el("div", { class: "stats" },
-      stat("Balance", unit(fmt(account.minutes), "min"), null, "lit"),
+      stat("Paid", unit(fmt(account.minutes), "min"), "never expire", "lit"),
+      stat("Monthly", unit(fmt(account.monthly_minutes), "min"), "spent first"),
       stat("Reserved", unit(fmt(account.reserved_minutes), "min"), "by running jobs"),
       stat("Available", unit(fmt(account.available_minutes), "min")),
-      account.free_minutes ? stat("Free minutes", account.free_minutes.next_grant_at ? when(account.free_minutes.next_grant_at) : "next request",
+      account.free_minutes ? stat("Monthly renewal", account.free_minutes.next_grant_at ? when(account.free_minutes.next_grant_at) : "next request",
         `last given ${when(account.free_minutes.last_grant_at)}`) : null),
     el("div", { class: "grid two" },
       iconCard("billing", "gold", "Balance changes", "Newest first", table([
-        { label: "When", render: (row) => when(row.at) }, { label: "Kind", render: (row) => badge(row.kind, row.kind === "used" ? "quiet" : row.kind === "voided" ? "bad" : row.kind === "admin" ? "violet" : "good") },
+        { label: "When", render: (row) => when(row.at) }, { label: "Kind", render: (row) => badge(row.kind, row.kind === "used" || row.kind === "expired" ? "quiet" : row.kind === "voided" ? "bad" : row.kind === "admin" ? "violet" : "good") },
+        { label: "Balance", render: (row) => row.pool || "paid" },
         { label: "Minutes", num: true, render: (row) => `${row.minutes > 0 ? "+" : ""}${fmt(row.minutes)}` },
         { label: "Note", render: (row) => row.note || "–" },
       ], account.balance_changes, { empty: "No changes recorded" })),
@@ -841,7 +843,8 @@ function billing() {
       const periods = report.minutes.periods;
       parts.push(el("div", { class: "stats" },
         stat("Sold", unit(fmt(totals.purchase), "min"), null, "lit"), stat("Given free", unit(fmt(totals.free), "min")),
-        stat("Used", unit(fmt(Math.abs(totals.used)), "min")), stat("Voided", unit(fmt(Math.abs(totals.voided)), "min"), null, totals.voided ? "alarm" : ""),
+        stat("Used", unit(fmt(Math.abs(totals.used)), "min")), stat("Expired", unit(fmt(Math.abs(totals.expired || 0)), "min"), "monthly, unused"),
+        stat("Voided", unit(fmt(Math.abs(totals.voided)), "min"), null, totals.voided ? "alarm" : ""),
         stat("By hand", unit(`${totals.admin > 0 ? "+" : ""}${fmt(totals.admin)}`, "min"))));
       if (report.minutes.recorded_since && report.minutes.recorded_since > report.since) {
         parts.push(alertBox("info", `Balance changes are recorded since ${when(report.minutes.recorded_since)}; earlier ones are not counted.`));

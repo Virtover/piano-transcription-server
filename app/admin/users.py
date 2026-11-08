@@ -31,7 +31,7 @@ SEARCH_LENGTH = 3
 # --- Data ---------------------------------------------------------------------
 
 def account(who: str) -> dict:
-    """A user's balance, free minutes, block, purchases (without tokens),
+    """A user's balances, paid and monthly, free minutes, block, purchases (without tokens),
     latest balance changes, reservations, and recent jobs."""
     user = find_user(who)
     user_id = user["user_id"]
@@ -52,9 +52,11 @@ def account(who: str) -> dict:
     return {
         "user_id": user_id,
         "email": user["email"],
+        # Paid minutes; monthly ones, spent first, are apart.
         "minutes": user["minutes"],
+        "monthly_minutes": user["monthly_minutes"],
         "reserved_minutes": held,
-        "available_minutes": user["minutes"] - held,
+        "available_minutes": user["minutes"] + user["monthly_minutes"] - held,
         "free_minutes": free,
         "blocked": {"reason": block.value or None, "expires_in": block.expires_in} if block else None,
         "purchases": [
@@ -68,7 +70,7 @@ def account(who: str) -> dict:
         "balance_changes": [
             dict(row)
             for row in billing.read(
-                "SELECT at, kind, minutes, note FROM minute_ledger WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+                "SELECT at, kind, pool, minutes, note FROM minute_ledger WHERE user_id = ? ORDER BY id DESC LIMIT ?",
                 (user_id, RECENT),
             )
         ],
@@ -153,15 +155,15 @@ def run_show(args) -> None:
     print(f"User {data['user_id']}")
     print(f"  email: {data['email'] or '-'}")
     print(
-        f"  balance: {data['minutes']} minutes, {data['reserved_minutes']} reserved by running jobs, "
-        f"{data['available_minutes']} available"
+        f"  balance: {data['minutes']} paid and {data['monthly_minutes']} monthly minutes, "
+        f"{data['reserved_minutes']} reserved by running jobs, {data['available_minutes']} available"
     )
     if data["minutes"] < 0:
-        print("  The balance is negative: a refunded purchase's minutes were already used.")
+        print("  The paid balance is negative: a refunded purchase's minutes were already used.")
     free = data["free_minutes"]
     if free is not None:
         next_grant = when(free["next_grant_at"]) if free["next_grant_at"] else "the next request"
-        print(f"  last free minutes: {when(free['last_grant_at'])}, next from {next_grant}")
+        print(f"  monthly minutes last renewed: {when(free['last_grant_at'])}, next from {next_grant}")
     block = data["blocked"]
     if block is not None:
         until = f" for {span(block['expires_in'])} more" if block["expires_in"] else ""
@@ -181,9 +183,9 @@ def run_show(args) -> None:
     if data["balance_changes"]:
         print(
             table(
-                ["When", "Kind", "Minutes", "Note"],
+                ["When", "Kind", "Balance", "Minutes", "Note"],
                 [
-                    [when(row["at"]), row["kind"], f"{row['minutes']:+d}", shorten(row["note"], 50)]
+                    [when(row["at"]), row["kind"], row["pool"], f"{row['minutes']:+d}", shorten(row["note"], 50)]
                     for row in data["balance_changes"]
                 ],
             )
