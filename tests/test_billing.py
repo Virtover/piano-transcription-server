@@ -107,6 +107,36 @@ def test_monthly_minutes_renew_once_per_period(monthly):
     assert 0 < status["free_minutes_seconds_until_next_grant"] <= 24 * 60 * 60
 
 
+def test_monthly_periods_keep_a_fixed_schedule_from_sign_up(monthly):
+    settings, billing = monthly
+    billing.renew_monthly_minutes("user")
+    signed_up = billing.read("SELECT free_grant_at FROM users")[0]["free_grant_at"]
+    # Back two and a half periods, as if the user signed up then and has
+    # been away since.
+    with closing(sqlite3.connect(settings.database.path)) as connection, connection:
+        connection.execute("UPDATE users SET free_grant_at = free_grant_at - 216000")
+
+    assert billing.renew_monthly_minutes("user") == 5
+    # The third period, which began half a period ago, not now.
+    assert billing.read("SELECT free_grant_at FROM users")[0]["free_grant_at"] == signed_up - 216000 + 2 * 86400
+    assert billing.free_minutes_status("user")["free_minutes_seconds_until_next_grant"] <= 43200
+
+
+def test_a_renewal_held_back_by_a_debt_keeps_the_schedule(monthly):
+    settings, billing = monthly
+    billing.renew_monthly_minutes("user")
+    billing.adjust_minutes("user", -3, "chargeback")
+    with closing(sqlite3.connect(settings.database.path)) as connection, connection:
+        connection.execute("UPDATE users SET free_grant_at = free_grant_at - 129600")
+    start = billing.read("SELECT free_grant_at FROM users")[0]["free_grant_at"]
+    assert billing.renew_monthly_minutes("user") == 0
+
+    billing.adjust_minutes("user", 3, "paid back")
+
+    assert billing.renew_monthly_minutes("user") == 5
+    assert billing.read("SELECT free_grant_at FROM users")[0]["free_grant_at"] == start + 86400
+
+
 def test_monthly_minutes_come_beside_paid_ones(monthly):
     # Paying users get them too: they are their own balance.
     _, billing = monthly

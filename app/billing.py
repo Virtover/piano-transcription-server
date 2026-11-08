@@ -1015,9 +1015,15 @@ def _renew_monthly(connection: sqlite3.Connection, user_id: str) -> int:
     grant = (settings.billing.free_minutes or 0) if _free_minutes_enabled() else 0
     if not expired and not grant:
         return 0
+    # Periods follow a fixed schedule from the first, which starts at sign-up:
+    # the new one starts where the last full period ended, however late the
+    # user comes back.
+    start = user["free_grant_at"]
+    period = period_seconds()
+    period_start = now if start <= 0 else start + (now - start) // period * period
     connection.execute(
         "UPDATE users SET monthly_minutes = ?, free_grant_at = ? WHERE user_id = ?",
-        (kept + grant, now, user_id),
+        (kept + grant, period_start, user_id),
     )
     connection.execute(
         "UPDATE transcription_reservations SET monthly_ended = 1 "

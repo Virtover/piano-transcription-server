@@ -59,12 +59,12 @@ See the **Google Play** section of its output: the API, the service account and 
 
 Each user has two balances:
 
-* **Monthly minutes**, from `FREE_MINUTES`. Every `FREE_MINUTES_PERIOD`, counted from the user's last renewal, the ones left unused expire and the balance is renewed to `FREE_MINUTES`. Paying users get them too.
+* **Monthly minutes**, from `FREE_MINUTES`. Every `FREE_MINUTES_PERIOD`, on a fixed schedule from the user's sign-up, the ones left unused expire and the balance is renewed to `FREE_MINUTES`. Paying users get them too. The renewal is made at the user's first request in a new period, but the schedule stays: a user who comes back late still gets the next renewal when the current period ends, not a full period later.
 * **Paid minutes**, bought or added by hand. They never expire.
 
 A job is paid from the monthly minutes first and from the paid ones for the rest. A job that is running when the period ends keeps the monthly minutes it holds. When it ends, the ones it did not use expire; they never carry over into the new period. The renewal, each reservation, and each settlement are single database transactions, so a crash or power cut leaves either the state before or the state after, never a mix. The database refuses a negative monthly balance.
 
-On upgrading, existing balances become paid minutes, and the current period counts as already given. Each user's first monthly minutes come when that period ends.
+On upgrading, existing balances become paid minutes, and the current period counts as already given. Each user's first monthly minutes come when that period ends. The server did not record sign-up times before, so an existing user's schedule runs from their last free grant.
 
 ## 🔄 Purchase flow
 
