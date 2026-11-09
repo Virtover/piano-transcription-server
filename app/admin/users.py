@@ -96,7 +96,7 @@ def find(text: str, limit: int = FOUND) -> list[dict]:
     # The text is matched as written: % and _ are not wildcards.
     pattern = "%" + text.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
     rows = tasks.billing.read(
-        "SELECT user_id, email, minutes FROM users "
+        "SELECT user_id, email, minutes, monthly_minutes FROM users "
         "WHERE lower(email) LIKE ? ESCAPE '!' OR lower(user_id) LIKE ? ESCAPE '!' "
         "ORDER BY email, user_id LIMIT ?",
         (pattern, pattern, limit),
@@ -224,7 +224,10 @@ def run_find(args) -> None:
     if not rows:
         print("No user matches")
         return
-    print(table(["User", "Email", "Minutes"], [[row["user_id"], row["email"], row["minutes"]] for row in rows]))
+    print(table(
+        ["User", "Email", "Paid", "Monthly"],
+        [[row["user_id"], row["email"], row["minutes"], row["monthly_minutes"]] for row in rows],
+    ))
     if len(rows) == FOUND:
         print(f"\nShowing the first {FOUND}; search for more of the address.")
 

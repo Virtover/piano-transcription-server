@@ -954,6 +954,7 @@ def test_users_find_by_part_of_the_email(billed, capsys):
 
     code, output = admin(capsys, "users", "find", "EXAMPLE")
     assert code == 0 and "user@example.com" in output and "other_name@example.com" in output
+    assert "Paid" in output and "Monthly" in output
     # Wildcards are matched as written.
     _, output = admin(capsys, "users", "find", "r_n")
     assert "other_name@example.com" in output and "user@example.com" not in output

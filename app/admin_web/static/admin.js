@@ -721,7 +721,8 @@ function users() {
       fill(results, el("section", { class: "card" }, table([
         { label: "Email", render: (row) => row.email || "–" },
         { label: "User ID", render: (row) => el("span", { class: "mono", text: row.user_id }) },
-        { label: "Minutes", num: true, render: (row) => fmt(row.minutes) },
+        { label: "Paid", num: true, render: (row) => fmt(row.minutes) },
+        { label: "Monthly", num: true, render: (row) => fmt(row.monthly_minutes) },
       ], rows, { onRow: (row) => openUser(row.user_id), empty: "No user matches", emptyIcon: "users" })));
     } catch (error) {
       fill(results, errorBox(error));

@@ -271,14 +271,16 @@ def test_reading(page, monkeypatch):
 
 
 def test_viewing_an_account_is_recorded_first(page, monkeypatch):
-    client, _, billing = page
+    client, settings, billing = page
+    settings.billing.free_minutes = 5
+    billing.renew_monthly_minutes("user", "user@example.com")
 
     account = client.get("/api/users/user@example.com", headers=signed_in()).json()
     found = client.get("/api/users?text=example", headers=signed_in()).json()
 
     assert account["minutes"] == 30
     assert "secret-token" not in json.dumps(account)
-    assert [row["email"] for row in found] == ["user@example.com"]
+    assert [(row["email"], row["minutes"], row["monthly_minutes"]) for row in found] == [("user@example.com", 30, 5)]
     rows = audit_rows(billing)
     assert [(row["actor"], row["action"], row["target"]) for row in rows] == [
         ("web:chris@example.com", "web.user_view", "user"),
