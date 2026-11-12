@@ -1476,9 +1476,9 @@ function composer(form = {}, replacing = false) {
   let idTyped = replacing || Boolean(form.id);
   const link = input({ maxlength: "500", placeholder: "An https link", value: form.link || "" });
   const linkLabel = input({ maxlength: "60", placeholder: "Open", value: form.linkLabel || "" });
-  const platforms = input({ maxlength: "200", placeholder: "Every platform", value: form.platforms || "" });
-  const minVersion = input({ type: "number", min: "0", step: "1", inputmode: "numeric", placeholder: "Any", value: form.minVersion || "" });
-  const maxVersion = input({ type: "number", min: "0", step: "1", inputmode: "numeric", placeholder: "Any", value: form.maxVersion || "" });
+  const platforms = input({ maxlength: "200", placeholder: "Every platform, or e.g. android, ios", value: form.platforms || "" });
+  const minVersion = input({ type: "number", min: "0", step: "1", inputmode: "numeric", placeholder: "Any", value: form.minVersion || "", class: "pw-input no-spin" });
+  const maxVersion = input({ type: "number", min: "0", step: "1", inputmode: "numeric", placeholder: "Any", value: form.maxVersion || "", class: "pw-input no-spin" });
   const starts = select(STARTS, "");
   const lasts = select(LASTS, "");
   const dismissible = select([["", "Yes, unless critical"], ["yes", "Yes"], ["no", "No"]], form.dismissible || "");
@@ -1518,7 +1518,7 @@ function composer(form = {}, replacing = false) {
 
   append(linkPart.body, [el("div", { class: "filters" }, field("Address", link), field("Button text", linkLabel))]);
   append(audiencePart.body, [
-    el("div", { class: "filters" }, field("Platforms", platforms, "Comma-separated, such as android"), field("Lowest version code", minVersion), field("Highest version code", maxVersion)),
+    el("div", { class: "filters" }, field("Platforms", platforms), field("Lowest version code", minVersion), field("Highest version code", maxVersion)),
     el("div", { class: "filters" }, field("Starts", starts), field("Lasts", lasts), field("Users can hide it", dismissible)),
     field("ID", id, "Apps remember what users hid by it"),
   ]);

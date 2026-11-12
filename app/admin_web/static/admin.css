@@ -163,6 +163,11 @@ kbd { font-family: var(--mono); font-size: 0.75rem; padding: 1px 6px; border: 1p
 .opt summary small { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 0.8rem; text-align: right; overflow-wrap: anywhere; }
 .opt summary:focus-visible { outline: 2px solid var(--accent-gold); outline-offset: 2px; border-radius: 4px; }
 .opt-body { padding: 4px 2px 14px; }
+/* Fields line up by their tops, so a hint under one does not lift it. */
+.opt-body .filters { align-items: start; }
+/* Version codes are typed, not stepped. */
+.no-spin { -moz-appearance: textfield; appearance: textfield; }
+.no-spin::-webkit-inner-spin-button, .no-spin::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .translations { display: grid; gap: 14px; margin-bottom: 12px; }
 .translation { display: grid; gap: 8px; }
 .translation-head { display: grid; grid-template-columns: 6rem minmax(0, 1fr) auto; gap: 8px; align-items: center; }
