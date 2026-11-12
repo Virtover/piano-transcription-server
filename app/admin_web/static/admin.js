@@ -314,7 +314,12 @@ function field(label, control, hint) {
 }
 
 function input(attributes = {}) {
-  return el("input", { class: "pw-input", type: "text", autocomplete: "off", spellcheck: "false", ...attributes });
+  return el("input", {
+    class: "pw-input", type: "text", autocomplete: "off", spellcheck: "false",
+    // No field here is a sign-in: password managers are asked to leave them alone.
+    "data-1p-ignore": "true", "data-lpignore": "true", "data-bwignore": "true", "data-form-type": "other",
+    ...attributes,
+  });
 }
 
 function searchBox(attributes) {
@@ -492,8 +497,8 @@ function change(action, args, { title, describe, after }) {
   const reason = input({ maxlength: "300", placeholder: REASON_REQUIRED.has(action) ? "Required; no email addresses" : "Optional; no email addresses" });
   const review = el("button", { type: "button", class: "btn gold", text: "Review" });
   const message = el("div");
-  modal.body.append(steps(0), describe ? el("div", { class: "pw-field" }, describe) : null,
-    field("Reason, kept in the audit log", reason), message);
+  append(modal.body, [steps(0), describe ? el("div", { class: "pw-field" }, describe) : null,
+    field("Reason, kept in the audit log", reason), message]);
   modal.foot.append(el("button", { type: "button", class: "btn", text: "Cancel", onclick: modal.close }), review);
   review.addEventListener("click", async () => {
     review.disabled = true;
@@ -1413,26 +1418,36 @@ function announcementCard(item) {
       live && canChange("announce.end") ? qbtn("End…", "c-red", () => endAnnouncement(item.id)) : null));
 }
 
-// A field around something that is not a single control: a <label> would
-// pass clicks anywhere in it to the toolbar's first button.
-function group(label, content, hint) {
-  return el("div", { class: "pw-field" }, el("span", { class: "pw-label", text: label }), content, hint ? el("span", { class: "pw-hint", text: hint }) : null);
+// A collapsed part of the form; its summary says what is chosen in it.
+function section(title, open = false) {
+  const summary = el("small");
+  const body = el("div", { class: "opt-body" });
+  const node = el("details", { class: "opt", open }, el("summary", {}, el("span", { text: title }), summary), body);
+  return { node, body, summarize: (text) => { summary.textContent = text; } };
+}
+
+// An ID from a title: "Update the app!" gives update-the-app.
+const SEVERITY_HINT = { info: "A note users may hide", warning: "A banner", critical: "Shown before anything else" };
+
+function slug(text) {
+  return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64).replace(/-+$/, "");
 }
 
 function translationRow(rows, text = {}, onInput = null) {
-  const language = input({ maxlength: "12", placeholder: "pl", value: text.language || "" });
-  const title = input({ maxlength: "120", value: text.title || "" });
+  const language = input({ maxlength: "12", placeholder: "pl", value: text.language || "", "aria-label": "Language code" });
+  const title = input({ maxlength: "120", placeholder: "Title", value: text.title || "", "aria-label": "Title" });
   const body = markupEditor({ value: text.body || "", rows: 5, label: "Text", onInput });
-  const label = input({ maxlength: "60", value: text.link_label || "" });
+  const label = input({ maxlength: "60", placeholder: "Link button text", value: text.link_label || "", "aria-label": "Link button text" });
   const read = () => ({ language: language.value.trim().toLowerCase(), title: title.value, body: body.value, link_label: label.value.trim() || null });
-  const row = el("div", { class: "card announce-translation" },
-    el("div", { class: "filters" }, field("Language", language, "A code such as pl, de, or pt-br"), field("Link button", label)),
-    field("Title", title), group("Text", body.node),
-    el("div", { class: "btn-row" }, qbtn("Remove this language", "c-grey", () => {
-      row.remove();
-      rows.splice(rows.indexOf(read), 1);
-      if (onInput) onInput();
-    })));
+  const remove = el("button", { type: "button", class: "modal-close", title: "Remove this language", "aria-label": "Remove this language", text: "×" });
+  const row = el("div", { class: "translation" },
+    el("div", { class: "translation-head" }, language, title, remove), body.node, label);
+  remove.addEventListener("click", () => {
+    row.remove();
+    rows.splice(rows.indexOf(read), 1);
+    if (onInput) onInput();
+  });
   rows.push(read);
   return row;
 }
@@ -1450,72 +1465,114 @@ function formOf(item) {
 
 // Writes a new announcement, or, with replacing, one replacing the
 // announcement with form.id. form fills it in: from an announcement, or
-// from the draft.
+// from the draft. Only what every announcement needs is in sight; the
+// rest is folded, with what is chosen in its summary.
 function composer(form = {}, replacing = false) {
-  const modal = openModal({ title: replacing ? `Replace ${form.id}` : "New announcement", subtitle: `Apps show it within a minute · ${MOD}+/ for shortcuts`, wide: true });
-  const id = input({ maxlength: "64", placeholder: "play-takedown", value: form.id || "", disabled: replacing });
-  const severity = select([["info", "Info: a note users may hide"], ["warning", "Warning: a banner"], ["critical", "Critical: shown before anything else"]], form.severity || "info");
-  const title = input({ maxlength: "120", value: form.title || "" });
-  const link = input({ maxlength: "500", placeholder: "An https link, optional", value: form.link || "" });
+  const modal = openModal({ title: replacing ? `Edit ${form.id}` : "New announcement", wide: true });
+  let severity = form.severity || "info";
+  const severityHint = el("span", { class: "pw-hint", text: SEVERITY_HINT[severity] });
+  const title = input({ maxlength: "120", placeholder: "Title", value: form.title || "", class: "pw-input title-input", "aria-label": "Title" });
+  const id = input({ maxlength: "64", placeholder: "made from the title", value: form.id || "", disabled: replacing });
+  let idTyped = replacing || Boolean(form.id);
+  const link = input({ maxlength: "500", placeholder: "An https link", value: form.link || "" });
   const linkLabel = input({ maxlength: "60", placeholder: "Open", value: form.linkLabel || "" });
   const platforms = input({ maxlength: "200", placeholder: "Every platform", value: form.platforms || "" });
   const minVersion = input({ type: "number", min: "0", step: "1", inputmode: "numeric", placeholder: "Any", value: form.minVersion || "" });
   const maxVersion = input({ type: "number", min: "0", step: "1", inputmode: "numeric", placeholder: "Any", value: form.maxVersion || "" });
   const starts = select(STARTS, "");
   const lasts = select(LASTS, "");
-  const dismissible = select([["", "Yes, except critical ones"], ["yes", "Yes"], ["no", "No"]], form.dismissible || "");
+  const dismissible = select([["", "Yes, unless critical"], ["yes", "Yes"], ["no", "No"]], form.dismissible || "");
   const rows = [];
-  const translations = el("div", { class: "announce-translations" });
+  const translations = el("div", { class: "translations" });
   const message = el("div");
+  const saved = el("span", { class: "draft-hint" });
   let saveTimer = null;
   const snapshot = () => ({
-    id: id.value, severity: severity.value, title: title.value, body: body.value, link: link.value, linkLabel: linkLabel.value,
+    id: id.value, severity, title: title.value, body: body.value, link: link.value, linkLabel: linkLabel.value,
     platforms: platforms.value, minVersion: minVersion.value, maxVersion: maxVersion.value, dismissible: dismissible.value,
     translations: rows.map((read) => read()), replacing, savedAt: Date.now(),
   });
+
+  const linkPart = section("Link button", Boolean(form.link));
+  const audiencePart = section("Who and when", Boolean(form.platforms || form.minVersion || form.maxVersion));
+  const languagePart = section("Other languages", Boolean(form.translations && form.translations.length));
+  const summarize = () => {
+    if (!idTyped) id.value = slug(title.value);
+    linkPart.summarize(link.value.trim() ? `${linkLabel.value.trim() || "Open"} → ${link.value.trim()}` : "none");
+    const versions = minVersion.value && maxVersion.value ? `versions ${minVersion.value}–${maxVersion.value}`
+      : minVersion.value ? `versions ${minVersion.value}+` : maxVersion.value ? `versions up to ${maxVersion.value}` : "";
+    const who = [platforms.value.trim(), versions].filter(Boolean).join(", ") || "everyone";
+    const hide = dismissible.value === "no" || (dismissible.value === "" && severity === "critical") ? "cannot be hidden" : "can be hidden";
+    audiencePart.summarize(`${who} · ${starts.selectedOptions[0].text}, ${lasts.selectedOptions[0].text} · ${hide}`);
+    languagePart.summarize(rows.length ? rows.map((read) => read().language || "?").join(", ") : "English only");
+  };
   // Every change is kept as the draft, half a second after typing stops.
   const changed = () => {
+    summarize();
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => writeDraft(snapshot()), 500);
+    saveTimer = setTimeout(() => { writeDraft(snapshot()); saved.textContent = "Draft saved"; }, 500);
   };
-  const body = markupEditor({ value: form.body || "", rows: 10, label: "Text, in English", onInput: changed });
+  const body = markupEditor({ value: form.body || "", rows: 9, label: "Text", onInput: changed });
   for (const text of form.translations || []) translations.append(translationRow(rows, text, changed));
-  const draft = !form.id && !form.title && !form.body ? readDraft() : null;
-  modal.body.append(
-    draft ? el("div", { class: "alert info draft-note" }, icon("info"),
-      el("span", { text: `An unsent announcement${draft.title ? `, “${draft.title}”,` : ""} from ${ago(draft.savedAt / 1000)} was kept.` }),
-      qbtn("Continue it", "c-gold", () => { modal.close(); composer(draft, Boolean(draft.replacing)); }),
-      qbtn("Discard it", "c-grey", (event) => { writeDraft(null); event.target.closest(".draft-note").remove(); })) : null,
-    replacing ? alertBox("warn", "Apps that hid it will not show it again. To show a change to everyone, publish it under a new ID and end this one.") : null,
-    el("div", { class: "filters" }, field("ID", id, "Lowercase letters, digits, and hyphens"), field("Severity", severity), field("Users can hide it", dismissible)),
-    field("Title, in English", title),
-    group("Text, in English", body.node, "Apps that show only text get it without formatting"),
-    el("div", { class: "filters" }, field("Link button's address", link), field("Link button, in English", linkLabel)),
+  id.addEventListener("input", () => { idTyped = id.value !== ""; });
+
+  append(linkPart.body, [el("div", { class: "filters" }, field("Address", link), field("Button text", linkLabel))]);
+  append(audiencePart.body, [
     el("div", { class: "filters" }, field("Platforms", platforms, "Comma-separated, such as android"), field("Lowest version code", minVersion), field("Highest version code", maxVersion)),
-    el("div", { class: "filters" }, field("Starts", starts), field("Lasts", lasts)),
-    el("h3", { class: "section-title", text: "Other languages" }),
-    el("p", { class: "pw-hint", text: "Apps in another language get the English text." }),
+    el("div", { class: "filters" }, field("Starts", starts), field("Lasts", lasts), field("Users can hide it", dismissible)),
+    field("ID", id, "Apps remember what users hid by it"),
+  ]);
+  append(languagePart.body, [
+    el("p", { class: "pw-hint", text: "Apps in a language not given here get the English text." }),
     translations,
-    el("div", { class: "btn-row" }, qbtn("Add a language", "c-grey", () => { translations.append(translationRow(rows, {}, changed)); changed(); })),
-    message);
+    qbtn("+ Add a language", "c-grey", () => { translations.append(translationRow(rows, {}, changed)); changed(); }),
+  ]);
+
+  const draft = !form.id && !form.title && !form.body ? readDraft() : null;
+  let draftNote = null;
+  if (draft) {
+    draftNote = el("div", { class: "draft-note" },
+      el("span", { text: `Unsent draft${draft.title ? ` “${draft.title}”` : ""}, ${ago(draft.savedAt / 1000)}` }),
+      qbtn("Continue", "c-gold", () => { modal.close(); composer(draft, Boolean(draft.replacing)); }),
+      qbtn("Discard", "c-grey", () => { writeDraft(null); draftNote.remove(); }));
+  }
+  append(modal.body, [
+    draftNote,
+    replacing ? alertBox("warn", "Users who hid it will not see the change. To show it to everyone, publish a new announcement and end this one.") : null,
+    el("div", { class: "compose-head" },
+      segmented([["info", "Info"], ["warning", "Warning"], ["critical", "Critical"]], severity, (value) => {
+        severity = value;
+        severityHint.textContent = SEVERITY_HINT[severity];
+        changed();
+      }),
+      severityHint),
+    title,
+    body.node,
+    linkPart.node,
+    audiencePart.node,
+    languagePart.node,
+    message,
+  ]);
   modal.body.addEventListener("input", changed);
   modal.body.addEventListener("change", changed);
+  summarize();
   const number = (node) => (node.value === "" ? null : Number.parseInt(node.value, 10));
-  modal.foot.append(el("span", { class: "pw-hint draft-hint", text: "Kept as a draft in this browser until published" }),
+  append(modal.foot, [saved,
     el("button", { type: "button", class: "btn", text: "Cancel", onclick: modal.close }),
     el("button", { type: "button", class: "btn gold", text: "Review", onclick: () => {
       const texts = { en: { title: title.value, body: body.value, link_label: linkLabel.value.trim() || null } };
       for (const read of rows) {
         const text = read();
         if (!text.language || Object.hasOwn(texts, text.language)) {
+          languagePart.node.open = true;
           fill(message, alertBox("error", text.language ? `The language ${text.language} is given twice` : "Give each language a code"));
           return;
         }
         texts[text.language] = { title: text.title, body: text.body, link_label: text.link_label };
       }
       const args = {
-        id: id.value.trim(),
-        severity: severity.value,
+        id: id.value.trim() || slug(title.value),
+        severity,
         texts,
         link_url: link.value.trim() || null,
         platforms: platforms.value.split(",").map((name) => name.trim().toLowerCase()).filter(Boolean),
@@ -1530,10 +1587,10 @@ function composer(form = {}, replacing = false) {
       writeDraft(snapshot());
       modal.close();
       change("announce.add", args, {
-        title: replacing ? `Replace ${args.id}` : "Publish an announcement",
+        title: replacing ? `Save ${args.id}` : "Publish an announcement",
         after: () => { writeDraft(null); open("announcements"); },
       });
-    } }));
+    } })]);
 }
 
 let showEndedAnnouncements = false;

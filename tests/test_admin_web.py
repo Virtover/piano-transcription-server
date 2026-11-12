@@ -1046,3 +1046,11 @@ def test_the_append_helper_always_gets_its_children_as_one_list():
     assert calls
     for node, rest in calls:
         assert rest.startswith("[") or rest == "children", f"append({node}, {rest}"
+
+
+def test_no_empty_slot_reaches_the_browser_s_own_append():
+    """The browser's append shows null as the text "null"; only the page's
+    append and fill skip empty slots."""
+    script = (STATIC / "admin.js").read_text(encoding="utf-8")
+
+    assert not re.search(r"\.(append|prepend|replaceChildren)\((?:(?!\);).)*?: null", script, re.DOTALL)
