@@ -712,7 +712,7 @@ async function openJob(job) {
     if (canChange("job.cancel") && (status === "queued" || status === "processing")) {
       const refund = el("input", { type: "checkbox" });
       modal.foot.append(el("label", { class: "pw-check" }, refund, "Refund: charge nothing"),
-        qbtn("Cancel job…", "c-red", () => {
+        qbtn("Cancel job", "c-red", () => {
           change("job.cancel", { job: details.job_id, refund: refund.checked }, { title: `Cancel job ${shortId(details.job_id)}`,
             describe: el("p", { class: "secondary", text: refund.checked ? "Charged nothing." : "Charged like a user's own cancellation." }) });
         }));
@@ -762,11 +762,11 @@ async function openUser(who) {
   }
   const name = account.email || account.user_id;
   const actions = [qbtn("← Users", "c-grey", () => open("users"))];
-  if (canChange("user.credit")) actions.push(qbtn("Change balance…", "c-gold", () => creditDialog(account)));
+  if (canChange("user.credit")) actions.push(qbtn("Change balance", "c-gold", () => creditDialog(account)));
   if (account.blocked && canChange("limits.unblock")) {
-    actions.push(qbtn("Unblock…", "c-green", () => change("limits.unblock", { user: account.user_id }, { title: `Unblock ${name}`, after: () => openUser(account.user_id) })));
+    actions.push(qbtn("Unblock", "c-green", () => change("limits.unblock", { user: account.user_id }, { title: `Unblock ${name}`, after: () => openUser(account.user_id) })));
   } else if (!account.blocked && canChange("limits.block")) {
-    actions.push(qbtn("Block…", "c-red", () => blockDialog(account)));
+    actions.push(qbtn("Block", "c-red", () => blockDialog(account)));
   }
   fill(main,
     el("div", { class: "adm-head" },
@@ -969,17 +969,17 @@ async function limitsView() {
         state(paused, "accepted", "paused", paused ? `${lasting(paused.expires_in)}: ${paused.message}` : null),
         el("div", { class: "btn-row" },
           paused ? action("limits.resume", "Resume", "c-green", () => change("limits.resume", {}, { title: "Accept new transcriptions" }))
-            : action("limits.pause", "Pause…", "c-red", () => messageDialog("limits.pause", "Pause new transcriptions", "New transcriptions are paused; try again later")))),
+            : action("limits.pause", "Pause", "c-red", () => messageDialog("limits.pause", "Pause new transcriptions", "New transcriptions are paused; try again later")))),
       iconCard("video", links ? "red" : "green", "Video links", "Uploads are accepted either way",
         state(links, "accepted", "off", links ? `${lasting(links.expires_in)}: ${links.message}` : null),
         el("div", { class: "btn-row" },
           links ? action("limits.links_on", "Turn on", "c-green", () => change("limits.links_on", {}, { title: "Accept video links" }))
-            : action("limits.links_off", "Turn off…", "c-red", () => messageDialog("limits.links_off", "Turn video links off", "Video links are not accepted at the moment; upload the file instead")))),
+            : action("limits.links_off", "Turn off", "c-red", () => messageDialog("limits.links_off", "Turn video links off", "Video links are not accepted at the moment; upload the file instead")))),
       iconCard("users", perUser ? "gold" : "blue", "Per-user limit", "Jobs in progress per signed-in user",
         el("div", { class: "chart-figure" }, fmt(perUser ? perUser.limit : data.configured_per_user_limit),
           el("small", { text: perUser ? `${lasting(perUser.expires_in)} · setting is ${data.configured_per_user_limit}` : "MAX_ACTIVE_JOBS_PER_USER" })),
         el("div", { class: "btn-row" },
-          action("limits.per_user", "Change…", "c-gold", perUserDialog),
+          action("limits.per_user", "Change", "c-gold", perUserDialog),
           perUser ? action("limits.per_user", "Back to the setting", "c-grey", () => change("limits.per_user", { limit: null }, { title: "Per-user limit back to the setting" })) : null))),
     el("h2", { class: "section-title" }, "Video sites", el("small", { text: "a site that rate-limits the server is refused for a while" })),
     el("section", { class: "card" }, table([
@@ -987,14 +987,14 @@ async function limitsView() {
       { label: "State", render: (row) => (row.refused ? badge("refused", "bad") : row.recovering ? badge("recovering", "warn") : badge("accepted", "good")) },
       { label: "Until", render: (row) => (row.refused && row.refused.expires_in ? `${span(row.refused.expires_in)} more` : "–") },
       { label: "Reason", render: (row) => (row.refused && row.refused.reason) || row.last_reason || "–" },
-      { label: "", render: (row) => action("limits.sites_reset", "Accept again…", "c-green", () => change("limits.sites_reset", { site: row.site }, { title: `Accept ${row.site} again` })) },
+      { label: "", render: (row) => action("limits.sites_reset", "Accept again", "c-green", () => change("limits.sites_reset", { site: row.site }, { title: `Accept ${row.site} again` })) },
     ], data.video_sites, { empty: "No site has refused the server", emptyIcon: "video" })),
     el("h2", { class: "section-title" }, "Blocked users", el("small", { text: "they never see the reason" })),
     el("section", { class: "card" }, table([
       { label: "Account", render: (row) => row.email || row.user_id },
       { label: "For", render: (row) => lasting(row.expires_in) },
       { label: "Reason", render: (row) => row.reason || "–" },
-      { label: "", render: (row) => action("limits.unblock", "Unblock…", "c-green", () => change("limits.unblock", { user: row.user_id }, { title: `Unblock ${row.email || row.user_id}` })) },
+      { label: "", render: (row) => action("limits.unblock", "Unblock", "c-green", () => change("limits.unblock", { user: row.user_id }, { title: `Unblock ${row.email || row.user_id}` })) },
     ], data.blocked, { empty: "No one is blocked", emptyIcon: "shield" })));
 }
 
@@ -1397,7 +1397,7 @@ function endAnnouncement(id) {
 function announcementCard(item) {
   if (item.state === "invalid") {
     return el("section", { class: "card" }, cardHead("alert", "red", item.id, "Not valid, so not shown; replace or end it"),
-      el("div", { class: "btn-row" }, canChange("announce.end") ? qbtn("End…", "c-red", () => endAnnouncement(item.id)) : null));
+      el("div", { class: "btn-row" }, canChange("announce.end") ? qbtn("End", "c-red", () => endAnnouncement(item.id)) : null));
   }
   const english = item.texts.en;
   const others = Object.keys(item.texts).filter((language) => language !== "en");
@@ -1414,8 +1414,8 @@ function announcementCard(item) {
       ["Added", `${when(item.created_at)} by ${item.created_by}`],
     ]),
     el("div", { class: "btn-row" },
-      canChange("announce.add") ? qbtn(live ? "Edit…" : "Publish again…", "c-gold", () => composer(formOf(item), true)) : null,
-      live && canChange("announce.end") ? qbtn("End…", "c-red", () => endAnnouncement(item.id)) : null));
+      canChange("announce.add") ? qbtn(live ? "Edit" : "Publish again", "c-gold", () => composer(formOf(item), true)) : null,
+      live && canChange("announce.end") ? qbtn("End", "c-red", () => endAnnouncement(item.id)) : null));
 }
 
 // A collapsed part of the form; its summary says what is chosen in it.
@@ -1609,7 +1609,7 @@ async function announcementsView() {
     head("Announcements", canChange("announce.add") ? subtitle : "Read-only here; publish them on the server: python scripts/admin.py announce add"),
     el("div", { class: "toolbar" },
       segmented([["", "Current"], ["ended", "With ended"]], showEndedAnnouncements ? "ended" : "", (value) => { showEndedAnnouncements = value === "ended"; announcementsView(); }),
-      canChange("announce.add") ? qbtn("New announcement…", "c-gold", () => composer()) : null),
+      canChange("announce.add") ? qbtn("New announcement", "c-gold", () => composer()) : null),
     items.length ? el("div", { class: "grid two" }, items.map(announcementCard))
       : el("section", { class: "card" }, emptyState(showEndedAnnouncements ? "No announcements yet" : "Nothing is announced", "announce")));
 }
