@@ -1035,3 +1035,14 @@ def test_the_page_shows_announcement_texts_only_as_text():
     assert "document.createTextNode(span.text)" in script
     assert r"/^https:\/\/[^\s]+$/.test(span.link)" in script
     assert "white-space: pre-wrap" in (STATIC / "admin.css").read_text(encoding="utf-8")
+
+
+def test_the_append_helper_always_gets_its_children_as_one_list():
+    """append(node, children) takes a list; more arguments throw, and a
+    dialog built with them stays empty."""
+    script = (STATIC / "admin.js").read_text(encoding="utf-8")
+
+    calls = re.findall(r"(?<![\w.])append\((\w+), ([^)\n]*)", script)
+    assert calls
+    for node, rest in calls:
+        assert rest.startswith("[") or rest == "children", f"append({node}, {rest}"

@@ -1336,7 +1336,7 @@ function markupEditor({ value = "", maxLength = 2000, rows = 8, label = "Text", 
       makeLink(area, pasted);
     }
   });
-  append(wrapper, bar, help, el("div", { class: "editor-panes" }, area, preview));
+  append(wrapper, [bar, help, el("div", { class: "editor-panes" }, area, preview)]);
   update();
   return { node: wrapper, get value() { return area.value; } };
 }
