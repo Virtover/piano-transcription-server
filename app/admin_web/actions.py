@@ -12,8 +12,8 @@ undone.
 from dataclasses import dataclass
 from typing import Callable
 
-from app import controls, video_sites
-from app.admin import jobs, limits, users
+from app import announcements, controls, video_sites
+from app.admin import announce, jobs, limits, users
 from app.admin.common import AdminError, find_user, parse_duration
 from app.config import settings
 from app.worker import tasks
@@ -92,6 +92,40 @@ def _per_user(args: dict) -> dict:
     return {"limit": limit, "for": _duration(args) if limit is not None else None}
 
 
+def _version(args: dict, name: str) -> int | None:
+    return None if args.get(name) is None else _whole(args, name)
+
+
+def _announcement(args: dict) -> dict:
+    """The announcement to publish, checked, with its times fixed now, so
+    that the plan confirmed is the one applied."""
+    texts = args.get("texts")
+    platforms = args.get("platforms") or []
+    if not isinstance(texts, dict) or not isinstance(platforms, list):
+        raise AdminError("texts must be an object, and platforms a list")
+    dismissible = args.get("dismissible")
+    if dismissible not in (None, True, False):
+        raise AdminError("dismissible must be true, false, or left out")
+    start = _text(args, "start", required=False, length=16)
+    item = announce.build(
+        _text(args, "id", length=64),
+        texts,
+        _text(args, "severity", required=False, length=16) or "info",
+        _text(args, "link_url", required=False, length=announcements.URL_LENGTH),
+        platforms,
+        _version(args, "min_version"),
+        _version(args, "max_version"),
+        parse_duration(start, "start") if start else None,
+        _duration(args),
+        dismissible,
+    )
+    return {"announcement": item, "replace": args.get("replace") is True}
+
+
+def _announcement_id(args: dict) -> dict:
+    return {"id": _text(args, "id", length=64)}
+
+
 def _user_plan(args: dict) -> dict:
     user = find_user(args["user"])
     return {"user_id": user["user_id"], "email": user["email"], "blocked_now": controls.blocked(tasks.redis, user["user_id"]) is not None}
@@ -165,6 +199,19 @@ ACTIONS: dict[str, Action] = {
         _user,
         _user_plan,
         lambda args, actor, reason: limits.unblock(args["user"], actor, reason),
+    ),
+    "announce.add": Action(
+        "Publish an announcement",
+        _announcement,
+        lambda args: announce.add_plan(args["announcement"], args["replace"]),
+        lambda args, actor, reason: announce.add(args["announcement"], args["replace"], actor, reason),
+        serious=True,
+    ),
+    "announce.end": Action(
+        "End an announcement",
+        _announcement_id,
+        lambda args: announce.end_plan(args["id"]),
+        lambda args, actor, reason: announce.end(args["id"], actor, reason),
     ),
     "limits.per_user": Action(
         "Change the per-user job limit",

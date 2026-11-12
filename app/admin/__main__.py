@@ -22,7 +22,8 @@ import sys
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from app.admin import audit, jobs, limits, report, status, users, web
+from app import announcements
+from app.admin import announce, audit, jobs, limits, report, status, users, web
 from app.admin.common import AdminError, default_actor
 
 # Errors that mean a service is not reachable, not a fault of the command.
@@ -129,6 +130,34 @@ def parser() -> argparse.ArgumentParser:
     command = limit_actions.add_parser("per-user", parents=[changes, expires], help="change the per-user job limit, or `default`")
     command.add_argument("limit", help="jobs in progress per user, or `default`")
     command.set_defaults(run=limits.run_per_user)
+
+    announce_commands = commands.add_parser("announce", parents=[reads], help="messages the apps show; add or end one")
+    announce_commands.add_argument("--all", action="store_true", help="also those that have ended")
+    announce_commands.set_defaults(run=announce.run_list)
+    announce_actions = announce_commands.add_subparsers(dest="action")
+    command = announce_actions.add_parser("add", parents=[changes, asks, expires], help="publish an announcement; plain text, English required")
+    command.add_argument("id", help="a short name, such as play-takedown; apps remember dismissals by it")
+    command.add_argument("--title", required=True, help=f"English title, at most {announcements.TITLE_LENGTH} characters")
+    command.add_argument("--body", required=True, help=f"English text, at most {announcements.BODY_LENGTH} characters; \n starts a new line")
+    command.add_argument("--severity", choices=announcements.SEVERITIES, default="info", help="info, warning, or critical (default: info)")
+    command.add_argument("--link", help="an https link the app offers to open")
+    command.add_argument("--link-label", help="English text of the link's button")
+    command.add_argument("--translation", action="append", nargs="+", metavar="TEXT",
+                         help="LANGUAGE TITLE BODY [LINK_LABEL], for example pl \"Tytuł\" \"Treść\"; repeat for more languages")
+    command.add_argument("--platform", action="append", help="only apps on this platform, such as android; repeat for more")
+    command.add_argument("--min-version", type=int, help="only apps of this version code and later")
+    command.add_argument("--max-version", type=int, help="only apps of this version code and earlier")
+    command.add_argument("--start", metavar="DURATION", help="start after this time, for example 2h; now if left out")
+    dismissing = command.add_mutually_exclusive_group()
+    dismissing.add_argument("--dismissible", dest="dismissible", action="store_const", const=True,
+                            help="users may hide it (the default, except for critical)")
+    dismissing.add_argument("--not-dismissible", dest="dismissible", action="store_const", const=False,
+                            help="users cannot hide it (the default for critical)")
+    command.add_argument("--replace", action="store_true", help="overwrite the announcement with this ID")
+    command.set_defaults(run=announce.run_add)
+    command = announce_actions.add_parser("end", parents=[changes, asks], help="stop showing an announcement; it is kept, ended")
+    command.add_argument("id")
+    command.set_defaults(run=announce.run_end)
 
     command = commands.add_parser("audit", parents=[reads], help="recent admin actions")
     command.add_argument("--limit", type=int, default=30, help="most actions to list (default: 30)")

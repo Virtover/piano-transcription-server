@@ -126,6 +126,10 @@ class Billing:
                         id BIGSERIAL PRIMARY KEY, at BIGINT NOT NULL, actor TEXT NOT NULL,
                         mode TEXT NOT NULL CHECK (mode IN ('read-only', 'disabled')), reason TEXT
                     );
+                    CREATE TABLE IF NOT EXISTS announcements (
+                        id TEXT PRIMARY KEY, content TEXT NOT NULL, starts_at BIGINT NOT NULL, ends_at BIGINT,
+                        created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, created_by TEXT NOT NULL
+                    );
                     CREATE INDEX IF NOT EXISTS minute_ledger_user_index ON minute_ledger (user_id);
                     CREATE INDEX IF NOT EXISTS minute_ledger_at_index ON minute_ledger (at);
                     CREATE INDEX IF NOT EXISTS job_diagnostics_user_index ON job_diagnostics (user_id);
@@ -228,6 +232,15 @@ class Billing:
                     actor TEXT NOT NULL,
                     mode TEXT NOT NULL CHECK (mode IN ('read-only', 'disabled')),
                     reason TEXT
+                );
+                CREATE TABLE IF NOT EXISTS announcements (
+                    id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    starts_at INTEGER NOT NULL,
+                    ends_at INTEGER,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    created_by TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS minute_ledger_user_index ON minute_ledger (user_id);
                 CREATE INDEX IF NOT EXISTS minute_ledger_at_index ON minute_ledger (at);
@@ -670,6 +683,65 @@ class Billing:
             _log_admin_action(connection, actor, "web.restore", None, f"{removed} lowering(s) removed", reason)
             return removed
 
+    def announcements(self, ended: bool = False, now: float | None = None) -> list[dict]:
+        """Announcement rows, newest first; see app.announcements. Without
+        ended, only those that have not ended, for the API."""
+        query = "SELECT * FROM announcements"
+        parameters: tuple = ()
+        if not ended:
+            query += " WHERE ends_at IS NULL OR ends_at > ?"
+            parameters = (int(time.time() if now is None else now),)
+        return [dict(row) for row in self.read(query + " ORDER BY starts_at DESC, id", parameters)]
+
+    def save_announcement(
+        self, row: dict, actor: str, detail: str, reason: str | None, replace: bool, max_stored: int
+    ) -> bool:
+        """Add the announcement row, from app.announcements.to_row, with its
+        audit entry in the same transaction. replace allows overwriting one
+        with the same ID; without it, that ID fails with ValueError. Returns
+        whether one was replaced."""
+        now = int(time.time())
+        with self._connect() as connection:
+            self._begin_write(connection)
+            existing = connection.execute("SELECT created_at, created_by FROM announcements WHERE id = ?", (row["id"],)).fetchone()
+            if existing is not None and not replace:
+                raise ValueError(f"An announcement {row['id']} exists; replace it, or choose another ID")
+            if existing is None:
+                count = connection.execute("SELECT COUNT(*) AS count FROM announcements").fetchone()["count"]
+                if count >= max_stored:
+                    raise ValueError(f"There are {count} announcements, the most kept; replace an ended one instead")
+                connection.execute(
+                    "INSERT INTO announcements (id, content, starts_at, ends_at, created_at, updated_at, created_by) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (row["id"], row["content"], row["starts_at"], row["ends_at"], now, now, actor),
+                )
+            else:
+                connection.execute(
+                    "UPDATE announcements SET content = ?, starts_at = ?, ends_at = ?, updated_at = ? WHERE id = ?",
+                    (row["content"], row["starts_at"], row["ends_at"], now, row["id"]),
+                )
+            _log_admin_action(connection, actor, "announce.replace" if existing else "announce.add", row["id"], detail, reason)
+            return existing is not None
+
+    def end_announcement(self, announcement_id: str, actor: str, reason: str | None) -> bool:
+        """End an announcement now, with its audit entry. It is kept, ended,
+        so it can be seen and replaced later. Returns False if it had already
+        ended or does not exist."""
+        now = int(time.time())
+        with self._connect() as connection:
+            self._begin_write(connection)
+            ended = connection.execute(
+                "UPDATE announcements SET ends_at = ?, updated_at = ? WHERE id = ? AND (ends_at IS NULL OR ends_at > ?)",
+                # An announcement that has not started ends before it starts.
+                (now, now, announcement_id, now),
+            ).rowcount
+            if ended:
+                connection.execute(
+                    "UPDATE announcements SET starts_at = ends_at - 1 WHERE id = ? AND starts_at >= ends_at", (announcement_id,)
+                )
+                _log_admin_action(connection, actor, "announce.end", announcement_id, None, reason)
+            return bool(ended)
+
     def read(self, query: str, parameters: tuple = ()) -> list[sqlite3.Row]:
         """Rows of a query, for the admin commands' reports. It runs in a
         read-only transaction, so the database refuses any change."""
@@ -887,13 +959,15 @@ ADMIN_WEB_ROLES = {"read-only": "admin-read-only", "read-write": "admin-read-wri
 ADMIN_WEB_SECRETS = "admin-web"
 # What each mode's role may write, beyond reading. Read-only adds only audit
 # entries and lowerings of its own access. Read-write may also cancel jobs and
-# change balances by hand: never delete anything, create users, or touch
-# purchases, which stay with the API and the command line.
+# change balances by hand, and add or end announcements: never delete
+# anything, create users, or touch purchases, which stay with the API and the
+# command line.
 ADMIN_WEB_WRITES = {
     "read-only": {"admin_actions": "INSERT", "admin_web_caps": "INSERT"},
     "read-write": {
         "admin_actions": "INSERT",
         "admin_web_caps": "INSERT",
+        "announcements": "INSERT, UPDATE (content, starts_at, ends_at, updated_at)",
         # monthly_minutes only to settle the jobs it cancels.
         "users": "UPDATE (minutes, monthly_minutes)",
         "minute_ledger": "INSERT",

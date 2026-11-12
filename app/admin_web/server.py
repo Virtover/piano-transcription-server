@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.admin import audit, jobs, report, status, users, web
+from app.admin import announce, audit, jobs, report, status, users, web
 from app.admin import limits as limit_controls
 from app.admin.common import AdminError, check_reason, parse_duration
 from app.admin.common import audit as log_action
@@ -246,6 +246,10 @@ def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.t
     @app.get("/api/limits")
     def get_limits(email: str = Depends(readable)):
         return limit_controls.current()
+
+    @app.get("/api/announcements")
+    def get_announcements(email: str = Depends(readable), ended: bool = False):
+        return announce.listing(ended=ended)
 
     @app.get("/api/audit")
     def get_audit(email: str = Depends(readable), limit: int = Query(30, ge=1, le=MAX_LIMIT)):

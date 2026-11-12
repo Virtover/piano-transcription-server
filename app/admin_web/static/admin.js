@@ -34,6 +34,7 @@ const ICONS = {
   refresh: ["M21 12a9 9 0 1 1-2.6-6.4", "M21 3v6h-6"],
   cloud: ["M17.5 19a4.5 4.5 0 1 0-1.4-8.8A7 7 0 1 0 4 15.5 3.5 3.5 0 0 0 7.5 19z"],
   empty: ["M22 12h-6l-2 3h-4l-2-3H2", "M5.5 5h13l3.5 7v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6z"],
+  announce: ["M3 11v2a1 1 0 0 0 1 1h2l5 4V6l-5 4H4a1 1 0 0 0-1 1z", "M15 9a3 3 0 0 1 0 6", "M18 6a7 7 0 0 1 0 12"],
 };
 
 let me = null;
@@ -466,6 +467,14 @@ function planSummary(action, plan) {
     return el("div", { class: "change-summary" },
       el("div", { class: "delta" }, `${fmt(plan.balance)} min`, el("span", { class: "arrow", text: "→" }), `${fmt(plan.balance_after)} min`),
       facts([["Account", plan.email || plan.user_id], ["Change", `${plan.minutes > 0 ? "+" : ""}${fmt(plan.minutes)} minutes`]]));
+  }
+  if (action === "announce.add") {
+    return el("div", { class: "change-summary" },
+      plan.replaces ? alertBox("warn", `Replaces the announcement ${plan.id}`) : null,
+      announcementText(plan.title, plan.blocks),
+      facts([["ID", plan.id], ["Severity", badge(plan.severity, SEVERITY_KIND[plan.severity])], ["For", plan.audience],
+        ["When", windowText(plan)], ["Link", plan.link], ["Languages", plan.languages.join(", ")],
+        ["Users can hide it", plan.dismissible ? "yes" : "no"]]));
   }
   if (action === "job.cancel") {
     const charge = !plan.billed ? "nothing (billing is off)" : plan.refund ? "nothing (refund)" : `${fmt(plan.charge)} of ${fmt(plan.full_cost)} minutes`;
@@ -984,6 +993,570 @@ async function limitsView() {
     ], data.blocked, { empty: "No one is blocked", emptyIcon: "shield" })));
 }
 
+// --- Formatted text --------------------------------------------------------------------------------
+// The announcement formatting, parsed exactly as app/announcements.py does
+// (parse_markup); a test runs both on the same texts. Only the server's
+// result is published: the review step shows it.
+
+const MARKUP_ESCAPABLE = "\\*[]()#-_`~";
+const LINK_AT = /\[([^\[\]\n]+)\]\(([^()\s]+)\)/y;
+const HEADING_LINE = /^(#{1,2}) (.*)$/s;
+const BULLET_LINE = /^([-*]) (.*)$/s;
+const NUMBER_LINE = /^([0-9]{1,3})[.)] (.*)$/s;
+
+function markupInline(text, links = true) {
+  const tokens = [];
+  let buffer = "";
+  const flush = () => { if (buffer) { tokens.push({ text: buffer }); buffer = ""; } };
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index];
+    if (character === "\\" && index + 1 < text.length && MARKUP_ESCAPABLE.includes(text[index + 1])) {
+      buffer += text[index + 1];
+      index += 2;
+      continue;
+    }
+    if (character === "*") {
+      flush();
+      const marker = text.startsWith("**", index) ? "**" : "*";
+      tokens.push({ marker });
+      index += marker.length;
+      continue;
+    }
+    if (character === "[" && links) {
+      LINK_AT.lastIndex = index;
+      const match = LINK_AT.exec(text);
+      if (match) {
+        flush();
+        tokens.push({ label: match[1], url: match[2] });
+        index += match[0].length;
+        continue;
+      }
+    }
+    buffer += character;
+    index += 1;
+  }
+  flush();
+  for (const marker of ["**", "*"]) {
+    const found = tokens.filter((token) => token.marker === marker);
+    if (found.length % 2) {
+      const last = found[found.length - 1];
+      delete last.marker;
+      last.text = marker;
+    }
+  }
+  const spans = [];
+  const add = (piece, bold, italic, link) => {
+    if (!piece) return;
+    const last = spans[spans.length - 1];
+    if (last && last.bold === bold && last.italic === italic && last.link === link) last.text += piece;
+    else spans.push({ text: piece, bold, italic, link });
+  };
+  let bold = false, italic = false;
+  for (const token of tokens) {
+    if (token.marker === "**") bold = !bold;
+    else if (token.marker === "*") italic = !italic;
+    else if (token.url !== undefined) {
+      for (const span of markupInline(token.label, false)) add(span.text, span.bold || bold, span.italic || italic, token.url);
+    } else add(token.text, bold, italic, null);
+  }
+  return spans;
+}
+
+function parseMarkup(text) {
+  const blocks = [];
+  const paragraph = [];
+  let list = null;
+  const endParagraph = () => {
+    if (!paragraph.length) return;
+    const spans = markupInline(paragraph.join("\n"));
+    if (spans.length) blocks.push({ type: "paragraph", spans });
+    paragraph.length = 0;
+  };
+  for (const raw of text.replace(/\r\n/g, "\n").split("\n")) {
+    const line = raw.trim();
+    if (!line) { endParagraph(); list = null; continue; }
+    const heading = HEADING_LINE.exec(line);
+    if (heading) {
+      endParagraph();
+      list = null;
+      const spans = markupInline(heading[2].trim());
+      if (spans.length) blocks.push({ type: "heading", level: heading[1].length, spans });
+      continue;
+    }
+    const number = NUMBER_LINE.exec(line);
+    const item = number || BULLET_LINE.exec(line);
+    if (item) {
+      endParagraph();
+      const ordered = number !== null;
+      if (list === null || list.ordered !== ordered) {
+        list = { type: "list", ordered, start: number ? Number.parseInt(number[1], 10) : 1, items: [] };
+        blocks.push(list);
+      }
+      list.items.push(markupInline(item[2].trim()));
+      continue;
+    }
+    list = null;
+    paragraph.push(line);
+  }
+  endParagraph();
+  return blocks;
+}
+// --- End of formatted text ---------------------------------------------------------------------------
+
+// Draws blocks with DOM nodes only. A link that is not https is shown, not linked.
+function renderSpans(spans) {
+  return spans.map((span) => {
+    let node = document.createTextNode(span.text);
+    if (span.italic) node = el("em", {}, node);
+    if (span.bold) node = el("strong", {}, node);
+    if (span.link) {
+      node = /^https:\/\/[^\s]+$/.test(span.link)
+        ? el("a", { href: span.link, target: "_blank", rel: "noreferrer noopener", title: span.link }, node)
+        : el("span", { class: "bad-link", title: "Links must use https" }, node);
+    }
+    return node;
+  });
+}
+
+function renderBlocks(blocks) {
+  return el("div", { class: "rich" }, blocks.map((block) => {
+    if (block.type === "heading") return el(block.level === 1 ? "h3" : "h4", {}, renderSpans(block.spans));
+    if (block.type === "list") {
+      return el(block.ordered ? "ol" : "ul", block.ordered && block.start !== 1 ? { start: String(block.start) } : {},
+        block.items.map((spans) => el("li", {}, renderSpans(spans))));
+    }
+    return el("p", {}, renderSpans(block.spans));
+  }));
+}
+
+// --- The editor ----------------------------------------------------------------------------------------
+// A text area with the formatting written as text, so what is published is
+// always visible and nothing is hidden in markup, and a live preview. Every
+// change goes through insertText, so Ctrl+Z undoes it like typing.
+
+const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
+const EDITOR_SHORTCUTS = [
+  [`${MOD}+B`, "Bold"], [`${MOD}+I`, "Italic"], [`${MOD}+K`, "Link; paste a link over selected text to the same effect"],
+  [`${MOD}+Alt+1`, "Heading"], [`${MOD}+Alt+2`, "Subheading"], [`${MOD}+Alt+0`, "Normal text"],
+  [`${MOD}+Shift+8`, "Bulleted list"], [`${MOD}+Shift+7`, "Numbered list"],
+  ["Enter", "In a list: the next item; on an empty item: ends the list"], ["Shift+Enter", "A line break, not a new item"],
+  [`${MOD}+Shift+F`, "Full screen; Esc leaves it"], [`${MOD}+/`, "These shortcuts"],
+];
+const LINE_PREFIX = /^(#{1,2} |[-*] |[0-9]{1,3}[.)] )/;
+
+function insertText(area, text, selectFrom, selectTo) {
+  const start = area.selectionStart;
+  area.focus();
+  let done = false;
+  try { done = text !== "" && document.execCommand("insertText", false, text); } catch { done = false; }
+  if (!done) {
+    area.setRangeText(text, area.selectionStart, area.selectionEnd, "end");
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (selectFrom !== undefined) area.setSelectionRange(start + selectFrom, start + (selectTo ?? selectFrom));
+}
+
+function deleteSelection(area) {
+  area.focus();
+  let done = false;
+  try { done = document.execCommand("delete"); } catch { done = false; }
+  if (!done) {
+    area.setRangeText("", area.selectionStart, area.selectionEnd, "end");
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+}
+
+function starsAround(value, start, end) {
+  let before = 0, after = 0;
+  while (before < 3 && value[start - before - 1] === "*") before += 1;
+  while (after < 3 && value[end + after] === "*") after += 1;
+  return [before, after];
+}
+
+function toggleWrap(area, marker) {
+  const value = area.value;
+  let start = area.selectionStart, end = area.selectionEnd;
+  // A double-click also selects the space after a word.
+  while (end > start && /\s/.test(value[end - 1])) end -= 1;
+  while (start < end && /\s/.test(value[start])) start += 1;
+  const size = marker.length;
+  const [before, after] = starsAround(value, start, end);
+  const wrapped = size === 2 ? before >= 2 && after >= 2 : (before === 1 || before === 3) && (after === 1 || after === 3);
+  const selected = value.slice(start, end);
+  if (wrapped) {
+    area.setSelectionRange(start - size, end + size);
+    if (selected) insertText(area, selected, 0, selected.length);
+    else deleteSelection(area);
+    return;
+  }
+  area.setSelectionRange(start, end);
+  insertText(area, `${marker}${selected}${marker}`, size, size + selected.length);
+}
+
+function makeLink(area, url = null) {
+  const value = area.value;
+  const start = area.selectionStart, end = area.selectionEnd;
+  const selected = value.slice(start, end).trim();
+  if (url) {
+    insertText(area, `[${selected}](${url})`, 1, 1 + selected.length);
+  } else if (/^https:\/\/\S+$/.test(selected)) {
+    insertText(area, `[link text](${selected})`, 1, 10);
+  } else {
+    const label = selected || "link text";
+    // The address is selected, ready to be typed or pasted.
+    insertText(area, `[${label}](url)`, label.length + 3, label.length + 6);
+  }
+}
+
+function selectLines(area) {
+  const value = area.value;
+  const start = value.lastIndexOf("\n", area.selectionStart - 1) + 1;
+  let end = value.indexOf("\n", area.selectionEnd - (area.selectionEnd > area.selectionStart && value[area.selectionEnd - 1] === "\n" ? 1 : 0));
+  if (end === -1) end = value.length;
+  area.setSelectionRange(start, end);
+  return value.slice(start, end).split("\n");
+}
+
+// prefix(index) gives each line its prefix; "" makes normal text. Applying
+// the prefix all lines have already removes it.
+function toggleLines(area, prefix, kind) {
+  const lines = selectLines(area);
+  const pattern = { heading1: /^# /, heading2: /^## /, bullet: /^[-*] /, number: /^[0-9]{1,3}[.)] / }[kind];
+  const all = pattern && lines.every((line) => !line.trim() || pattern.test(line));
+  const result = lines.map((line, index) => {
+    const bare = line.replace(LINE_PREFIX, "");
+    if (!line.trim()) return line;
+    return all ? bare : `${prefix(index)}${bare}`;
+  }).join("\n");
+  insertText(area, result, result.length);
+}
+
+function continueList(area, event) {
+  const value = area.value;
+  const start = area.selectionStart;
+  if (start !== area.selectionEnd) return;
+  const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+  const line = value.slice(lineStart, start);
+  const bullet = /^(\s*)([-*]) (.*)$/.exec(line);
+  const number = /^(\s*)([0-9]{1,3})([.)]) (.*)$/.exec(line);
+  if (!bullet && !number) return;
+  event.preventDefault();
+  const content = bullet ? bullet[3] : number[4];
+  if (!content.trim()) {
+    // Enter on an empty item ends the list.
+    area.setSelectionRange(lineStart, start);
+    insertText(area, "\n", 1);
+    return;
+  }
+  const next = bullet ? `${bullet[1]}${bullet[2]} ` : `${number[1]}${Number.parseInt(number[2], 10) + 1}${number[3]} `;
+  insertText(area, `\n${next}`, next.length + 1);
+}
+
+function markupEditor({ value = "", maxLength = 2000, rows = 8, label = "Text", onInput = null }) {
+  const area = el("textarea", { class: "pw-input editor-area", rows: String(rows), maxlength: String(maxLength), spellcheck: "true", "aria-label": label });
+  area.value = value;
+  const preview = el("div", { class: "editor-preview", "aria-label": "Preview" });
+  const counter = el("span", { class: "editor-count" });
+  const help = el("div", { class: "editor-help", hidden: true },
+    el("strong", { text: "Shortcuts" }),
+    el("dl", {}, EDITOR_SHORTCUTS.map(([keys, what]) => [el("dt", {}, el("kbd", { text: keys })), el("dd", { text: what })])),
+    el("p", { class: "pw-hint", text: "Formatting is written as text: **bold**, *italic*, [text](link), # heading, - item, 1. item. A \\ before a character shows it as typed." }));
+  const wrapper = el("div", { class: "editor" });
+  const update = () => {
+    fill(preview, area.value.trim() ? renderBlocks(parseMarkup(area.value)) : el("p", { class: "pw-hint", text: "The preview appears here" }));
+    counter.textContent = `${fmt(area.value.length)} / ${fmt(maxLength)}`;
+    counter.className = `editor-count ${area.value.length > maxLength * 0.9 ? "near" : ""}`;
+  };
+  const full = (on = !wrapper.classList.contains("full")) => {
+    wrapper.classList.toggle("full", on);
+    fullButton.setAttribute("aria-pressed", String(on));
+    area.focus();
+  };
+  const actions = {
+    bold: () => toggleWrap(area, "**"),
+    italic: () => toggleWrap(area, "*"),
+    link: () => makeLink(area),
+    heading1: () => toggleLines(area, () => "# ", "heading1"),
+    heading2: () => toggleLines(area, () => "## ", "heading2"),
+    normal: () => toggleLines(area, () => "", null),
+    bullet: () => toggleLines(area, () => "- ", "bullet"),
+    number: () => toggleLines(area, (index) => `${index + 1}. `, "number"),
+    help: () => { help.hidden = !help.hidden; },
+  };
+  const tool = (name, text, title, extra = {}) => {
+    const button = el("button", { type: "button", class: `editor-tool ${extra.class || ""}`, title, "aria-label": title, text });
+    // Keeps the selection in the text while the mouse is down.
+    button.addEventListener("mousedown", (event) => event.preventDefault());
+    button.addEventListener("click", () => (name === "full" ? full() : actions[name]()));
+    return button;
+  };
+  const fullButton = tool("full", "⛶", `Full screen (${MOD}+Shift+F)`);
+  const bar = el("div", { class: "editor-bar", role: "toolbar", "aria-label": "Formatting" },
+    tool("bold", "B", `Bold (${MOD}+B)`, { class: "bold" }),
+    tool("italic", "I", `Italic (${MOD}+I)`, { class: "italic" }),
+    tool("link", "Link", `Link (${MOD}+K)`),
+    el("span", { class: "editor-sep" }),
+    tool("heading1", "H1", `Heading (${MOD}+Alt+1)`),
+    tool("heading2", "H2", `Subheading (${MOD}+Alt+2)`),
+    tool("bullet", "• List", `Bulleted list (${MOD}+Shift+8)`),
+    tool("number", "1. List", `Numbered list (${MOD}+Shift+7)`),
+    el("span", { class: "editor-sep" }),
+    tool("help", "?", `Shortcuts (${MOD}+/)`),
+    fullButton,
+    counter);
+  area.addEventListener("input", () => { update(); if (onInput) onInput(); });
+  area.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
+    const mod = event.ctrlKey || event.metaKey;
+    let action = null;
+    if (mod && !event.shiftKey && !event.altKey) action = { KeyB: "bold", KeyI: "italic", KeyK: "link", Slash: "help" }[event.code];
+    else if (mod && event.altKey && !event.shiftKey) action = { Digit1: "heading1", Digit2: "heading2", Digit0: "normal" }[event.code];
+    else if (mod && event.shiftKey && !event.altKey) action = { Digit8: "bullet", Digit7: "number", KeyF: "full" }[event.code];
+    if (action) {
+      event.preventDefault();
+      if (action === "full") full();
+      else actions[action]();
+      return;
+    }
+    if (event.key === "Escape" && wrapper.classList.contains("full")) {
+      // Leaves full screen; the dialog stays open.
+      event.preventDefault();
+      event.stopPropagation();
+      full(false);
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey && !mod && !event.altKey) continueList(area, event);
+  });
+  area.addEventListener("paste", (event) => {
+    const pasted = (event.clipboardData && event.clipboardData.getData("text/plain") || "").trim();
+    if (area.selectionStart !== area.selectionEnd && /^https:\/\/\S+$/.test(pasted)) {
+      // A link pasted over text links that text.
+      event.preventDefault();
+      makeLink(area, pasted);
+    }
+  });
+  append(wrapper, bar, help, el("div", { class: "editor-panes" }, area, preview));
+  update();
+  return { node: wrapper, get value() { return area.value; } };
+}
+
+// The unsent announcement, kept in this browser only, so closing the dialog
+// by mistake loses nothing. Announcements are public text, so keeping one
+// here exposes nothing.
+const DRAFT_KEY = "announcement-draft";
+
+function readDraft() {
+  try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || "null"); } catch { return null; }
+}
+
+function writeDraft(draft) {
+  try {
+    if (draft) localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+    else localStorage.removeItem(DRAFT_KEY);
+  } catch {
+    // Without storage there is no draft; nothing else changes.
+  }
+}
+
+// --- Announcements ---------------------------------------------------------------------------------
+// What the apps show. Texts are plain text everywhere: here they are only
+// ever set as textContent, and apps must do the same.
+
+const SEVERITY_KIND = { info: "info", warning: "warn", critical: "bad" };
+const STATE_KIND = { active: "good", scheduled: "info", ended: "quiet", invalid: "bad" };
+const STARTS = [["", "now"], ["1h", "in 1 hour"], ["6h", "in 6 hours"], ["1d", "in 1 day"], ["7d", "in 7 days"]];
+const LASTS = [["", "until ended"], ["1d", "1 day"], ["7d", "7 days"], ["30d", "30 days"], ["90d", "90 days"]];
+
+function audienceText(item) {
+  const platforms = item.platforms && item.platforms.length ? item.platforms.join(", ") : "every platform";
+  const low = item.min_version, high = item.max_version;
+  const versions = low !== null && high !== null ? `versions ${low} to ${high}`
+    : low !== null ? `versions ${low} and later` : high !== null ? `versions ${high} and earlier` : "every version";
+  return `${platforms}, ${versions}`;
+}
+
+function windowText(item) {
+  const start = item.starts_at * 1000 <= Date.now() ? "now" : when(item.starts_at);
+  return `from ${start}, ${item.ends_at ? `to ${when(item.ends_at)}` : "until ended"}`;
+}
+
+function announcementText(title, blocks) {
+  return el("div", { class: "announce-text" }, el("strong", { text: title }), renderBlocks(blocks));
+}
+
+function endAnnouncement(id) {
+  change("announce.end", { id }, { title: `End ${id}`, after: () => open("announcements") });
+}
+
+function announcementCard(item) {
+  if (item.state === "invalid") {
+    return el("section", { class: "card" }, cardHead("alert", "red", item.id, "Not valid, so not shown; replace or end it"),
+      el("div", { class: "btn-row" }, canChange("announce.end") ? qbtn("End…", "c-red", () => endAnnouncement(item.id)) : null));
+  }
+  const english = item.texts.en;
+  const others = Object.keys(item.texts).filter((language) => language !== "en");
+  const live = item.state !== "ended";
+  return el("section", { class: "card" },
+    cardHead("announce", item.severity === "critical" ? "red" : item.severity === "warning" ? "gold" : "blue", item.id, audienceText(item),
+      el("div", { class: "chips" }, badge(item.severity, SEVERITY_KIND[item.severity]), badge(item.state, STATE_KIND[item.state]))),
+    announcementText(english.title, parseMarkup(english.body)),
+    facts([
+      ["When", windowText(item)],
+      ["Link", item.link_url ? `${item.link_url}${english.link_label ? ` (${english.link_label})` : ""}` : null],
+      ["Other languages", others.length ? others.join(", ") : null],
+      ["Users can hide it", item.dismissible ? "yes" : "no"],
+      ["Added", `${when(item.created_at)} by ${item.created_by}`],
+    ]),
+    el("div", { class: "btn-row" },
+      canChange("announce.add") ? qbtn(live ? "Edit…" : "Publish again…", "c-gold", () => composer(formOf(item), true)) : null,
+      live && canChange("announce.end") ? qbtn("End…", "c-red", () => endAnnouncement(item.id)) : null));
+}
+
+// A field around something that is not a single control: a <label> would
+// pass clicks anywhere in it to the toolbar's first button.
+function group(label, content, hint) {
+  return el("div", { class: "pw-field" }, el("span", { class: "pw-label", text: label }), content, hint ? el("span", { class: "pw-hint", text: hint }) : null);
+}
+
+function translationRow(rows, text = {}, onInput = null) {
+  const language = input({ maxlength: "12", placeholder: "pl", value: text.language || "" });
+  const title = input({ maxlength: "120", value: text.title || "" });
+  const body = markupEditor({ value: text.body || "", rows: 5, label: "Text", onInput });
+  const label = input({ maxlength: "60", value: text.link_label || "" });
+  const read = () => ({ language: language.value.trim().toLowerCase(), title: title.value, body: body.value, link_label: label.value.trim() || null });
+  const row = el("div", { class: "card announce-translation" },
+    el("div", { class: "filters" }, field("Language", language, "A code such as pl, de, or pt-br"), field("Link button", label)),
+    field("Title", title), group("Text", body.node),
+    el("div", { class: "btn-row" }, qbtn("Remove this language", "c-grey", () => {
+      row.remove();
+      rows.splice(rows.indexOf(read), 1);
+      if (onInput) onInput();
+    })));
+  rows.push(read);
+  return row;
+}
+
+function formOf(item) {
+  const english = item.texts.en;
+  return {
+    id: item.id, severity: item.severity, title: english.title, body: english.body, link: item.link_url || "",
+    linkLabel: english.link_label || "", platforms: item.platforms.join(", "),
+    minVersion: item.min_version === null ? "" : String(item.min_version), maxVersion: item.max_version === null ? "" : String(item.max_version),
+    dismissible: item.dismissible ? "yes" : "no",
+    translations: Object.entries(item.texts).filter(([language]) => language !== "en").map(([language, text]) => ({ language, ...text })),
+  };
+}
+
+// Writes a new announcement, or, with replacing, one replacing the
+// announcement with form.id. form fills it in: from an announcement, or
+// from the draft.
+function composer(form = {}, replacing = false) {
+  const modal = openModal({ title: replacing ? `Replace ${form.id}` : "New announcement", subtitle: `Apps show it within a minute · ${MOD}+/ for shortcuts`, wide: true });
+  const id = input({ maxlength: "64", placeholder: "play-takedown", value: form.id || "", disabled: replacing });
+  const severity = select([["info", "Info: a note users may hide"], ["warning", "Warning: a banner"], ["critical", "Critical: shown before anything else"]], form.severity || "info");
+  const title = input({ maxlength: "120", value: form.title || "" });
+  const link = input({ maxlength: "500", placeholder: "An https link, optional", value: form.link || "" });
+  const linkLabel = input({ maxlength: "60", placeholder: "Open", value: form.linkLabel || "" });
+  const platforms = input({ maxlength: "200", placeholder: "Every platform", value: form.platforms || "" });
+  const minVersion = input({ type: "number", min: "0", step: "1", inputmode: "numeric", placeholder: "Any", value: form.minVersion || "" });
+  const maxVersion = input({ type: "number", min: "0", step: "1", inputmode: "numeric", placeholder: "Any", value: form.maxVersion || "" });
+  const starts = select(STARTS, "");
+  const lasts = select(LASTS, "");
+  const dismissible = select([["", "Yes, except critical ones"], ["yes", "Yes"], ["no", "No"]], form.dismissible || "");
+  const rows = [];
+  const translations = el("div", { class: "announce-translations" });
+  const message = el("div");
+  let saveTimer = null;
+  const snapshot = () => ({
+    id: id.value, severity: severity.value, title: title.value, body: body.value, link: link.value, linkLabel: linkLabel.value,
+    platforms: platforms.value, minVersion: minVersion.value, maxVersion: maxVersion.value, dismissible: dismissible.value,
+    translations: rows.map((read) => read()), replacing, savedAt: Date.now(),
+  });
+  // Every change is kept as the draft, half a second after typing stops.
+  const changed = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => writeDraft(snapshot()), 500);
+  };
+  const body = markupEditor({ value: form.body || "", rows: 10, label: "Text, in English", onInput: changed });
+  for (const text of form.translations || []) translations.append(translationRow(rows, text, changed));
+  const draft = !form.id && !form.title && !form.body ? readDraft() : null;
+  modal.body.append(
+    draft ? el("div", { class: "alert info draft-note" }, icon("info"),
+      el("span", { text: `An unsent announcement${draft.title ? `, “${draft.title}”,` : ""} from ${ago(draft.savedAt / 1000)} was kept.` }),
+      qbtn("Continue it", "c-gold", () => { modal.close(); composer(draft, Boolean(draft.replacing)); }),
+      qbtn("Discard it", "c-grey", (event) => { writeDraft(null); event.target.closest(".draft-note").remove(); })) : null,
+    replacing ? alertBox("warn", "Apps that hid it will not show it again. To show a change to everyone, publish it under a new ID and end this one.") : null,
+    el("div", { class: "filters" }, field("ID", id, "Lowercase letters, digits, and hyphens"), field("Severity", severity), field("Users can hide it", dismissible)),
+    field("Title, in English", title),
+    group("Text, in English", body.node, "Apps that show only text get it without formatting"),
+    el("div", { class: "filters" }, field("Link button's address", link), field("Link button, in English", linkLabel)),
+    el("div", { class: "filters" }, field("Platforms", platforms, "Comma-separated, such as android"), field("Lowest version code", minVersion), field("Highest version code", maxVersion)),
+    el("div", { class: "filters" }, field("Starts", starts), field("Lasts", lasts)),
+    el("h3", { class: "section-title", text: "Other languages" }),
+    el("p", { class: "pw-hint", text: "Apps in another language get the English text." }),
+    translations,
+    el("div", { class: "btn-row" }, qbtn("Add a language", "c-grey", () => { translations.append(translationRow(rows, {}, changed)); changed(); })),
+    message);
+  modal.body.addEventListener("input", changed);
+  modal.body.addEventListener("change", changed);
+  const number = (node) => (node.value === "" ? null : Number.parseInt(node.value, 10));
+  modal.foot.append(el("span", { class: "pw-hint draft-hint", text: "Kept as a draft in this browser until published" }),
+    el("button", { type: "button", class: "btn", text: "Cancel", onclick: modal.close }),
+    el("button", { type: "button", class: "btn gold", text: "Review", onclick: () => {
+      const texts = { en: { title: title.value, body: body.value, link_label: linkLabel.value.trim() || null } };
+      for (const read of rows) {
+        const text = read();
+        if (!text.language || Object.hasOwn(texts, text.language)) {
+          fill(message, alertBox("error", text.language ? `The language ${text.language} is given twice` : "Give each language a code"));
+          return;
+        }
+        texts[text.language] = { title: text.title, body: text.body, link_label: text.link_label };
+      }
+      const args = {
+        id: id.value.trim(),
+        severity: severity.value,
+        texts,
+        link_url: link.value.trim() || null,
+        platforms: platforms.value.split(",").map((name) => name.trim().toLowerCase()).filter(Boolean),
+        min_version: number(minVersion),
+        max_version: number(maxVersion),
+        start: starts.value || null,
+        for: lasts.value || null,
+        dismissible: dismissible.value === "" ? null : dismissible.value === "yes",
+        replace: replacing,
+      };
+      clearTimeout(saveTimer);
+      writeDraft(snapshot());
+      modal.close();
+      change("announce.add", args, {
+        title: replacing ? `Replace ${args.id}` : "Publish an announcement",
+        after: () => { writeDraft(null); open("announcements"); },
+      });
+    } }));
+}
+
+let showEndedAnnouncements = false;
+
+async function announcementsView() {
+  const subtitle = "What the apps show, from GET /api/announcements";
+  fill(main, head("Announcements", subtitle), skeleton());
+  let items;
+  try {
+    items = await api(`/api/announcements${query({ ended: showEndedAnnouncements ? "true" : "" })}`);
+  } catch (error) {
+    fill(main, head("Announcements", subtitle), errorBox(error));
+    return;
+  }
+  fill(main,
+    head("Announcements", canChange("announce.add") ? subtitle : "Read-only here; publish them on the server: python scripts/admin.py announce add"),
+    el("div", { class: "toolbar" },
+      segmented([["", "Current"], ["ended", "With ended"]], showEndedAnnouncements ? "ended" : "", (value) => { showEndedAnnouncements = value === "ended"; announcementsView(); }),
+      canChange("announce.add") ? qbtn("New announcement…", "c-gold", () => composer()) : null),
+    items.length ? el("div", { class: "grid two" }, items.map(announcementCard))
+      : el("section", { class: "card" }, emptyState(showEndedAnnouncements ? "No announcements yet" : "Nothing is announced", "announce")));
+}
+
 // --- Audit -----------------------------------------------------------------------------------------
 
 async function auditView() {
@@ -1096,7 +1669,7 @@ function lowerConfirm(planned, reason) {
 
 // --- Start -------------------------------------------------------------------------------------------
 
-const VIEWS = { overview, jobs, users, billing, limits: limitsView, audit: auditView, access: accessView };
+const VIEWS = { overview, jobs, users, billing, limits: limitsView, announcements: announcementsView, audit: auditView, access: accessView };
 
 function setCurrent(view) {
   for (const button of document.querySelectorAll(".adm-nav button")) {

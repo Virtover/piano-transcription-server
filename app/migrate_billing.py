@@ -12,6 +12,8 @@ TABLES = (
     "users", "purchases", "transcription_reservations", "deleted_users",
     "job_diagnostics", "billing_state", "minute_ledger", "admin_actions",
 )
+# Copied when the source has them: databases older than these tables do not.
+OPTIONAL_TABLES = ("announcements",)
 
 
 def migrate(source: str, target: str) -> None:
@@ -50,7 +52,8 @@ def migrate(source: str, target: str) -> None:
             target_billing.database_url = target
             target_billing._postgres = True
             target_billing._create_schema()
-            for table in TABLES:
+            copied = TABLES + tuple(table for table in OPTIONAL_TABLES if table in source_tables)
+            for table in copied:
                 columns = [row[1] for row in sqlite.execute(f"PRAGMA table_info({table})")]
                 rows = sqlite.execute(f"SELECT {', '.join(columns)} FROM {table}").fetchall()
                 if not rows:
@@ -70,7 +73,7 @@ def migrate(source: str, target: str) -> None:
                 )"""
             )
             pg.commit()
-            for table in TABLES:
+            for table in copied:
                 sqlite_count = sqlite.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 pg_count = pg.execute(f"SELECT COUNT(*) FROM {table}").fetchone()["count"]
                 if sqlite_count != pg_count:

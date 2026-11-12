@@ -19,6 +19,7 @@ from app.api.routes.transcriptions import (
     router,
 )
 from app.api.routes.account import router as account_router
+from app.api.routes.announcements import router as announcements_router
 from app.api.routes.billing import router as billing_router, server_info
 from app.config import ensure_valid, settings
 from app import google_play
@@ -193,6 +194,7 @@ app = FastAPI(
 app.include_router(router, prefix="/api")
 app.include_router(billing_router, prefix="/api")
 app.include_router(account_router, prefix="/api")
+app.include_router(announcements_router, prefix="/api")
 app.add_api_route("/api/server-info", server_info, methods=["GET"], include_in_schema=False)
 
 

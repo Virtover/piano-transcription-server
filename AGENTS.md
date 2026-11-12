@@ -37,6 +37,7 @@ python scripts/kube.py restart 5m                               # server.py's an
 | `app/transcription/amt_apc/` | Vendored AMT-APC inference (MIT), for piano arrangements; weights `apc.pth` are fetched, with a sha256, at image build |
 | `app/transcription/arrangement.py`, `styles.py` | The arrangement batcher, and the styles a request may ask for |
 | `app/transcription/budget.py` | The per-device memory budget that transcription and arrangement steps share |
+| `app/announcements.py` | Announcements for the apps: checks, who sees which, and the API's cache; written by `app/admin/announce.py` and the admin web page, read by `app/api/routes/announcements.py` |
 | `app/billing.py` | Billing database (PostgreSQL; SQLite only for legacy installs), also job diagnostics |
 | `app/backups.py` | `python -m app.backups`: billing backups, which are kept, and the encrypted off-site copies |
 | `app/error_report.py` | Optional error reports of the API and workers to `ERROR_REPORT_URL`, with secrets redacted |

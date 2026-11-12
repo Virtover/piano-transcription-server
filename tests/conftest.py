@@ -42,6 +42,7 @@ def api_context(tmp_path, monkeypatch, video_sites) -> Iterator[tuple[TestClient
     from app import google_play
     from app import auth
     from app import main
+    from app.api.routes import announcements as announcement_routes
     from app.api.routes import billing as billing_routes
     from app.api.routes import transcriptions as transcription_routes
     from app.billing import Billing
@@ -64,6 +65,7 @@ def api_context(tmp_path, monkeypatch, video_sites) -> Iterator[tuple[TestClient
     monkeypatch.setattr(billing_routes, "billing", billing)
     monkeypatch.setattr(transcription_routes, "billing", billing)
     monkeypatch.setattr(tasks, "billing", billing)
+    announcement_routes.cache.clear()
     def fake_check_video(source_url):
         return billing_routes.CheckedVideo(130.0, {"title": "Nocturne", "duration": 130}, time.time())
 

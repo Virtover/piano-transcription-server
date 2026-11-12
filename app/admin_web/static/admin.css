@@ -115,6 +115,49 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .adm-head p { font-family: var(--mono); font-size: 0.76rem; color: var(--text-secondary); margin-top: 4px; overflow-wrap: anywhere; }
 .adm-head-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 1.05rem; margin: 30px 0 12px; }
+.announce-text { margin-bottom: 16px; }
+.announce-text strong { display: block; margin-bottom: 6px; }
+.announce-translations { display: grid; gap: 12px; margin-bottom: 12px; }
+/* Formatted announcement text, in cards, the review, and the editor's preview. */
+.rich { color: var(--text-secondary); font-size: 0.92rem; overflow-wrap: anywhere; }
+.rich > * + * { margin-top: 0.6em; }
+.rich p { white-space: pre-wrap; }
+.rich h3 { font-size: 1.05rem; color: var(--text-primary); }
+.rich h4 { font-size: 0.95rem; color: var(--text-primary); }
+.rich ul, .rich ol { padding-left: 1.4em; }
+.rich strong { color: var(--text-primary); }
+.rich a { color: var(--accent-gold); text-decoration: underline; }
+.rich .bad-link { color: var(--danger); text-decoration: underline wavy; }
+.editor { border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-color); overflow: hidden; }
+.editor:focus-within { border-color: var(--accent-gold); }
+.editor-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 6px; border-bottom: 1px solid var(--border-color); background: var(--card-bg); }
+.editor-tool { min-width: 32px; height: 30px; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--text-secondary); font-size: 0.8rem; cursor: pointer; }
+.editor-tool:hover, .editor-tool:focus-visible, .editor-tool[aria-pressed="true"] { color: var(--text-primary); border-color: var(--border-color); background: var(--bg-color); outline: none; }
+.editor-tool.bold { font-weight: 800; }
+.editor-tool.italic { font-style: italic; font-family: Georgia, serif; }
+.editor-sep { width: 1px; height: 18px; margin: 0 4px; background: var(--border-color); }
+.editor-count { margin-left: auto; padding: 0 6px; font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
+.editor-count.near { color: var(--warning); }
+.editor-panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.editor-area.pw-input { border: 0; border-radius: 0; box-shadow: none; resize: vertical; min-height: 9rem; font-family: var(--mono); font-size: 0.88rem; line-height: 1.55; }
+.editor-area.pw-input:focus { box-shadow: none; }
+.editor-preview { padding: 10px 14px; border-left: 1px solid var(--border-color); min-height: 9rem; max-height: 26rem; overflow: auto; }
+.editor-help { padding: 10px 14px; border-bottom: 1px solid var(--border-color); font-size: 0.85rem; }
+.editor-help dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 8px 0; }
+.editor-help dd { color: var(--text-secondary); }
+kbd { font-family: var(--mono); font-size: 0.75rem; padding: 1px 6px; border: 1px solid var(--border-color); border-bottom-width: 2px; border-radius: 5px; background: var(--card-bg); }
+/* Full screen: the editor covers the window; Esc leaves it. */
+.editor.full { position: fixed; inset: 0; z-index: 1000; border-radius: 0; border: 0; display: flex; flex-direction: column; }
+.editor.full .editor-panes { flex: 1; min-height: 0; }
+.editor.full .editor-area.pw-input { height: 100%; resize: none; padding: 24px max(24px, calc((50vw - 36rem) / 2)); font-size: 0.95rem; }
+.editor.full .editor-preview { max-height: none; padding: 24px 32px; }
+.draft-note { flex-wrap: wrap; }
+.draft-hint { margin: 0 auto 0 0; }
+@media (max-width: 760px) {
+  .editor-panes { grid-template-columns: minmax(0, 1fr); }
+  .editor-preview { border-left: 0; border-top: 1px solid var(--border-color); }
+  .draft-hint { display: none; }
+}
 .section-title small { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); font-weight: 400; }
 
 .live { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 0.74rem; color: var(--text-secondary); }

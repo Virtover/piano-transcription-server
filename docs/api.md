@@ -222,6 +222,70 @@ Jobs survive both: running jobs get time to finish first, and queued jobs stay q
 * After a restart: on `503` or a connection error, wait for `Retry-After` (or a few seconds) and retry instead of showing an error, and keep polling jobs: their `job_id` stays valid.
 * After a shutdown: show the server as offline, with `back_at` if known, and check again from time to time instead of retrying quickly.
 
+## 📣 Announcements
+
+Messages from the administrator to the apps, for example how to keep using the app if it is no longer in its store. An app asks for them at launch and when it comes back to the foreground:
+
+```shell
+curl "https://<server>/api/announcements?platform=android&app_version=41&lang=pl"
+```
+
+```json
+{"announcements": [
+  {"id": "play-takedown", "severity": "critical", "language": "pl",
+   "title": "Zaktualizuj aplikację inaczej",
+   "body": "Aplikacji nie ma już w Google Play. Zobacz instrukcję (https://example.com/update).",
+   "blocks": [
+     {"type": "paragraph", "spans": [
+       {"text": "Aplikacji nie ma już w ", "bold": false, "italic": false, "link": null},
+       {"text": "Google Play", "bold": true, "italic": false, "link": null},
+       {"text": ". Zobacz ", "bold": false, "italic": false, "link": null},
+       {"text": "instrukcję", "bold": false, "italic": false, "link": "https://example.com/update"},
+       {"text": ".", "bold": false, "italic": false, "link": null}]}],
+   "link": {"url": "https://example.com/update", "label": "Jak zaktualizować"},
+   "dismissible": false, "starts_at": 1794000000, "ends_at": null}
+]}
+```
+
+| Parameter | Meaning |
+| --- | --- |
+| `platform` | The app's platform, such as `android` or `ios`. |
+| `app_version` | The app's version code, a whole number, such as Android's `versionCode`. |
+| `lang` | The user's language, such as `pl` or `pt-BR`. Each text falls back to its base language (`pt`), then to English; `language` says which one was given. |
+
+All three are optional, but an app should send all of them: an announcement for some platforms or versions is given only to apps that say theirs. No sign-in is needed, so a signed-out app gets them too; a [server password](setup.md#-password-protection), when set, is needed as for every request.
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Stays the same for the announcement's life. Remember dismissed IDs on the device. |
+| `severity` | `info`, `warning`, or `critical`. The list comes most severe first, then newest. |
+| `title` | Plain text. |
+| `blocks` | The formatted text, to lay out with the platform's own text views; see below. |
+| `body` | The same text without formatting, for an app that shows only text: paragraphs separated by a blank line, list items with `•` or their number, and each link's address in brackets after its text. |
+| `link` | `null`, or an `https` `url` to open in the browser and a `label`, which may be `null`: then show your own, such as "Open". |
+| `dismissible` | Whether the user may hide it. `false` by default for `critical` ones. |
+| `starts_at`, `ends_at` | Unix timestamps; `ends_at` is `null` until it is ended. Only announcements active now are listed. |
+
+At most 10 are listed. A change reaches the apps within about 15 seconds.
+
+`blocks` is a list of:
+
+* `{"type": "paragraph", "spans": [...]}`: a paragraph. Its spans' text may contain line breaks (`\n`), to keep.
+* `{"type": "heading", "level": 1 or 2, "spans": [...]}`: a heading; 1 is the larger.
+* `{"type": "list", "ordered": true or false, "start": 1, "items": [[...], ...]}`: a bulleted list, or a numbered one starting at `start`; each item is a list of spans.
+
+A span is `{"text", "bold", "italic", "link"}`: its text, whether it is bold or italic, and `null` or the `https` address it links to. Show `text` as text only, never as HTML or Markdown, and ignore a block type you do not know, so that a later one does not break your app. The server parses and checks the text, so apps need no parser.
+
+`503` with `Retry-After` means the server cannot read the announcements at the moment; it is never an empty list in that case. An older server without announcements answers `404`.
+
+**Recommended client behavior:**
+
+* Show `critical` ones before anything else: as a screen that cannot be closed when `dismissible` is `false`. Show `warning` ones as a banner, and `info` ones as a note.
+* Keep the last list you received, and on `503`, a connection error, or `404`, keep showing it instead of clearing it: an announcement may be what tells the user how to keep using the app.
+* Hide an announcement the user dismissed by its `id`, and drop dismissed IDs that are no longer listed.
+* Open `link`, and links in `blocks`, only in the browser, never inside the app, and only if they start with `https://`.
+* Support this before you need it: an app that is no longer in its store cannot be updated to start reading announcements.
+
 ## 🏷️ Error codes
 
 A failed job has an `error_code` next to its `error`. Refusals of a link, and `402`, carry one in `detail`, as `{"message": "...", "error_code": "..."}`. Act on the code rather than the message, which can change. The status alone does not tell these apart: `402` and `429` are also this server's own limits, while a video site's rate limit is `source_temporarily_unavailable`.

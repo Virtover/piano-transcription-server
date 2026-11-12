@@ -463,9 +463,11 @@ def test_lowering_is_never_one_keystroke_away():
     script = (STATIC / "admin.js").read_text(encoding="utf-8")
 
     assert '"Enter"' in script and "preventDefault" in script
-    # Only a dialog's Close button ever gets focus by itself.
+    # Only a dialog's Close button ever gets focus by itself; the
+    # announcement editor's text area takes it back after a toolbar button,
+    # but no button that changes something is ever focused.
     assert "autofocus" not in script
-    assert re.findall(r"(\w+)\.focus\(", script) == ["close"]
+    assert set(re.findall(r"(\w+)\.focus\(", script)) == {"close", "area"}
     assert "checked: true" not in script
     assert "<form" not in (STATIC / "index.html").read_text(encoding="utf-8")
 
@@ -936,3 +938,100 @@ def test_the_billing_page_answers_without_billing(page):
 
     assert response.status_code == 200
     assert response.json()["billing"] is False and response.json()["minutes"] is None
+
+
+# --- Announcements -------------------------------------------------------------------
+
+def announcement_args(**changes):
+    args = {
+        "id": "play-takedown",
+        "severity": "critical",
+        "texts": {"en": {"title": "Update the app another way", "body": "The app left Google Play."}},
+        "link_url": "https://example.com/update",
+        "platforms": ["android"],
+        "max_version": 41,
+        "for": "30d",
+    }
+    args.update(changes)
+    return args
+
+
+def test_read_only_shows_announcements_but_cannot_publish(page):
+    client, _, billing = page
+    from app import announcements
+
+    announcement = announcements.check({"id": "note", "texts": {"en": {"title": "Hi", "body": "x"}}})
+    billing.save_announcement(announcements.to_row(announcement), "chris", "x", None, replace=False, max_stored=10)
+
+    [listed] = client.get("/api/announcements", headers=signed_in()).json()
+    assert listed["id"] == "note" and listed["state"] == "active"
+    assert "announce.add" not in client.get("/api/me", headers=signed_in()).json()["actions"]
+
+
+def test_an_announcement_is_published_from_the_page_and_reaches_the_apps(writable, api_context):
+    client, _, billing = writable
+    api = api_context[0]
+    from app.api.routes import announcements as announcement_routes
+
+    planned = act(client, "announce.add", announcement_args(), "store takedown").json()
+    assert planned["serious"] and planned["plan"]["audience"] == "android, versions 41 and earlier"
+    assert planned["plan"]["dismissible"] is False and planned["plan"]["replaces"] is False
+    assert billing.announcements() == []
+
+    assert apply(client, planned).status_code == 200
+    announcement_routes.cache.clear()
+    [shown] = api.get("/api/announcements", params={"platform": "android", "app_version": 40}).json()["announcements"]
+    assert shown["id"] == "play-takedown" and shown["ends_at"] - time.time() > 29 * 86400
+    row = audit_rows(billing)[-1]
+    assert (row["actor"], row["action"], row["target"]) == ("web:chris@example.com", "announce.add", "play-takedown")
+
+    # Ended from the page: kept, but no longer shown.
+    assert apply(client, act(client, "announce.end", {"id": "play-takedown"}).json()).status_code == 200
+    announcement_routes.cache.clear()
+    assert api.get("/api/announcements", params={"platform": "android", "app_version": 40}).json()["announcements"] == []
+    assert client.get("/api/announcements", headers=signed_in()).json() == []
+    assert client.get("/api/announcements?ended=true", headers=signed_in()).json()[0]["state"] == "ended"
+
+
+def test_an_announcement_replaced_meanwhile_needs_a_new_review(writable):
+    client, _, billing = writable
+    apply(client, act(client, "announce.add", announcement_args()).json())
+    planned = act(client, "announce.add", announcement_args(replace=True, severity="warning")).json()
+    assert planned["plan"]["replaces"] is True
+    apply(client, act(client, "announce.add", announcement_args(replace=True, severity="info")).json())
+
+    response = apply(client, planned)
+
+    assert response.status_code == 409
+    assert billing.announcements()[0]["content"].count('"severity": "info"') == 1
+
+
+@pytest.mark.parametrize(
+    "changes, problem",
+    [
+        ({"link_url": "javascript:alert(1)"}, "https://"),
+        ({"texts": {"en": {"title": "<script>", "body": "‮"}}}, "control or invisible"),
+        ({"texts": "Update"}, "texts must be an object"),
+        ({"max_version": "41"}, "whole number"),
+        ({"dismissible": "no"}, "dismissible"),
+        ({"id": "../etc"}, "lowercase"),
+    ],
+)
+def test_invalid_announcements_are_refused_before_anything_happens(writable, changes, problem):
+    client, _, billing = writable
+
+    response = act(client, "announce.add", announcement_args(**changes))
+
+    assert response.status_code == 400 and problem in response.json()["detail"], response.json()
+    assert tasks.redis.keys(server.CONFIRM_PREFIX + "*") == []
+    assert billing.announcements(ended=True) == []
+
+
+def test_the_page_shows_announcement_texts_only_as_text():
+    script = (STATIC / "admin.js").read_text(encoding="utf-8")
+
+    # Formatted text is drawn from parsed spans as text nodes, and only
+    # https links become links.
+    assert "document.createTextNode(span.text)" in script
+    assert r"/^https:\/\/[^\s]+$/.test(span.link)" in script
+    assert "white-space: pre-wrap" in (STATIC / "admin.css").read_text(encoding="utf-8")

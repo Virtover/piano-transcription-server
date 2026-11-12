@@ -125,6 +125,69 @@ python scripts/admin.py limits per-user default
 
 `--for` (a duration such as `30m`, `2h`, or `7d`) removes a control on its own after that time; without it, it lasts until removed. A pause or links-off with `--for` sends `Retry-After` with the time left. The controls are kept in Redis, so they last through a restart of the API but not a loss of Redis data.
 
+## 📣 Announcements
+
+Messages the apps show, for example how to keep using the app if it is no longer in its store. Apps read them from [`GET /api/announcements`](api.md#-announcements) within about 15 seconds of a change.
+
+```shell
+python scripts/admin.py announce
+python scripts/admin.py announce add play-takedown --severity critical --platform android --max-version 41 \
+    --title "Update the app another way" --body "The app is no longer on Google Play.\nSee how to update it." \
+    --link https://example.com/update --link-label "How to update" \
+    --translation pl "Zaktualizuj aplikację inaczej" "Aplikacji nie ma już w Google Play." "Jak zaktualizować"
+python scripts/admin.py announce end play-takedown
+python scripts/admin.py announce --all
+```
+
+On Windows PowerShell, put the command on one line, or end each line with a backtick instead of a backslash.
+
+* **`announce`** lists those that are active or scheduled, with who sees them; `--all` also lists ended ones.
+* **`add`** shows the announcement as apps will get it, and asks first. Titles are plain text; a body may use the [formatting](#formatting) below. English is required: apps in other languages fall back to it. `--translation LANGUAGE TITLE BODY [LINK_LABEL]` adds a language, and can be repeated. On the command line, `\n` in a body starts a new line.
+  * `--severity`: `info` (the default), `warning`, or `critical`. Critical ones cannot be dismissed unless you add `--dismissible`; other ones can unless you add `--not-dismissible`.
+  * `--platform` (repeatable), `--min-version`, and `--max-version` choose the apps, by the version code they send. Apps that do not send theirs never get an announcement limited to some.
+  * `--link` must be `https`, on the standard port, without a user name or password.
+  * `--start 2h` starts it later; `--for 30d` ends it on its own that long after it starts. Without `--for`, it lasts until ended.
+  * The ID is a short name in lowercase letters, digits, and hyphens. An ID in use needs `--replace`, which overwrites that announcement. Apps remember dismissals by ID, so users who hid it do not see the new text: to show a change to everyone, use a new ID and end the old one.
+* **`end`** stops showing it at once. It is kept, ended, so `--all` shows what was said, and its ID can be used again with `--replace`.
+
+### Formatting
+
+A body is written as text with a few marks. The [admin web page](#writing-announcements-on-the-page) adds them with shortcuts, and shows the result as you type.
+
+| Write | To get |
+| --- | --- |
+| A blank line | A new paragraph. A single line break is kept as one. |
+| `# Title`, `## Title` | A heading, or a smaller one. |
+| `- item` or `* item`; `1. item` or `1) item` | A bulleted list; a numbered one, counting from its first number. |
+| `**bold**`, `*italic*` | Bold, italic; `***both***`. |
+| `[the guide](https://example.com/guide)` | A link. Only `https` links are accepted, as for the link button. |
+| `\*` | A mark shown as typed: `\*`, `\[`, `\#`, `\-`, and `\\`. |
+
+A mark without its pair is shown as typed. Apps get the text already parsed (see [the API](api.md#-announcements)), and those that show only text get it without the marks.
+
+### Writing announcements on the page
+
+In read-write mode, **Announcements → New announcement** opens the editor: the text on the left, and on the right a preview as apps will lay it out. The review step then shows the server's own result, which is what is published.
+
+| Keys (⌘ on a Mac) | Does |
+| --- | --- |
+| Ctrl+B, Ctrl+I | Bold, italic; again to remove it. |
+| Ctrl+K | A link around the selection, with its address selected to type. Pasting a link over selected text does the same. |
+| Ctrl+Alt+1, Ctrl+Alt+2, Ctrl+Alt+0 | Heading, smaller heading, normal text, for the lines selected. |
+| Ctrl+Shift+8, Ctrl+Shift+7 | Bulleted list, numbered list, for the lines selected; again to remove it. |
+| Enter, Shift+Enter | In a list, the next item; on an empty item, the end of the list. Shift+Enter is a plain line break. |
+| Ctrl+Shift+F, Esc | Full screen, and back. |
+| Ctrl+/ | The shortcuts. |
+| Ctrl+Z | Undoes shortcuts too, like typing. |
+
+The form is kept as a draft in the browser while you write, and offered again the next time you open the editor, until it is published or discarded. Announcements are public text, so the draft holds nothing secret.
+
+### Checks
+
+An announcement is checked when it is written and again whenever it is read: texts have length limits and cannot contain control or invisible characters, such as right-to-left overrides, that could hide or reorder what users read; links, in a body too, must be `https`, in ASCII (an international host in its `xn--` form, so that a look-alike host such as one with a Cyrillic letter shows as what it is), and a body has at most 10. At most 10 are shown at once, and 200 are kept in all, ended ones included.
+
+Announcements are rows of the `announcements` table in the billing database, each saved together with its audit entry, so they last through restarts, a power cut, and a loss of Redis data, and the billing backups include them. When the database cannot be reached, the API keeps answering with the announcements it read last.
+
 ## 📜 Audit log
 
 ```shell
@@ -137,7 +200,7 @@ The [admin web page](#-admin-web-page) logs as `web:<email>`: `web.user_view` wh
 
 ## 🌐 Admin web page
 
-Optional: a page that shows what `status`, `jobs`, `user`, `billing`, `limits`, and `audit` show, for running the server from anywhere: an overview that refreshes itself, jobs with their full errors, accounts, charts of minutes and jobs per day or month, limits, and the audit log. It runs in a service of its own, `admin`, reached through the [Cloudflare Tunnel](cloudflare-tunnel.md) on a hostname of its own, behind Cloudflare Access.
+Optional: a page that shows what `status`, `jobs`, `user`, `billing`, `limits`, `announce`, and `audit` show, for running the server from anywhere: an overview that refreshes itself, jobs with their full errors, accounts, charts of minutes and jobs per day or month, limits, and the audit log. It runs in a service of its own, `admin`, reached through the [Cloudflare Tunnel](cloudflare-tunnel.md) on a hostname of its own, behind Cloudflare Access.
 
 The jobs view has a mode filter next to the backend filter, a mode in every job list and detail, and the overview shows whether arrangements are on and how many workers arrange.
 
@@ -147,7 +210,7 @@ The charts are drawn from what the server already keeps (balance changes, and jo
 
 * **`disabled`** (the default): the service does not start.
 * **`read-only`**: the page shows everything above. It adds only two kinds of entries to the audit log: who opened which account, and who lowered the page's access.
-* **`read-write`**: the page can also cancel a job, with or without a refund; add or take away minutes, at most 600 at once; pause and resume submissions; turn video links off and on; accept a video site again; block and unblock a user; and change the per-user limit. Each change goes through the same functions as the command line, so it is checked, charged, and written to the audit log the same way. Queueing a job again and deleting an account stay on the command line: the first downloads from a video site and writes job files, which the page's service may not, and the second cannot be undone.
+* **`read-write`**: the page can also cancel a job, with or without a refund; add or take away minutes, at most 600 at once; pause and resume submissions; turn video links off and on; accept a video site again; block and unblock a user; change the per-user limit; and publish, replace, and end [announcements](#-announcements), with translations. Each change goes through the same functions as the command line, so it is checked, charged, and written to the audit log the same way. Queueing a job again and deleting an account stay on the command line: the first downloads from a video site and writes job files, which the page's service may not, and the second cannot be undone.
 
 ### Making a change from the page
 
@@ -156,7 +219,7 @@ Every change takes two steps. First you give a reason (required to cancel, chang
 ### How it is protected
 
 * **Two locks.** Cloudflare Access signs you in before a request reaches the server. The page then checks the token Access adds to every request: Cloudflare's signature, your team, the Access application, its lifetime, and that the address is in `ADMIN_WEB_EMAILS`. Either lock alone keeps strangers out, so a mistake in Access does not open the page, and a program on the server's internal network cannot pretend to be Cloudflare.
-* **Its own credentials, one pair per mode.** The service signs in to Redis and PostgreSQL as `admin-<mode>`, and gets only that mode's passwords. `admin-read-only` may read only the keys the page shows, and every table except purchase tokens, and add rows only to the audit log and to the page's own lowerings. `admin-read-write` may also write jobs, limits, and video sites' state in Redis, and change balances and reservations and record jobs in PostgreSQL; it can still not delete anything, create accounts, touch purchases, or write the queues. Before it serves anything, the service tries changes its mode must be refused, including read-write's changes in read-only mode, and stops if one is accepted. It gets no other secret, cannot write files, and publishes no port.
+* **Its own credentials, one pair per mode.** The service signs in to Redis and PostgreSQL as `admin-<mode>`, and gets only that mode's passwords. `admin-read-only` may read only the keys the page shows, and every table except purchase tokens, and add rows only to the audit log and to the page's own lowerings. `admin-read-write` may also write jobs, limits, and video sites' state in Redis, and change balances and reservations, record jobs, and add and end announcements in PostgreSQL; it can still not delete anything, create accounts, touch purchases, or write the queues. Before it serves anything, the service tries changes its mode must be refused, including read-write's changes in read-only mode, and stops if one is accepted. It gets no other secret, cannot write files, and publishes no port.
 * **In the browser.** The page loads nothing from elsewhere, cannot be shown inside another site, is never cached, and shows text from users only as text. It accepts a change only as JSON from its own address.
 * **Opening an account** is written to the audit log first; if that fails, nothing is shown.
 
@@ -206,17 +269,18 @@ To turn the page off at once on the server, stop the service with `docker compos
 
 Each command is a data function in `app/admin/` that returns plain data, with the command line printing it. Another tool, such as an admin web page, calls the same functions, so it behaves exactly like the commands, including the audit log:
 
-* Reading: `status.collect()`, `jobs.list_jobs()`, `jobs.job_details()`, `users.account()`, `users.find()`, `report.billing_report()`, `limits.current()`, and `audit.entries()`.
-* Changing: `jobs.cancel()`, `jobs.requeue()`, `users.credit()`, `users.delete()`, and the functions in `limits`. Each takes the actor and a reason for the audit log. The reason is required by `jobs.cancel()`, `jobs.requeue()`, `users.credit()`, `users.delete()`, and `limits.block()`, and refused if it contains an email address.
-* Confirming: `jobs.cancel_plan()`, `jobs.requeue_plan()`, `users.credit_plan()`, and `users.delete_plan()` return what the matching change would do and change nothing. Show it before asking.
+* Reading: `status.collect()`, `jobs.list_jobs()`, `jobs.job_details()`, `users.account()`, `users.find()`, `report.billing_report()`, `limits.current()`, `announce.listing()`, and `audit.entries()`.
+* Changing: `jobs.cancel()`, `jobs.requeue()`, `users.credit()`, `users.delete()`, the functions in `limits`, and `announce.add()` and `announce.end()`, with `announce.build()` to check an announcement first. Each takes the actor and a reason for the audit log. The reason is required by `jobs.cancel()`, `jobs.requeue()`, `users.credit()`, `users.delete()`, and `limits.block()`, and refused if it contains an email address.
+* Confirming: `jobs.cancel_plan()`, `jobs.requeue_plan()`, `users.credit_plan()`, `users.delete_plan()`, `announce.add_plan()`, and `announce.end_plan()` return what the matching change would do and change nothing. Show it before asking.
 
 A function that cannot do what was asked raises `AdminError` (in `app.admin.common`) with a message for the operator. Durations are in seconds. The functions need the billing database and Redis, so they run in the API container.
 
 ## 🗄️ What is recorded
 
-Two tables of the billing database support these commands:
+Three tables of the billing database support these commands:
 
 * **`minute_ledger`**: every change to a balance, with its kind (purchase, free grant, use, expired monthly minutes, voided purchase, change by hand), its pool (`paid` or `monthly`; each pool adds up to that balance), the minutes, the time, and a note: the order ID, the job ID, or the reason given.
 * **`admin_actions`**: the audit log.
+* **`announcements`**: the [announcements](#-announcements), ended ones included, with who added each and when.
 
 When an account is deleted, its ledger entries are kept without the user, so totals stay right, like its purchases. Audit entries about it, including the deletion, name it by a hash of its ID instead of the ID. Reasons are kept as written, so do not put an email address in one.
