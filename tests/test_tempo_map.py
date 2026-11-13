@@ -137,6 +137,14 @@ def test_a_bar_of_another_length_is_followed():
     assert build_tempo_map(beats, downbeats).meters == [(0, 4), (12, 2), (14, 4)]
 
 
+def test_a_change_of_meter_is_followed():
+    beats = [0.5 * index for index in range(60)]
+    # 2/4 for ten bars, then 4/4, then 3/4.
+    downbeats = [beats[index] for index in [*range(0, 20, 2), *range(20, 44, 4), *range(44, 60, 3)]]
+
+    assert build_tempo_map(beats, downbeats).meters == [(0, 2), (20, 4), (44, 3)]
+
+
 def test_noisy_downbeats_give_no_map():
     beats = [0.5 * index for index in range(40)]
     # Half the bars in 4/4: no meter can be trusted.
@@ -196,6 +204,16 @@ def test_a_long_pause_never_gives_a_beat_slower_than_20_bpm():
     beats = [0.5 * index for index in range(20)] + [60 + 0.5 * index for index in range(20)]
 
     tempo_map = build_tempo_map(beats, beats[::4])
+
+    assert tempo_map is not None
+    assert max(tempo_map.tempos) <= tempo.MAX_BEAT_SECONDS * 1_000_000
+
+
+def test_a_pause_in_a_slow_piece_is_split_however_long_it_is():
+    # About 30 BPM, with a 3.1 s pause: 1.55 beats, near no whole number.
+    beats = [2.0 * index for index in range(12)] + [25.1 + 2.0 * index for index in range(12)]
+
+    tempo_map = build_tempo_map(beats, beats[::2])
 
     assert tempo_map is not None
     assert max(tempo_map.tempos) <= tempo.MAX_BEAT_SECONDS * 1_000_000

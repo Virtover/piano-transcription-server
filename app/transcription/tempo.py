@@ -25,6 +25,7 @@ from pathlib import Path
 import mido
 
 from app.config import settings
+from app.transcription import beat_decoder
 
 
 logger = logging.getLogger(__name__)
@@ -55,8 +56,10 @@ REGULAR_TOLERANCE = 0.3
 # A downbeat further than this share of a beat from every beat is ignored.
 DOWNBEAT_TOLERANCE = 0.25
 MAX_BAR_BEATS = 12
-# Below this share of bars in the main meter, the downbeats are too noisy to
-# place bars, and there is no tempo map.
+# Below this share of steady bars, the downbeats are too noisy to place
+# bars, and there is no tempo map. A bar is steady in the main meter, as
+# long as a bar beside it, or a whole number of them: the meter may change,
+# as from 2/4 to 4/4, but not from bar to bar.
 REGULAR_BAR_SHARE = 0.75
 
 
@@ -128,8 +131,11 @@ def _fill_missed_beats(beats: list[float]) -> list[float]:
         local = _local_beat(intervals, index)
         count = round(interval / local)
         if interval > MAX_BEAT_SECONDS:
+            # Split whatever it is a multiple of, or it is no tempo at all.
             count = max(count, math.ceil(interval / MAX_BEAT_SECONDS))
-        if count >= 3 or (count == 2 and abs(interval / local - count) < MISSED_BEAT_TOLERANCE * count):
+        elif not (count >= 3 or (count == 2 and abs(interval / local - count) < MISSED_BEAT_TOLERANCE * count)):
+            count = 1
+        if count >= 2:
             step = interval / count
             filled.extend(beats[index] + step * part for part in range(1, count))
         filled.append(beats[index + 1])
@@ -169,38 +175,56 @@ def _downbeat_indices(beats: list[float], downbeats: list[float]) -> list[int]:
 
 
 def _bar_starts(beat_count: int, downbeats: list[int]) -> tuple[list[int], int] | None:
-    """The beat indices where bars start, and the main meter, or None when
-    the downbeats are too few or too inconsistent to place bars: a guessed
-    meter would put every bar line in the wrong place. Bars before the first
-    downbeat lead up to it: a short first bar is the pickup."""
+    """The beat indices where bars start, and the meter of the last bar, or
+    None when the downbeats are too few or too inconsistent to place bars:
+    a guessed meter would put every bar line in the wrong place. Bars
+    before the first downbeat lead up to it: a short first bar is the pickup."""
     lengths = [end - start for start, end in zip(downbeats, downbeats[1:])]
     candidates = [length for length in lengths if 2 <= length <= MAX_BAR_BEATS]
     if not candidates:
         logger.info("Too few downbeats for a tempo map: %d", len(downbeats))
         return None
-    meter = Counter(candidates).most_common(1)[0][0]
-    in_meter = sum(length == meter for length in lengths)
-    if in_meter < REGULAR_BAR_SHARE * len(lengths):
+    main = Counter(candidates).most_common(1)[0][0]
+
+    def meter(index: int) -> int | None:
+        """The meter of bar index: its own length in the main meter or beside
+        a bar as long, the length of a bar beside it that it is a whole
+        number of (missed downbeats), or None for a bar unlike those beside it."""
+        length = lengths[index]
+        beside = [lengths[other] for other in (index - 1, index + 1) if 0 <= other < len(lengths)]
+        if length == main or (length in beside and length <= MAX_BAR_BEATS):
+            return length
+        for other in beside:
+            if 2 <= other <= MAX_BAR_BEATS and length % other == 0:
+                return other
+        return None
+
+    meters = [meter(index) for index in range(len(lengths))]
+    steady = sum(found is not None for found in meters)
+    if steady < REGULAR_BAR_SHARE * len(lengths):
         logger.info(
-            "Downbeats too inconsistent for a tempo map: %d of %d bars in %d beats (%.0f%% needed)",
-            in_meter, len(lengths), meter, 100 * REGULAR_BAR_SHARE,
+            "Downbeats too inconsistent for a tempo map: %d of %d bars steady (%.0f%% needed), most in %d beats",
+            steady, len(lengths), 100 * REGULAR_BAR_SHARE, main,
         )
         return None
 
     first = downbeats[0]
     starts = [first]
-    for start, length in zip(downbeats, lengths):
-        # Missed downbeats: bars of the main meter, the last one shorter
-        # if they do not fill the gap.
-        if length > meter and (length % meter == 0 or length > MAX_BAR_BEATS):
-            starts.extend(range(start + meter, start + length, meter))
+    for start, length, found in zip(downbeats, lengths, meters):
+        # Missed downbeats: bars of the meter beside them. Longer than any
+        # bar: bars of the main meter, the last one shorter if they do not
+        # fill the gap.
+        step = found or (main if length > MAX_BAR_BEATS else length)
+        starts.extend(range(start + step, start + length, step))
         starts.append(start + length)
-    starts.extend(range(starts[-1] + meter, beat_count, meter))
+    last = next((found for found in reversed(meters) if found), main)
+    starts.extend(range(starts[-1] + last, beat_count, last))
 
-    leading = list(range(first - meter, 0, -meter))
+    lead = next((found for found in meters if found), main)
+    leading = list(range(first - lead, 0, -lead))
     if first > 0:
         leading.append(0)
-    return sorted(set(leading + starts)), meter
+    return sorted(set(leading + starts)), last
 
 
 def build_tempo_map(beats: list[float], downbeats: list[float]) -> TempoMap | None:
@@ -379,16 +403,15 @@ class _Tracker:
     def __init__(self, device: str):
         import torch
         from beat_this.inference import load_model
-        from beat_this.model.postprocessor import Postprocessor
 
         self.device = torch.device(device)
         if not CHECKPOINT.is_file():
             raise FileNotFoundError(f"{CHECKPOINT} is missing; the worker and RunPod images include it")
         self.model = load_model(str(CHECKPOINT), self.device)
-        self.postprocess = Postprocessor(type="minimal")
         self.spectrogram = _Spectrogram()
 
     def __call__(self, audio, sample_rate: int):
+        """The beat and downbeat probability of each frame, FPS a second."""
         import numpy as np
         import soxr
         import torch
@@ -399,7 +422,7 @@ class _Tracker:
             signal = signal.mean(axis=1)
         # Too short for MIN_BEATS beats.
         if len(signal) < MIN_BEATS * MIN_BEAT_SECONDS * sample_rate:
-            return [], []
+            return np.zeros(0), np.zeros(0)
         if sample_rate != SPECTROGRAM_RATE:
             signal = soxr.resample(signal, sample_rate, SPECTROGRAM_RATE)
         with torch.inference_mode():
@@ -412,7 +435,7 @@ class _Tracker:
             beat, downbeat = aggregate_prediction(
                 predictions, starts, len(spectrogram), CHUNK_FRAMES, BORDER_FRAMES, "keep_first", "cpu",
             )
-        return self.postprocess(beat, downbeat)
+        return torch.sigmoid(beat).numpy(), torch.sigmoid(downbeat).numpy()
 
 
 _lock = threading.Lock()
@@ -439,8 +462,14 @@ def detect_beats(audio, sample_rate: int, device: str) -> tuple[list[float], lis
     # One at a time: its GPU memory is reserved once, and on CPU it uses
     # every thread.
     with _lock:
-        beats, downbeats = _tracker(device)(audio, sample_rate)
-    return [float(beat) for beat in beats], [float(downbeat) for downbeat in downbeats]
+        beat, downbeat = _tracker(device)(audio, sample_rate)
+    beats, downbeats, contrast = beat_decoder.decode(beat, downbeat, MIN_BEAT_SECONDS, MAX_BEAT_SECONDS)
+    if beats and not downbeats:
+        logger.info(
+            "Downbeats too unclear for bars: %.2f more likely than other beats (%.2f needed)",
+            contrast, beat_decoder.MIN_DOWNBEAT_CONTRAST,
+        )
+    return beats, downbeats
 
 
 def add_tempo_map(midi_path: Path, audio, sample_rate: int, device: str = "cpu") -> bool:
