@@ -492,19 +492,21 @@ function planSummary(action, plan) {
 
 // Every change: why, then the plan from the server, then one confirmation
 // within two minutes. The server keeps what was reviewed.
-function change(action, args, { title, describe, after }) {
+// back, when given, reopens what the change was made in, such as a form.
+function change(action, args, { title, describe, after, back }) {
   const modal = openModal({ title });
   const reason = input({ maxlength: "300", placeholder: REASON_REQUIRED.has(action) ? "Required; no email addresses" : "Optional; no email addresses" });
   const review = el("button", { type: "button", class: "btn gold", text: "Review" });
   const message = el("div");
   append(modal.body, [steps(0), describe ? el("div", { class: "pw-field" }, describe) : null,
     field("Reason, kept in the audit log", reason), message]);
-  modal.foot.append(el("button", { type: "button", class: "btn", text: "Cancel", onclick: modal.close }), review);
+  const backButton = back ? el("button", { type: "button", class: "btn", text: "Back to editing", onclick: () => { modal.close(); back(); } }) : null;
+  append(modal.foot, [el("button", { type: "button", class: "btn", text: "Cancel", onclick: modal.close }), backButton, review]);
   review.addEventListener("click", async () => {
     review.disabled = true;
     try {
       const planned = await post("/api/actions/plan", { action, args, reason: reason.value });
-      confirmStep(modal, action, planned, after);
+      confirmStep(modal, action, planned, after, back);
     } catch (error) {
       fill(message, errorBox(error));
       review.disabled = false;
@@ -512,7 +514,7 @@ function change(action, args, { title, describe, after }) {
   });
 }
 
-function confirmStep(modal, action, planned, after) {
+function confirmStep(modal, action, planned, after, back) {
   const confirm = el("button", { type: "button", class: `btn ${planned.serious ? "danger solid" : "gold"}`, text: "Confirm" });
   const countdown = el("span", { class: "countdown" });
   const message = el("div");
@@ -529,7 +531,9 @@ function confirmStep(modal, action, planned, after) {
     planSummary(action, planned.plan),
     el("p", { class: "pw-hint" }, "Reason: ", planned.reason || "none given"),
     message);
-  fill(modal.foot, countdown, el("button", { type: "button", class: "btn", text: "Back out", onclick: modal.close }), confirm);
+  fill(modal.foot, countdown, el("button", { type: "button", class: "btn", text: "Back out", onclick: modal.close }),
+    back ? el("button", { type: "button", class: "btn", text: "Back to editing", onclick: () => { modal.close(); back(); } }) : null,
+    confirm);
   confirm.addEventListener("click", async () => {
     confirm.disabled = true;
     try {
@@ -1394,28 +1398,68 @@ function endAnnouncement(id) {
   change("announce.end", { id }, { title: `End ${id}`, after: () => open("announcements") });
 }
 
-function announcementCard(item) {
+// One line of text from blocks, for a row's excerpt.
+function excerpt(blocks) {
+  return blocks.map((block) => (block.type === "list" ? block.items : [block.spans])
+    .map((spans) => spans.map((span) => span.text).join("")).join(" · ")).join("  ").replace(/\s+/g, " ").trim();
+}
+
+function untilText(item) {
+  if (item.state === "scheduled") return `starts ${when(item.starts_at)}`;
+  if (item.state === "ended") return `ended ${when(item.ends_at)}`;
+  return item.ends_at ? `until ${when(item.ends_at)}` : "until ended";
+}
+
+// A row per announcement: what it says and who sees it at a glance, the
+// whole text and the details when opened.
+function announcementRow(item) {
   if (item.state === "invalid") {
-    return el("section", { class: "card" }, cardHead("alert", "red", item.id, "Not valid, so not shown; replace or end it"),
-      el("div", { class: "btn-row" }, canChange("announce.end") ? qbtn("End", "c-red", () => endAnnouncement(item.id)) : null));
+    return el("article", { class: "ann-row sev-critical" },
+      el("div", { class: "ann-main static" },
+        el("span", { class: "ann-title" }, el("strong", { text: item.id })),
+        el("span", { class: "ann-excerpt", text: "Not valid, so apps do not get it. End it, or publish it again from the command line." })),
+      el("div", { class: "ann-side" }, badge("invalid", "bad"),
+        canChange("announce.end") ? qbtn("End", "c-red", () => endAnnouncement(item.id)) : null));
   }
   const english = item.texts.en;
+  const blocks = parseMarkup(english.body);
   const others = Object.keys(item.texts).filter((language) => language !== "en");
-  const live = item.state !== "ended";
-  return el("section", { class: "card" },
-    cardHead("announce", item.severity === "critical" ? "red" : item.severity === "warning" ? "gold" : "blue", item.id, audienceText(item),
-      el("div", { class: "chips" }, badge(item.severity, SEVERITY_KIND[item.severity]), badge(item.state, STATE_KIND[item.state]))),
-    announcementText(english.title, parseMarkup(english.body)),
+  const everyone = !item.platforms.length && item.min_version === null && item.max_version === null;
+  const tags = [
+    everyone ? "everyone" : audienceText(item),
+    untilText(item),
+    item.dismissible ? null : "cannot be hidden",
+    item.link_url ? "link" : null,
+    others.length ? ["en", ...others].join(" · ") : null,
+  ].filter(Boolean);
+  const details = el("div", { class: "ann-details", hidden: true },
+    el("div", { class: "ann-text" }, renderBlocks(blocks)),
     facts([
+      ["ID", el("span", { class: "mono", text: item.id })],
+      ["Who", audienceText(item)],
       ["When", windowText(item)],
-      ["Link", item.link_url ? `${item.link_url}${english.link_label ? ` (${english.link_label})` : ""}` : null],
+      ["Link", item.link_url ? `${english.link_label || "Open"} → ${item.link_url}` : null],
       ["Other languages", others.length ? others.join(", ") : null],
       ["Users can hide it", item.dismissible ? "yes" : "no"],
       ["Added", `${when(item.created_at)} by ${item.created_by}`],
-    ]),
-    el("div", { class: "btn-row" },
+    ]));
+  const toggle = el("button", { type: "button", class: "ann-main", "aria-expanded": "false" },
+    el("span", { class: "ann-title" }, el("strong", { text: english.title })),
+    el("span", { class: "ann-excerpt", text: excerpt(blocks) }),
+    el("span", { class: "ann-tags" }, tags.map((tag) => el("span", { class: "ann-tag", text: tag }))));
+  toggle.addEventListener("click", () => {
+    details.hidden = !details.hidden;
+    toggle.setAttribute("aria-expanded", String(!details.hidden));
+  });
+  const live = item.state !== "ended";
+  return el("article", { class: `ann-row sev-${item.severity}` },
+    toggle,
+    el("div", { class: "ann-side" },
+      badge(item.severity, SEVERITY_KIND[item.severity]),
+      item.state === "scheduled" ? badge("scheduled", "info") : null,
       canChange("announce.add") ? qbtn(live ? "Edit" : "Publish again", "c-gold", () => composer(formOf(item), true)) : null,
-      live && canChange("announce.end") ? qbtn("End", "c-red", () => endAnnouncement(item.id)) : null));
+      live && canChange("announce.end") ? qbtn("End", "c-red", () => endAnnouncement(item.id)) : null),
+    details);
 }
 
 // A collapsed part of the form; its summary says what is chosen in it.
@@ -1426,13 +1470,7 @@ function section(title, open = false) {
   return { node, body, summarize: (text) => { summary.textContent = text; } };
 }
 
-// An ID from a title: "Update the app!" gives update-the-app.
 const SEVERITY_HINT = { info: "A note users may hide", warning: "A banner", critical: "Shown before anything else" };
-
-function slug(text) {
-  return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64).replace(/-+$/, "");
-}
 
 function translationRow(rows, text = {}, onInput = null) {
   const language = input({ maxlength: "12", placeholder: "pl", value: text.language || "", "aria-label": "Language code" });
@@ -1472,15 +1510,14 @@ function composer(form = {}, replacing = false) {
   let severity = form.severity || "info";
   const severityHint = el("span", { class: "pw-hint", text: SEVERITY_HINT[severity] });
   const title = input({ maxlength: "120", placeholder: "Title", value: form.title || "", class: "pw-input title-input", "aria-label": "Title" });
-  const id = input({ maxlength: "64", placeholder: "made from the title", value: form.id || "", disabled: replacing });
-  let idTyped = replacing || Boolean(form.id);
+  const id = input({ maxlength: "64", placeholder: "Made from the title", value: form.id || "", disabled: replacing });
   const link = input({ maxlength: "500", placeholder: "An https link", value: form.link || "" });
   const linkLabel = input({ maxlength: "60", placeholder: "Open", value: form.linkLabel || "" });
   const platforms = input({ maxlength: "200", placeholder: "Every platform, or e.g. android, ios", value: form.platforms || "" });
   const minVersion = input({ type: "number", min: "0", step: "1", inputmode: "numeric", placeholder: "Any", value: form.minVersion || "", class: "pw-input no-spin" });
   const maxVersion = input({ type: "number", min: "0", step: "1", inputmode: "numeric", placeholder: "Any", value: form.maxVersion || "", class: "pw-input no-spin" });
-  const starts = select(STARTS, "");
-  const lasts = select(LASTS, "");
+  const starts = select(STARTS, form.starts || "");
+  const lasts = select(LASTS, form.lasts || "");
   const dismissible = select([["", "Yes, unless critical"], ["yes", "Yes"], ["no", "No"]], form.dismissible || "");
   const rows = [];
   const translations = el("div", { class: "translations" });
@@ -1490,14 +1527,13 @@ function composer(form = {}, replacing = false) {
   const snapshot = () => ({
     id: id.value, severity, title: title.value, body: body.value, link: link.value, linkLabel: linkLabel.value,
     platforms: platforms.value, minVersion: minVersion.value, maxVersion: maxVersion.value, dismissible: dismissible.value,
-    translations: rows.map((read) => read()), replacing, savedAt: Date.now(),
+    starts: starts.value, lasts: lasts.value, translations: rows.map((read) => read()), replacing, savedAt: Date.now(),
   });
 
   const linkPart = section("Link button", Boolean(form.link));
   const audiencePart = section("Who and when", Boolean(form.platforms || form.minVersion || form.maxVersion));
   const languagePart = section("Other languages", Boolean(form.translations && form.translations.length));
   const summarize = () => {
-    if (!idTyped) id.value = slug(title.value);
     linkPart.summarize(link.value.trim() ? `${linkLabel.value.trim() || "Open"} → ${link.value.trim()}` : "none");
     const versions = minVersion.value && maxVersion.value ? `versions ${minVersion.value}–${maxVersion.value}`
       : minVersion.value ? `versions ${minVersion.value}+` : maxVersion.value ? `versions up to ${maxVersion.value}` : "";
@@ -1514,13 +1550,12 @@ function composer(form = {}, replacing = false) {
   };
   const body = markupEditor({ value: form.body || "", rows: 9, label: "Text", onInput: changed });
   for (const text of form.translations || []) translations.append(translationRow(rows, text, changed));
-  id.addEventListener("input", () => { idTyped = id.value !== ""; });
 
   append(linkPart.body, [el("div", { class: "filters" }, field("Address", link), field("Button text", linkLabel))]);
   append(audiencePart.body, [
     el("div", { class: "filters" }, field("Platforms", platforms), field("Lowest version code", minVersion), field("Highest version code", maxVersion)),
     el("div", { class: "filters" }, field("Starts", starts), field("Lasts", lasts), field("Users can hide it", dismissible)),
-    field("ID", id, "Apps remember what users hid by it"),
+    field("ID", id, "Apps remember what users hid by it. Left empty, it is made from the title, with a number added if that is taken"),
   ]);
   append(languagePart.body, [
     el("p", { class: "pw-hint", text: "Apps in a language not given here get the English text." }),
@@ -1571,7 +1606,8 @@ function composer(form = {}, replacing = false) {
         texts[text.language] = { title: text.title, body: text.body, link_label: text.link_label };
       }
       const args = {
-        id: id.value.trim() || slug(title.value),
+        // Empty: the server makes one from the title.
+        id: replacing ? form.id : id.value.trim() || null,
         severity,
         texts,
         link_url: link.value.trim() || null,
@@ -1584,11 +1620,13 @@ function composer(form = {}, replacing = false) {
         replace: replacing,
       };
       clearTimeout(saveTimer);
-      writeDraft(snapshot());
+      const kept = snapshot();
+      writeDraft(kept);
       modal.close();
       change("announce.add", args, {
-        title: replacing ? `Save ${args.id}` : "Publish an announcement",
+        title: replacing ? `Save ${form.id}` : "Publish an announcement",
         after: () => { writeDraft(null); open("announcements"); },
+        back: () => composer(kept, replacing),
       });
     } })]);
 }
@@ -1615,7 +1653,7 @@ async function announcementsView() {
     el("div", { class: "toolbar" },
       segmented([["current", `Current ${current.length}`], ["ended", `Ended ${ended.length}`]], announcementTab, (value) => { announcementTab = value; announcementsView(); }),
       canChange("announce.add") ? qbtn("New announcement", "c-gold", () => composer()) : null),
-    shown.length ? el("div", { class: "grid two" }, shown.map(announcementCard))
+    shown.length ? el("div", { class: "ann-list" }, shown.map(announcementRow))
       : el("section", { class: "card" }, emptyState(announcementTab === "ended" ? "No announcement has ended yet" : "Nothing is announced", "announce")));
 }
 

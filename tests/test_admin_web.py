@@ -1054,3 +1054,18 @@ def test_no_empty_slot_reaches_the_browser_s_own_append():
     script = (STATIC / "admin.js").read_text(encoding="utf-8")
 
     assert not re.search(r"\.(append|prepend|replaceChildren)\((?:(?!\);).)*?: null", script, re.DOTALL)
+
+
+def test_without_an_id_the_page_gets_one_from_the_title_numbered_when_taken(writable):
+    client, _, billing = writable
+    args = announcement_args()
+    del args["id"]
+
+    first = act(client, "announce.add", args).json()
+    assert first["plan"]["id"] == "update-the-app-another-way"
+    apply(client, first)
+    second = act(client, "announce.add", args).json()
+
+    assert second["plan"]["id"] == "update-the-app-another-way-2" and second["plan"]["replaces"] is False
+    assert apply(client, second).status_code == 200
+    assert act(client, "announce.add", {**args, "replace": True}).json()["detail"] == "Replacing needs the announcement's ID"

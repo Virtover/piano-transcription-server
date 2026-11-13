@@ -619,3 +619,40 @@ def test_an_invalid_row_is_logged_once_not_on_every_read(caplog):
 
     assert caplog.text.count("'bad' is not valid") == 1
     assert caplog.text.count("'worse' is not valid") == 1
+
+
+# --- IDs made from titles --------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("Zaktualizuj aplikację!", "zaktualizuj-aplikacje"),
+        ("Łódź — żółć", "lodz-zolc"),
+        ("  Update the app (v2)  ", "update-the-app-v2"),
+        ("!!!", "announcement"),
+        ("x" * 80, "x" * 56),
+    ],
+)
+def test_an_id_is_made_from_the_title(title, expected):
+    made = announcements.id_from_title(title)
+
+    assert made == expected
+    assert announcements.check_id(made) == made
+
+
+def test_a_title_used_again_gets_a_numbered_id(api_context, capsys):
+    client, _, billing = api_context
+
+    for _ in range(3):
+        assert admin(capsys, "announce", "add", "--title", "Update the app", "--body", "News", "--yes")[0] == 0
+    admin(capsys, "announce", "end", "update-the-app-2", "--yes")
+    assert admin(capsys, "announce", "add", "--title", "Update the app", "--body", "News", "--yes")[0] == 0
+
+    ids = sorted(row["id"] for row in billing.announcements(ended=True))
+    assert ids == ["update-the-app", "update-the-app-2", "update-the-app-3", "update-the-app-4"]
+
+
+def test_replace_needs_an_id(api_context, capsys):
+    code, output = admin(capsys, "announce", "add", "--title", "Hi", "--body", "News", "--replace", "--yes")
+
+    assert code == 1 and "--replace needs the ID" in output

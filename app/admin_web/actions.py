@@ -107,8 +107,17 @@ def _announcement(args: dict) -> dict:
     if dismissible not in (None, True, False):
         raise AdminError("dismissible must be true, false, or left out")
     start = _text(args, "start", required=False, length=16)
+    announcement_id = _text(args, "id", required=False, length=64)
+    if announcement_id is None:
+        if args.get("replace") is True:
+            raise AdminError("Replacing needs the announcement's ID")
+        # From the English title, with a number added if it is taken; fixed
+        # here, so the review shows the ID that is published.
+        english = texts.get("en") if isinstance(texts.get("en"), dict) else {}
+        title = english.get("title") if isinstance(english.get("title"), str) else ""
+        announcement_id = announce.free_id(announcements.id_from_title(title))
     item = announce.build(
-        _text(args, "id", length=64),
+        announcement_id,
         texts,
         _text(args, "severity", required=False, length=16) or "info",
         _text(args, "link_url", required=False, length=announcements.URL_LENGTH),

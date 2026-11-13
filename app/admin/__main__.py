@@ -136,7 +136,8 @@ def parser() -> argparse.ArgumentParser:
     announce_commands.set_defaults(run=announce.run_list)
     announce_actions = announce_commands.add_subparsers(dest="action")
     command = announce_actions.add_parser("add", parents=[changes, asks, expires], help="publish an announcement; plain text, English required")
-    command.add_argument("id", help="a short name, such as play-takedown; apps remember dismissals by it")
+    command.add_argument("id", nargs="?", help="a short name, such as play-takedown; apps remember dismissals by it. "
+                         "Made from the title if left out, with a number added if it is taken")
     command.add_argument("--title", required=True, help=f"English title, at most {announcements.TITLE_LENGTH} characters")
     command.add_argument("--body", required=True, help=f"English text, at most {announcements.BODY_LENGTH} characters; \n starts a new line")
     command.add_argument("--severity", choices=announcements.SEVERITIES, default="info", help="info, warning, or critical (default: info)")

@@ -147,7 +147,7 @@ On Windows PowerShell, put the command on one line, or end each line with a back
   * `--platform` (repeatable), `--min-version`, and `--max-version` choose the apps, by the version code they send. Apps that do not send theirs never get an announcement limited to some.
   * `--link` must be `https`, on the standard port, without a user name or password.
   * `--start 2h` starts it later; `--for 30d` ends it on its own that long after it starts. Without `--for`, it lasts until ended.
-  * The ID is a short name in lowercase letters, digits, and hyphens. An ID in use needs `--replace`, which overwrites that announcement. Apps remember dismissals by ID, so users who hid it do not see the new text: to show a change to everyone, use a new ID and end the old one.
+  * The ID is a short name in lowercase letters, digits, and hyphens. Left out, it is made from the title, with `-2`, `-3`, ... added if that is taken, ended announcements included, so a title can be used again. An ID in use needs `--replace`, which overwrites that announcement. Apps remember dismissals by ID, so users who hid it do not see the new text: to show a change to everyone, use a new ID and end the old one.
 * **`end`** stops showing it at once. It is kept, ended, so `--all` shows what was said, and its ID can be used again with `--replace`.
 
 ### Formatting
@@ -167,7 +167,7 @@ A mark without its pair is shown as typed. Apps get the text already parsed (see
 
 ### Writing announcements on the page
 
-In read-write mode, **Announcements → New announcement** opens the editor: the text on the left, and on the right a preview as apps will lay it out. The review step then shows the server's own result, which is what is published.
+In read-write mode, **Announcements → New announcement** opens the editor: the text on the left, and on the right a preview as apps will lay it out. The review step then shows the server's own result, which is what is published, and its ID; **Back to editing**, in both steps, returns to the form as you left it. The list shows each announcement as a row, with who sees it and until when; click one for its whole text and details.
 
 | Keys (⌘ on a Mac) | Does |
 | --- | --- |

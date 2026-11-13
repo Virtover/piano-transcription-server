@@ -265,6 +265,21 @@ def check_id(value) -> str:
     return value
 
 
+# Letters that do not decompose into a base letter and a mark.
+ID_LETTERS = str.maketrans({"ł": "l", "Ł": "l", "đ": "d", "Đ": "d", "ø": "o", "Ø": "o", "ß": "ss", "æ": "ae", "œ": "oe"})
+# Room left for "-123", so a number can always be added.
+ID_BASE_LENGTH = 56
+
+
+def id_from_title(title: str) -> str:
+    """An ID made from a title: "Zaktualizuj aplikację!" gives
+    zaktualizuj-aplikacje. Not unique; see app.admin.announce.free_id."""
+    text = unicodedata.normalize("NFKD", str(title).translate(ID_LETTERS))
+    text = "".join(character for character in text if not unicodedata.combining(character)).lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")[:ID_BASE_LENGTH].strip("-")
+    return text or "announcement"
+
+
 def check_language(value) -> str:
     if not isinstance(value, str) or not LANGUAGE_PATTERN.fullmatch(value.lower()):
         raise InvalidAnnouncement(f"{value!r} is not a language code such as en, pl, or pt-br")

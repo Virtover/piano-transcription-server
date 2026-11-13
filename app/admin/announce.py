@@ -42,6 +42,20 @@ def find(announcement_id: str) -> dict | None:
     return announcements.from_row(rows[0]) if rows else None
 
 
+def free_id(base: str) -> str:
+    """base, or base-2, base-3, ..., whichever no announcement has, ended
+    ones included, so a title can be used again."""
+    taken = {row["id"] for row in tasks.billing.read(
+        "SELECT id FROM announcements WHERE id = ? OR id LIKE ?", (base, base + "-%")
+    )}
+    number = 1
+    candidate = base
+    while candidate in taken:
+        number += 1
+        candidate = f"{base}-{number}"
+    return candidate
+
+
 def build(
     announcement_id: str,
     texts: dict,
@@ -231,6 +245,10 @@ def run_list(args) -> None:
 
 
 def run_add(args) -> None:
+    if args.id is None:
+        if args.replace:
+            raise AdminError("--replace needs the ID of the announcement to replace")
+        args.id = free_id(announcements.id_from_title(args.title))
     starts_in = parse_duration(args.start, "--start") if args.start else None
     lasts = parse_duration(args.for_, "--for")
     item = build(

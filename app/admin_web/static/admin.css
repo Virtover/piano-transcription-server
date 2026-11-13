@@ -150,6 +150,28 @@ kbd { font-family: var(--mono); font-size: 0.75rem; padding: 1px 6px; border: 1p
 .editor.full .editor-panes { flex: 1; min-height: 0; }
 .editor.full .editor-area.pw-input { height: 100%; resize: none; padding: 24px max(24px, calc((50vw - 36rem) / 2)); font-size: 0.95rem; }
 .editor.full .editor-preview { max-height: none; padding: 24px 32px; }
+/* The announcement list: a row each, the severity as its left edge. */
+.ann-list { display: grid; gap: 10px; }
+.ann-row { --sev: var(--info); display: grid; grid-template-columns: minmax(0, 1fr) auto; background: var(--card-bg); border: 1px solid var(--border-color); border-left: 3px solid var(--sev); border-radius: var(--radius); overflow: hidden; }
+.ann-row.sev-warning { --sev: var(--warning); }
+.ann-row.sev-critical { --sev: var(--danger); }
+.ann-main { display: grid; gap: 4px; min-width: 0; padding: 14px 18px; background: none; border: 0; color: inherit; text-align: left; cursor: pointer; }
+.ann-main.static { cursor: default; }
+.ann-main:hover { background: rgba(255, 255, 255, 0.02); }
+.ann-main:focus-visible { outline: 2px solid var(--accent-gold); outline-offset: -2px; }
+.ann-title { display: flex; align-items: baseline; gap: 10px; font-size: 0.98rem; overflow-wrap: anywhere; }
+.ann-excerpt { color: var(--text-secondary); font-size: 0.86rem; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.ann-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.ann-tag { font-family: var(--mono); font-size: 0.68rem; color: var(--muted); border: 1px solid var(--border-color); border-radius: 999px; padding: 1px 8px; }
+.ann-side { display: flex; align-items: center; gap: 8px; padding: 14px 18px 14px 0; flex-wrap: wrap; justify-content: flex-end; }
+.ann-details { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px; padding: 16px 18px 18px; border-top: 1px solid var(--border-color); }
+.ann-details[hidden] { display: none; }
+.ann-text { max-width: 60ch; }
+@media (max-width: 760px) {
+  .ann-row { grid-template-columns: minmax(0, 1fr); }
+  .ann-side { padding: 0 18px 14px; justify-content: flex-start; }
+  .ann-details { grid-template-columns: minmax(0, 1fr); }
+}
 /* The announcement form: severity, title, and text in sight; the rest folded. */
 .compose-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
 .compose-head .pw-hint { margin: 0; }
