@@ -12,6 +12,7 @@ Transkun wrote it.
 
 import bisect
 import logging
+import math
 import os
 import statistics
 import threading
@@ -44,6 +45,8 @@ NEIGHBORHOOD = 4
 MISSED_BEAT_TOLERANCE = 0.2
 # A beat this much closer than the local beat to the one before is spurious.
 EXTRA_BEAT_RATIO = 0.6
+# Beats this much closer than the local beat are one beat found twice.
+DOUBLE_BEAT_RATIO = 0.3
 # After repairs, this share of intervals must be within REGULAR_TOLERANCE of
 # the local beat. Rubato changes the beat gradually and passes; a fermata or
 # a free passage is one long interval, and a few of them are allowed.
@@ -87,16 +90,25 @@ def _local_beat(intervals: list[float], index: int) -> float:
 def _drop_extra_beats(beats: list[float], downbeats: set[float]) -> list[float]:
     kept = list(beats)
     index = 1
-    while index < len(kept) - 1:
+    while index < len(kept):
         # Only the intervals around the beat, as they are after any beat
         # dropped before it: the whole list each time is quadratic.
         first = max(0, index - 1 - NEIGHBORHOOD)
         nearby = kept[first:index + 1 + NEIGHBORHOOD]
         intervals = [end - start for start, end in zip(nearby, nearby[1:])]
         local = _local_beat(intervals, index - 1 - first)
+        interval = kept[index] - kept[index - 1]
+        # One beat found twice, wherever the next beat is: the downbeat of
+        # the two stays, else the first.
+        if interval < DOUBLE_BEAT_RATIO * local:
+            if kept[index] in downbeats and kept[index - 1] not in downbeats:
+                del kept[index - 1]
+            else:
+                del kept[index]
         # Between two beats that are one beat apart: a spurious beat.
-        if (
-            kept[index] - kept[index - 1] < EXTRA_BEAT_RATIO * local
+        elif (
+            index < len(kept) - 1
+            and interval < EXTRA_BEAT_RATIO * local
             and abs(kept[index + 1] - kept[index - 1] - local) < REGULAR_TOLERANCE * local
             and kept[index] not in downbeats
         ):
@@ -107,12 +119,17 @@ def _drop_extra_beats(beats: list[float], downbeats: set[float]) -> list[float]:
 
 
 def _fill_missed_beats(beats: list[float]) -> list[float]:
+    """Beats missed between two others, at the local beat. A pause, such as
+    a held chord or silence, becomes beats too: as rests in notation, and
+    no beat slower than MAX_BEAT_SECONDS."""
     intervals = [end - start for start, end in zip(beats, beats[1:])]
     filled = [beats[0]]
     for index, interval in enumerate(intervals):
         local = _local_beat(intervals, index)
         count = round(interval / local)
-        if count in (2, 3) and abs(interval / local - count) < MISSED_BEAT_TOLERANCE * count:
+        if interval > MAX_BEAT_SECONDS:
+            count = max(count, math.ceil(interval / MAX_BEAT_SECONDS))
+        if count >= 3 or (count == 2 and abs(interval / local - count) < MISSED_BEAT_TOLERANCE * count):
             step = interval / count
             filled.extend(beats[index] + step * part for part in range(1, count))
         filled.append(beats[index + 1])

@@ -180,6 +180,56 @@ def test_a_spurious_beat_is_dropped():
     assert 3_700_000 not in tempo_map.beats_us
 
 
+def test_a_pause_becomes_beats_at_the_local_tempo():
+    # A held chord or silence of 4.5 s at 120 BPM: once beyond 20 BPM, and
+    # every tempo map with one was discarded.
+    beats = [0.5 * index for index in range(20)] + [14 + 0.5 * index for index in range(20)]
+
+    tempo_map = build_tempo_map(beats, beats[::4])
+
+    assert tempo_map is not None
+    assert set(tempo_map.tempos) == {500_000}
+    assert tempo_map.meters == [(0, 4)]
+
+
+def test_a_long_pause_never_gives_a_beat_slower_than_20_bpm():
+    beats = [0.5 * index for index in range(20)] + [60 + 0.5 * index for index in range(20)]
+
+    tempo_map = build_tempo_map(beats, beats[::4])
+
+    assert tempo_map is not None
+    assert max(tempo_map.tempos) <= tempo.MAX_BEAT_SECONDS * 1_000_000
+
+
+@pytest.mark.parametrize("downbeat", [False, True])
+def test_a_beat_found_twice_is_one_beat(downbeat):
+    beats = [0.5 * index for index in range(40)]
+    downbeats = beats[::4]
+    # 80 ms after a beat, before a pause, so the beat after it is not one
+    # beat away: once 750 BPM, and no tempo map.
+    beats = beats[:21] + [10.08] + [14 + 0.5 * index for index in range(20)]
+    downbeats = [beat for beat in downbeats if beat <= 10] + [14 + 2 * index for index in range(10)]
+    if downbeat:
+        downbeats = [10.08 if beat == 10 else beat for beat in downbeats]
+
+    tempo_map = build_tempo_map(beats, downbeats)
+
+    assert tempo_map is not None
+    assert (10_080_000 in tempo_map.beats_us) == downbeat
+    assert (10_000_000 in tempo_map.beats_us) != downbeat
+    assert tempo_map.meters == [(0, 4)]
+
+
+def test_a_beat_found_twice_at_the_end_is_one_beat():
+    beats = [0.5 * index for index in range(20)]
+    beats.append(beats[-1] + 0.05)
+
+    tempo_map = build_tempo_map(beats, beats[::4])
+
+    assert tempo_map is not None
+    assert len(tempo_map.beats_us) == 20
+
+
 def test_too_few_or_irregular_beats_give_no_map():
     random.seed(1)
     assert build_tempo_map([0.5 * index for index in range(5)], [0.0]) is None
