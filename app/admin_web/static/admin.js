@@ -1593,25 +1593,30 @@ function composer(form = {}, replacing = false) {
     } })]);
 }
 
-let showEndedAnnouncements = false;
+let announcementTab = "current";
 
+// Current: live now or starting later. Ended: ended by hand or by time,
+// kept to show what users were told. One read gives both, for the counts.
 async function announcementsView() {
   const subtitle = "What the apps show, from GET /api/announcements";
   fill(main, head("Announcements", subtitle), skeleton());
   let items;
   try {
-    items = await api(`/api/announcements${query({ ended: showEndedAnnouncements ? "true" : "" })}`);
+    items = await api("/api/announcements?ended=true");
   } catch (error) {
     fill(main, head("Announcements", subtitle), errorBox(error));
     return;
   }
+  const ended = items.filter((item) => item.state === "ended");
+  const current = items.filter((item) => item.state !== "ended");
+  const shown = announcementTab === "ended" ? ended : current;
   fill(main,
     head("Announcements", canChange("announce.add") ? subtitle : "Read-only here; publish them on the server: python scripts/admin.py announce add"),
     el("div", { class: "toolbar" },
-      segmented([["", "Current"], ["ended", "With ended"]], showEndedAnnouncements ? "ended" : "", (value) => { showEndedAnnouncements = value === "ended"; announcementsView(); }),
+      segmented([["current", `Current ${current.length}`], ["ended", `Ended ${ended.length}`]], announcementTab, (value) => { announcementTab = value; announcementsView(); }),
       canChange("announce.add") ? qbtn("New announcement", "c-gold", () => composer()) : null),
-    items.length ? el("div", { class: "grid two" }, items.map(announcementCard))
-      : el("section", { class: "card" }, emptyState(showEndedAnnouncements ? "No announcements yet" : "Nothing is announced", "announce")));
+    shown.length ? el("div", { class: "grid two" }, shown.map(announcementCard))
+      : el("section", { class: "card" }, emptyState(announcementTab === "ended" ? "No announcement has ended yet" : "Nothing is announced", "announce")));
 }
 
 // --- Audit -----------------------------------------------------------------------------------------
