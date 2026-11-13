@@ -186,7 +186,11 @@ The form is kept as a draft in the browser while you write, and offered again th
 
 An announcement is checked when it is written and again whenever it is read: texts have length limits and cannot contain control or invisible characters, such as right-to-left overrides, that could hide or reorder what users read; links, in a body too, must be `https`, in ASCII (an international host in its `xn--` form, so that a look-alike host such as one with a Cyrillic letter shows as what it is), and a body has at most 10. At most 10 are shown at once, and 200 are kept in all, ended ones included.
 
-Announcements are rows of the `announcements` table in the billing database, each saved together with its audit entry, so they last through restarts, a power cut, and a loss of Redis data, and the billing backups include them. When the database cannot be reached, the API keeps answering with the announcements it read last.
+Announcements are rows of the `announcements` table in the billing database, each saved together with its audit entry, so they last through restarts, a power cut, and a loss of Redis data, and the billing backups include them. When the database cannot be reached, the API keeps answering with the announcements it read last. If it has read none since it started, it answers `503`, never an empty list, and tries again every 15 seconds without holding up other requests.
+
+* **Restoring a backup** of the billing database brings back the announcements as they were then: one added since is gone, and one ended since is shown again. Run `python scripts/admin.py announce` after a restore.
+* **A clock set back**, as after a power cut on a machine that did not sync its time, never hides an announcement as not started yet: the API takes the time as at least that of the latest change to an announcement, and logs that the clock is behind. A clock running ahead ends announcements early; keep the server's time synchronized.
+* A change from the admin web page that seems to fail after **Confirm**, for example because the connection dropped, may have been made: check the list before making it again.
 
 ## 📜 Audit log
 

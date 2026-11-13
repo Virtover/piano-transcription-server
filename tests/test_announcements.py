@@ -656,3 +656,113 @@ def test_replace_needs_an_id(api_context, capsys):
     code, output = admin(capsys, "announce", "add", "--title", "Hi", "--body", "News", "--replace", "--yes")
 
     assert code == 1 and "--replace needs the ID" in output
+
+
+# --- Links that could mislead ------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        r"https://good.com\evil.com/x",
+        "https://exa%6dple.com/",
+        "https://good.com./",
+        "https://1.2.3.4/",
+        "https://[::1]/",
+        "https://good_com.example/",
+        "https://localhost/",
+        "https://-bad.example.com/",
+    ],
+)
+def test_links_whose_host_could_mislead_are_refused(url):
+    with pytest.raises(announcements.InvalidAnnouncement):
+        announcements.check_url(url)
+
+
+@pytest.mark.parametrize("url", ["https://example.com", "https://sub.example.co.uk/a?b=c#d", "https://xn--80ak6aa92e.com/", "https://example.com:443/x"])
+def test_ordinary_links_are_accepted(url):
+    assert announcements.check_url(url) == url
+
+
+def test_bodies_are_parsed_once_per_read_not_per_request(api_context, monkeypatch):
+    client, _, billing = api_context
+    publish(billing, texts={"en": {"title": "Hi", "body": "**x**"}, "pl": {"title": "Cześć", "body": "*y*"}})
+    fetch(client)
+    calls = []
+    original = announcements.parse_markup
+    monkeypatch.setattr(announcements, "parse_markup", lambda text: calls.append(text) or original(text))
+
+    for language in ("en", "pl", "de"):
+        response = client.get("/api/announcements", params={"lang": language})
+        assert response.status_code == 200
+
+    assert calls == []
+
+
+def test_the_public_answer_has_nothing_about_administrators(api_context):
+    client, _, billing = api_context
+    publish(billing, actor="web:chris@example.com")
+
+    text = fetch(client).text
+
+    assert "chris" not in text and "created" not in text and "_parsed" not in text
+
+
+# --- Crashes and outages ------------------------------------------------------------------------
+
+def test_an_announcement_is_never_saved_without_its_audit_entry(api_context, monkeypatch):
+    """Both are one transaction: a crash or a failed audit write between
+    them leaves neither."""
+    from app import billing as billing_module
+
+    _, _, billing = api_context
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("power cut")
+
+    monkeypatch.setattr(billing_module, "_log_admin_action", crash)
+    with pytest.raises(RuntimeError):
+        publish(billing)
+    publish_failed_end = billing.end_announcement
+
+    assert billing.announcements(ended=True) == []
+    monkeypatch.undo()
+    publish(billing)
+    monkeypatch.setattr(billing_module, "_log_admin_action", crash)
+    with pytest.raises(RuntimeError):
+        publish_failed_end("play-takedown", "chris", None)
+    [row] = billing.announcements(ended=True)
+    assert row["ends_at"] is None
+
+
+def test_after_a_restart_with_the_database_still_down_the_api_recovers_by_itself(api_context, monkeypatch):
+    client, _, billing = api_context
+    publish(billing)
+    original = billing.announcements
+    down = [True]
+
+    def flaky(*args, **kwargs):
+        if down[0]:
+            raise ConnectionError("database starting")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(billing, "announcements", flaky)
+    assert fetch(client).status_code == 503
+    down[0] = False
+    monkeypatch.setattr(announcement_routes.cache, "_failed_at", -1e9)
+
+    response = client.get("/api/announcements")
+
+    assert response.status_code == 200 and len(response.json()["announcements"]) == 1
+
+
+def test_a_clock_set_back_by_a_power_cut_does_not_hide_announcements(api_context, monkeypatch, caplog):
+    client, _, billing = api_context
+    publish(billing, starts_at=int(time.time()) - 60)
+    assert len(fetch(client).json()["announcements"]) == 1
+
+    # The clock came back at the start of 2001.
+    monkeypatch.setattr(announcements.time, "time", lambda: 978307200.0)
+    response = client.get("/api/announcements")
+
+    assert len(response.json()["announcements"]) == 1
+    assert "clock is behind" in caplog.text

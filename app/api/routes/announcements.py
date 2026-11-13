@@ -87,4 +87,4 @@ async def list_announcements(
             detail="Announcements cannot be read at the moment",
             headers={"Retry-After": str(RETRY_SECONDS)},
         ) from None
-    return AnnouncementsResponse(announcements=announcements.visible(items, platform, app_version, lang))
+    return AnnouncementsResponse(announcements=announcements.visible(items, platform, app_version, lang, now=cache.now()))

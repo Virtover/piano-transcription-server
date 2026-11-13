@@ -286,6 +286,9 @@ def check_language(value) -> str:
     return value.lower()
 
 
+HOST_PATTERN = re.compile(r"(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
 def check_url(value) -> str:
     """An https link with a host and nothing that could mislead: no user
     name or password, spaces, or control characters."""
@@ -307,8 +310,14 @@ def check_url(value) -> str:
         raise InvalidAnnouncement(f"The link is not valid: {error}") from None
     if parts.scheme.lower() != "https":
         raise InvalidAnnouncement("The link must start with https://")
-    if not parts.hostname or "." not in parts.hostname:
-        raise InvalidAnnouncement("The link must name a host, such as example.com")
+    # A backslash is a slash to browsers but not to every app's URL parser,
+    # so the two could disagree about the host.
+    if "\\" in value:
+        raise InvalidAnnouncement("The link must not contain a backslash")
+    # A plain domain name: no IP address, percent-encoding, underscore, or
+    # trailing dot, each of which can hide where a link leads.
+    if not parts.hostname or not HOST_PATTERN.fullmatch(parts.hostname):
+        raise InvalidAnnouncement("The link must name a host such as example.com: no IP address or unusual characters")
     if parts.username is not None or parts.password is not None or "@" in parts.netloc:
         raise InvalidAnnouncement("The link must not contain a user name or password")
     if port is not None and port != 443:
@@ -431,7 +440,13 @@ def from_row(row, quiet: bool = False) -> dict | None:
         return None
     for field in ("created_at", "updated_at", "created_by"):
         announcement[field] = row.get(field)
+    # Parsed once here, when the list is read, not on every request.
+    announcement[PARSED] = {language: parse_markup(text["body"]) for language, text in announcement["texts"].items()}
     return announcement
+
+
+# Where from_row keeps each language's parsed body; not shown to anyone.
+PARSED = "_parsed"
 
 
 def is_active(announcement: dict, now: float) -> bool:
@@ -475,7 +490,8 @@ def pick_language(texts: dict, wanted: str | None) -> str:
 def for_app(announcement: dict, language: str | None) -> dict:
     chosen = pick_language(announcement["texts"], language)
     text = announcement["texts"][chosen]
-    blocks = parse_markup(text["body"])
+    parsed = announcement.get(PARSED) or {}
+    blocks = parsed[chosen] if chosen in parsed else parse_markup(text["body"])
     link = None
     if announcement["link_url"]:
         label = text["link_label"] or announcement["texts"][DEFAULT_LANGUAGE]["link_label"]
@@ -531,6 +547,10 @@ class Cache:
         self._lock = threading.Lock()
         self._items: list[dict] | None = None
         self._read_at = 0.0
+        # The newest time an announcement was written: the clock cannot
+        # really be earlier, so `now` never is; see now().
+        self._newest = 0
+        self._clock_warned = False
         self._failed_at: float | None = None
         self._error = ""
         # Invalid rows already logged, so each is logged once, not on every read.
@@ -578,10 +598,24 @@ class Cache:
                 else:
                     items.append(item)
             self._items = items
+            self._newest = max([self._newest] + [int(item.get("updated_at") or 0) for item in items])
             self._read_at = self._clock()
             return items
         finally:
             self._lock.release()
+
+    def now(self, wall: float | None = None) -> float:
+        """The time to choose announcements by. After a power cut, a server
+        whose clock did not sync can start years in the past, which would
+        hide every announcement as not started yet; the time an
+        announcement was last written is a floor for it."""
+        wall = time.time() if wall is None else wall
+        if wall >= self._newest:
+            return wall
+        if not self._clock_warned:
+            logger.error("the system clock is behind the newest announcement's change; is the clock synchronized?")
+            self._clock_warned = True
+        return float(self._newest)
 
     def clear(self) -> None:
         with self._lock:

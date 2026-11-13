@@ -33,13 +33,17 @@ def listing(ended: bool = False, now: float | None = None) -> list[dict]:
         if item is None:
             found.append({"id": row["id"], "state": "invalid", "starts_at": row["starts_at"], "ends_at": row["ends_at"]})
         else:
+            item.pop(announcements.PARSED, None)
             found.append({**item, "state": announcements.state(item, now)})
     return found
 
 
 def find(announcement_id: str) -> dict | None:
     rows = tasks.billing.read("SELECT * FROM announcements WHERE id = ?", (announcement_id,))
-    return announcements.from_row(rows[0]) if rows else None
+    item = announcements.from_row(rows[0]) if rows else None
+    if item is not None:
+        item.pop(announcements.PARSED, None)
+    return item
 
 
 def free_id(base: str) -> str:
