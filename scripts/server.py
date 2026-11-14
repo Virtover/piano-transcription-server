@@ -676,8 +676,8 @@ def serve_hub(stack: Stack) -> None:
     values = hub_values(stack)
     if not values.get("HUB_ADDRESS"):
         return
-    profiles = {profile.strip() for profile in values.get("COMPOSE_PROFILES", "").split(",")}
-    if "storage" in profiles:
+    # The hub's bucket for job files, with JOB_STORAGE=local.
+    if NODES.env_values(stack.root / SERVER_ENV).get("JOB_STORAGE", "local") == "local":
         result = stack.exec("api", "python", "-m", "app.cluster", "create-bucket")
         say((result.stdout or "").strip() or f"could not create the bucket: {STACKS.failure(result, 'no answer')}")
     if values.get("HUB_REGISTRY"):

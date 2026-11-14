@@ -122,59 +122,63 @@ class LocalJobStorage:
             yield from (path.name for path in folder.iterdir() if path.is_dir())
 
 
-def bucket_settings(config=None) -> dict[str, Any]:
-    """The bucket job files are kept in: JOB_STORAGE_BUCKET with its own keys
-    where set, such as a bucket on a cluster's hub, otherwise the STORAGE_
-    bucket that outsourcing uses. Each unset JOB_STORAGE_ value is the
-    STORAGE_ one."""
+# A home cluster's hub keeps job files in a bucket of its own, the storage
+# service of docker-compose.hub.yml, with JOB_STORAGE=local: its address is
+# wiring (CLUSTER_STORAGE_ENDPOINT), the bucket and region are fixed, and its
+# keys are generated (cluster_storage_access_key, cluster_storage_secret_key).
+HUB_BUCKET = "piano-jobs"
+HUB_REGION = "us-east-1"
+HUB_REFERENCE = "hub:"
+
+
+def uses_hub_bucket(config=None) -> bool:
+    """Whether job files go to the hub's bucket: JOB_STORAGE=local on a
+    home cluster's hub or node, whose wiring names the bucket."""
     config = config or settings
-    jobs, storage, secrets = config.jobs, config.storage, config.secrets
-    own_keys = secrets.job_storage_access_key is not None or secrets.job_storage_secret_key is not None
-    access = secrets.job_storage_access_key if own_keys else secrets.storage_access_key
-    secret = secrets.job_storage_secret_key if own_keys else secrets.storage_secret_key
-    return {
-        "endpoint": jobs.storage_endpoint or storage.endpoint,
-        "bucket": jobs.storage_bucket or storage.bucket,
-        "region": jobs.storage_region or storage.region,
-        "public_endpoint": jobs.storage_public_endpoint,
-        "access_key": access.get_secret_value() if access else None,
-        "secret_key": secret.get_secret_value() if secret else None,
-    }
+    return config.jobs.storage == "local" and bool(config.service.cluster_storage_endpoint)
 
 
-def bucket_configured(config=None) -> bool:
-    values = bucket_settings(config)
-    return all(values[name] for name in ("endpoint", "bucket", "access_key", "secret_key"))
-
-
-def bucket_client(config=None, endpoint: str | None = None) -> Any:
-    """A client for the job files' bucket; endpoint replaces its address, as
-    for signing links that browsers open elsewhere."""
-    from app.outsource.storage import client_for
-
-    values = bucket_settings(config)
-    return client_for(endpoint or values["endpoint"], values["region"], values["access_key"], values["secret_key"])
+def uses_bucket(config=None) -> bool:
+    """Whether job files are in a bucket, the cloud one or the hub's, rather
+    than in the data volume's folders."""
+    config = config or settings
+    return config.jobs.storage == "s3" or uses_hub_bucket(config)
 
 
 class S3JobStorage:
     """Kept files in the bucket under jobs/<job_id>/; the folder is scratch."""
 
-    def __init__(self, client: Any, bucket: str, link_client: Any = None):
+    def __init__(self, client: Any, bucket: str, reference: str = S3_REFERENCE, links: bool = True):
         self.client = client
         self.bucket = bucket
-        # Signs result links: the client itself, or one for the public address.
-        self.link_client = link_client or client
+        # How a result in this bucket is named in its job: s3:<key>, or hub:<key>.
+        self.reference = reference
+        # Whether signed links to it work for apps: not for the hub's bucket,
+        # which only the hub and its nodes reach.
+        self.links = links
 
     @classmethod
     def from_settings(cls, config=None) -> "S3JobStorage":
+        """The STORAGE_ bucket, which JOB_STORAGE=s3 uses."""
+        from app.outsource.storage import s3_client, storage_configured
+
         config = config or settings
-        if not bucket_configured(config):
-            raise StorageUnavailable(
-                "JOB_STORAGE=s3 needs a bucket: STORAGE_ or JOB_STORAGE_ endpoint and bucket, with their keys"
-            )
-        values = bucket_settings(config)
-        public = values["public_endpoint"]
-        return cls(bucket_client(config), values["bucket"], bucket_client(config, public) if public else None)
+        if not storage_configured(config):
+            raise StorageUnavailable("JOB_STORAGE=s3 needs the STORAGE_ bucket's settings and secrets")
+        return cls(s3_client(config), config.storage.bucket)
+
+    @classmethod
+    def hub(cls, config=None) -> "S3JobStorage":
+        """The hub's own bucket, which JOB_STORAGE=local uses in a home cluster."""
+        from app.outsource.storage import client_for
+
+        config = config or settings
+        access, secret = config.secrets.cluster_storage_access_key, config.secrets.cluster_storage_secret_key
+        if not (config.service.cluster_storage_endpoint and access and secret):
+            raise StorageUnavailable("The hub's bucket needs CLUSTER_STORAGE_ENDPOINT and its keys")
+        client = client_for(config.service.cluster_storage_endpoint, HUB_REGION, access.get_secret_value(),
+                            secret.get_secret_value())
+        return cls(client, HUB_BUCKET, HUB_REFERENCE, links=False)
 
     @staticmethod
     def key(job_id: str, name: str) -> str:
@@ -230,7 +234,7 @@ class S3JobStorage:
             )
         except Exception as error:
             raise StorageUnavailable(f"Could not store the MIDI result ({type(error).__name__})") from error
-        return f"{S3_REFERENCE}{key}"
+        return f"{self.reference}{key}"
 
     def discard_inputs(self, job_id: str, folder: Path) -> None:
         try:
@@ -284,7 +288,7 @@ class S3JobStorage:
         """A signed link to a result, downloaded as filename: one of the
         server's fixed names, never one a client chose."""
         try:
-            return self.link_client.generate_presigned_url(
+            return self.client.generate_presigned_url(
                 "get_object",
                 Params={
                     "Bucket": self.bucket,
@@ -321,33 +325,58 @@ class S3JobStorage:
 
 
 _storage: JobStorage | None = None
-_s3: S3JobStorage | None = None
+_buckets: dict[str, S3JobStorage] = {}
 
 
 def s3() -> S3JobStorage:
-    """The bucket, for results stored there, whatever JOB_STORAGE is now."""
-    global _s3
-    if _s3 is None:
-        _s3 = S3JobStorage.from_settings()
-    return _s3
+    """The STORAGE_ bucket, for results stored there, whatever JOB_STORAGE is now."""
+    if S3_REFERENCE not in _buckets:
+        _buckets[S3_REFERENCE] = S3JobStorage.from_settings()
+    return _buckets[S3_REFERENCE]
+
+
+def hub() -> S3JobStorage:
+    """The hub's bucket, for results stored there."""
+    if HUB_REFERENCE not in _buckets:
+        _buckets[HUB_REFERENCE] = S3JobStorage.hub()
+    return _buckets[HUB_REFERENCE]
+
+
+def bucket() -> S3JobStorage:
+    """The bucket job files go to now; StorageUnavailable without one."""
+    return hub() if uses_hub_bucket() else s3()
 
 
 def storage() -> JobStorage:
     global _storage
     if _storage is None:
-        _storage = s3() if settings.jobs.storage == "s3" else LocalJobStorage()
+        _storage = bucket() if uses_bucket() else LocalJobStorage()
     return _storage
 
 
 def reset() -> None:
     """Forget the chosen storage, as when settings change in tests."""
-    global _storage, _s3
+    global _storage
     _storage = None
-    _s3 = None
+    _buckets.clear()
+
+
+def stored_result(reference: str) -> tuple[S3JobStorage, str] | None:
+    """The bucket and key of a result stored in a bucket, by its job's
+    reference, or None for a result in a folder. The reference says which
+    bucket, so results stay downloadable after JOB_STORAGE changes."""
+    for prefix, open_bucket in ((S3_REFERENCE, s3), (HUB_REFERENCE, hub)):
+        if reference.startswith(prefix):
+            return open_bucket(), reference[len(prefix):]
+    return None
 
 
 def s3_key(reference: str) -> str | None:
-    return reference[len(S3_REFERENCE):] if reference.startswith(S3_REFERENCE) else None
+    """The key of a result in a bucket, whichever, or None."""
+    for prefix in (S3_REFERENCE, HUB_REFERENCE):
+        if reference.startswith(prefix):
+            return reference[len(prefix):]
+    return None
 
 
 def delete_job_files(job_id: str) -> None:

@@ -389,10 +389,9 @@ def test_status_says_what_a_home_cluster_needs(server):
 
     setup.status()
 
+    # A home cluster needs no bucket: the hub keeps job files in its own.
     job_storage = next(line for line in script.said if "job_storage" in line and "Job files" in line)
-    assert "required *" in job_storage
-    assert "Different in a home cluster than here, and why:" in script.text
-    assert "nodes share no folder with the hub" in script.text
+    assert "optional" in job_storage
     provider = next(line for line in script.said if "provider_backups" in line and "provider" in line.lower())
     assert "not used" in provider
 
@@ -537,7 +536,6 @@ def test_the_cluster_lists_what_a_hub_needs_and_how(server, monkeypatch):
 
     assert "Install Tailscale" in script.text
     assert "this machine is the hub" in script.text
-    assert "job files in a bucket" in script.text
     assert "python scripts/admin.py nodes invite <name>" in script.text
 
 
@@ -550,13 +548,13 @@ def test_the_cluster_offers_to_make_this_machine_the_hub(server, monkeypatch):
         ran.append(command)
         return run(command)
 
-    setup, script = make(server, answers=["y", "y"])
+    setup, script = make(server, answers=["y"])
     setup.run = runner
 
     assert setup.cluster() == 0
 
-    [hub] = [command for command in ran if command[-4:-1] == ["nodes", "hub", "100.101.102.103"] or command[-3:-1] == ["hub", "100.101.102.103"]]
-    assert hub[-1] == "--storage"
+    [hub] = [command for command in ran if "nodes" in command]
+    assert hub[-3:] == ["nodes", "hub", "100.101.102.103"]
     assert "Tailscale, signed in: 100.101.102.103" in script.text
 
 

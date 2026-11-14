@@ -32,7 +32,7 @@ A basic server needs no setting: `python scripts/server.py start` runs it with e
 | Backups by the database's provider | `DATABASE_BACKUPS=provider` | a managed PostgreSQL | | [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql) |
 | Off-site backups | `OFFSITE_BACKUP_BUCKET` | the server's own backups: not with `DATABASE_BACKUPS=provider` | `offsite_backup_access_key`, `offsite_backup_secret_key` | [Off-site copies](#off-site-copies) |
 | Object storage | `STORAGE_BUCKET` | | `storage_access_key`, `storage_secret_key` | [Object storage](#object-storage) |
-| Job files in object storage | `JOB_STORAGE=s3` | object storage, for this server alone | optionally `job_storage_access_key`, `job_storage_secret_key`, for a bucket of their own | [Job storage](architecture.md#job-storage) |
+| Job files in object storage | `JOB_STORAGE=s3` | object storage, for this server alone | | [Job storage](architecture.md#job-storage) |
 | Outsourcing to RunPod | `OUTSOURCE_PROVIDER=runpod` | object storage | `runpod_api_key`, optionally `runpod_read_api_key` | [Outsourcing to RunPod](runpod.md) |
 | Piano arrangements | `WORKER_ARRANGEMENT=true`, the default; `false` turns them off | | | [Piano arrangements](architecture.md#-piano-arrangements) |
 | Error reports | `ERROR_REPORT_URL` | | `error_report_token` | [Error reports](#error-reports) |
@@ -206,12 +206,8 @@ Where each job's files are kept: the uploaded file, the video information the AP
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `JOB_STORAGE` | `local` | `local` keeps them in the `data` volume, which the services of one machine share. `s3` keeps them in the [object storage](#object-storage) bucket under `jobs/<job_id>/`, so API replicas and workers on several machines can share them; the `data` volume then holds only each attempt's scratch files, under `work/`. With `s3`, `GET /api/transcriptions/<job_id>/midi` answers `307` with a signed link to the file, valid for 5 minutes, instead of the file itself. See [Job storage](architecture.md#job-storage). |
+| `JOB_STORAGE` | `local` | `local` keeps them in the `data` volume, which the services of one machine share; on a [home cluster's](cluster.md) hub, in its own bucket, which its nodes reach. `s3` keeps them in the [object storage](#object-storage) bucket under `jobs/<job_id>/`, so API replicas and workers on several machines can share them; the `data` volume then holds only each attempt's scratch files, under `work/`. With `s3`, `GET /api/transcriptions/<job_id>/midi` answers `307` with a signed link to the file, valid for 5 minutes, instead of the file itself. See [Job storage](architecture.md#job-storage). |
 
-| `JOB_STORAGE_BUCKET` | unset | A bucket for job files of their own, while outsourcing keeps the `STORAGE_` bucket: as one on a [home cluster's hub](cluster.md), beside RunPod's in the cloud. Unset, job files are in `STORAGE_BUCKET`. Another bucket than that one needs its own keys, the secret files `job_storage_access_key` and `job_storage_secret_key`. |
-| `JOB_STORAGE_ENDPOINT` | unset | That bucket's S3 endpoint, such as `http://100.101.102.103:8333` on a hub's tailnet address. Unset: `STORAGE_ENDPOINT`. |
-| `JOB_STORAGE_REGION` | unset | That bucket's region. Unset: `STORAGE_REGION`. |
-| `JOB_STORAGE_PUBLIC_ENDPOINT` | unset | With `RESULT_DOWNLOAD=link`, the `https://` address signed result links name, when browsers reach the bucket elsewhere than the services do, as through a tunnel. Unset: the endpoint the services use. |
 | `JOB_MAX_ATTEMPTS` | `3` | Attempts at a job whose worker stopped mid-job, as a crash, a restart past its grace, or a device of a [home cluster](cluster.md) that lost power or its network. Until the last, the job is queued again, keeping its reservation; then it fails and is refunded. An upload whose file is gone fails at once. `1` fails at the first interruption, as before. A file that crashes the worker is tried this many times at most. |
 
 Changing `JOB_STORAGE` keeps finished results downloadable: each job remembers where its result is. Queued jobs whose files are where the old setting put them fail; change it when no job is queued, for example during a planned restart.
@@ -311,6 +307,7 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 | `REDIS_URL` | `redis://localhost:6379/0` | `redis://app@redis:6379/0` | Redis connection URL, with the Redis user the services sign in as. |
 | `REDIS_PASSWORD_FILE` | empty | `/run/redis/password` | The file with that user's password, from `secrets/redis/app`. Empty for a Redis without users, such as one for local development. See [Redis users](architecture.md#-redis-users). |
 | `DEPLOYMENT` | `local` | `compose` | Where the services run: `local` outside containers, `compose`, `node` (a device of a [home cluster](cluster.md), set in `docker-compose.node.yml`), or `kubernetes` (set in `deploy/kubernetes/base/wiring.yaml`). Checks of one deployment apply only to it: Compose's profiles and the bind address only with Compose, and on Kubernetes the features it needs, and the tunnel, as `CLOUDFLARE_TUNNEL_DEPLOYED` says. A `node` never reaches the billing database: the hub settles its jobs. |
+| `CLUSTER_STORAGE_ENDPOINT` | empty | unset; `http://storage:8333` on a [home cluster's](cluster.md) hub | The hub's own bucket, where `JOB_STORAGE=local` keeps job files on the hub and its nodes: set by `docker-compose.hub.yml`, and on a node by `docker-compose.node.yml` to the hub's address. Empty, `local` is the data volume's folders. |
 | `CLOUDFLARE_TUNNEL_DEPLOYED` | unset | unset | Whether the deployment itself runs `cloudflared`: `true` in `deploy/kubernetes/base/wiring.yaml`, `false` on the test cluster that `scripts/kube.py local up` starts. Unset, as with Compose, `COMPOSE_PROFILES` says. |
 | `REDIS_CA_FILE` | empty | unset | For a `rediss://` `REDIS_URL` whose certificate is signed by the provider's own CA: that CA's certificate file. Empty trusts the public CAs. See [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). |
 | `DATA_DIR` | `/data` | `/data` | Shared directory for job files; with `JOB_STORAGE=s3`, for scratch files only. |
@@ -349,9 +346,9 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `runpod_read_api_key` | Optional. A RunPod key with read-only access to the account. Restricted keys cannot read endpoint settings, so `OUTSOURCE_MAX_CONCURRENCY=auto` and the endpoint settings check of `check --online` use this one. Without it, `auto` allows 4 remote jobs. |
 | `storage_access_key` | Access key ID of the storage token. |
 | `storage_secret_key` | Secret access key of the storage token. |
-| `job_storage_access_key`, `job_storage_secret_key` | Optional. The keys of the job files' own bucket, `JOB_STORAGE_BUCKET`, such as one on a [home cluster's hub](cluster.md), which `python scripts/admin.py nodes hub --storage` creates. Both or neither. |
+| `cluster_storage_access_key`, `cluster_storage_secret_key` | A [home cluster's](cluster.md) hub bucket: on the hub its own keys, which `python scripts/admin.py nodes hub` creates; on a node, in `secrets/node`, the node's own, from its invite. |
 | `redis/nodes/<name>` | The Redis password of each node of a [home cluster](cluster.md), which `python scripts/admin.py nodes invite` creates and `revoke` removes. Only the `redis` service sees them. |
-| `storage/s3.json` | The keys of the hub's own bucket: the hub's, and one pair per node, which `nodes invite` and `revoke` write. Only the `storage` service reads it. |
+| `storage/s3.json` | The users of the hub's bucket: the hub, and one per node, which `nodes hub`, `nodes invite`, and `revoke` write. Only the `storage` service reads it. |
 | `node/` | On a node only: what its invite gave it, its Redis password (`redis_password`) and the keys its tasks need. `python scripts/server.py join` writes it; the node's worker sees nothing else. |
 | `offsite_backup_access_key` | Optional. Access key ID for the off-site backup bucket. See [Off-site copies](#off-site-copies). |
 | `offsite_backup_secret_key` | Optional. Secret access key for the off-site backup bucket. |

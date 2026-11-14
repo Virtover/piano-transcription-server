@@ -44,10 +44,10 @@ def write(path: Path, text: str):
     return path
 
 
-def hub(root, storage=False, registry=None, server_env=""):
+def hub(root, registry=None, server_env=""):
     write(root / ".env", "")
     write(root / "server.env", server_env)
-    return nodes.setup_hub(root, server, ADDRESS, storage, registry)
+    return nodes.setup_hub(root, server, ADDRESS, registry)
 
 
 def s3(root):
@@ -70,50 +70,42 @@ def test_setup_hub_writes_the_compose_settings(tmp_path):
     assert values["HUB_ADDRESS"] == ADDRESS
     assert values["COMPOSE_FILE"] == "docker-compose.yml:docker-compose.hub.yml"
     assert values["COMPOSE_PATH_SEPARATOR"] == ":"
+    assert "storage" not in values.get("COMPOSE_PROFILES", "").split(",")
 
 
 def test_setup_hub_rejects_an_address_that_is_not_an_ip(tmp_path):
     with pytest.raises(ClusterError):
-        nodes.setup_hub(tmp_path, server, "hub.example.com", False, None)
+        nodes.setup_hub(tmp_path, server, "hub.example.com", None)
 
 
-def test_setup_hub_with_storage_creates_the_bucket_and_its_keys(tmp_path):
-    hub(tmp_path, storage=True)
-    values = nodes.env_values(tmp_path / "server.env")
-    assert values["STORAGE_ENDPOINT"] == f"http://{ADDRESS}:8333"
-    assert values["STORAGE_BUCKET"] == "piano-jobs"
-    assert values["JOB_STORAGE"] == "s3"
-    assert values["RESULT_DOWNLOAD"] == "api"
-    access = (tmp_path / "secrets/storage_access_key").read_text()
-    secret = (tmp_path / "secrets/storage_secret_key").read_text()
+def test_setup_hub_always_creates_the_hub_keys_and_identity(tmp_path):
+    hub(tmp_path)
+    access = (tmp_path / "secrets/cluster_storage_access_key").read_text()
+    secret = (tmp_path / "secrets/cluster_storage_secret_key").read_text()
+    assert access and secret
     entry = identity(tmp_path, "hub")
     assert entry["credentials"] == [{"accessKey": access, "secretKey": secret}]
     assert "Admin" in entry["actions"]
-    assert "storage" in nodes.env_values(tmp_path / ".env")["COMPOSE_PROFILES"]
 
 
-def test_setup_hub_keeps_an_existing_storage_bucket_and_uses_job_storage(tmp_path):
-    hub(tmp_path, storage=True, server_env="STORAGE_BUCKET=runpod\nSTORAGE_ENDPOINT=https://s3.example.com\n")
+def test_setup_hub_does_not_touch_server_env(tmp_path):
+    text = "STORAGE_BUCKET=runpod\nSTORAGE_ENDPOINT=https://s3.example.com\n"
+    hub(tmp_path, server_env=text)
+    assert (tmp_path / "server.env").read_text() == text
     values = nodes.env_values(tmp_path / "server.env")
-    assert values["STORAGE_BUCKET"] == "runpod"
-    assert values["STORAGE_ENDPOINT"] == "https://s3.example.com"
-    assert values["JOB_STORAGE_BUCKET"] == "piano-jobs"
-    assert values["JOB_STORAGE_ENDPOINT"] == f"http://{ADDRESS}:8333"
-    assert (tmp_path / "secrets/job_storage_access_key").is_file()
-    assert (tmp_path / "secrets/job_storage_secret_key").is_file()
+    for name in ("JOB_STORAGE", "RESULT_DOWNLOAD", "JOB_STORAGE_BUCKET", "JOB_STORAGE_ENDPOINT"):
+        assert name not in values
+    assert not (tmp_path / "secrets/job_storage_access_key").exists()
     assert not (tmp_path / "secrets/storage_access_key").exists()
 
 
-def test_setup_hub_twice_keeps_one_hub_identity(tmp_path):
-    hub(tmp_path, storage=True)
-    nodes.setup_hub(tmp_path, server, ADDRESS, True, None)
+def test_setup_hub_twice_keeps_the_same_keys_and_one_hub_identity(tmp_path):
+    hub(tmp_path)
+    first = [(tmp_path / f"secrets/{name}").read_text() for name in nodes.HUB_KEYS]
+    nodes.setup_hub(tmp_path, server, ADDRESS, None)
+    assert [(tmp_path / f"secrets/{name}").read_text() for name in nodes.HUB_KEYS] == first
     assert [item["name"] for item in s3(tmp_path)["identities"]].count("hub") == 1
-
-
-def test_setup_hub_twice_does_not_switch_to_job_storage_settings(tmp_path):
-    hub(tmp_path, storage=True)
-    nodes.setup_hub(tmp_path, server, ADDRESS, True, None)
-    assert "JOB_STORAGE_BUCKET" not in nodes.env_values(tmp_path / "server.env")
+    assert identity(tmp_path, "hub")["credentials"][0]["accessKey"] == first[0]
 
 
 def test_setup_hub_registry(tmp_path):
@@ -136,6 +128,18 @@ def test_invite_needs_a_hub(tmp_path):
         nodes.invite(tmp_path, "laptop", ["transcribe"])
 
 
+def test_invite_is_refused_before_setup_hub(tmp_path):
+    write(tmp_path / ".env", f"HUB_ADDRESS={ADDRESS}\n")
+    write(tmp_path / "server.env", "")
+    with pytest.raises(ClusterError, match="not a hub"):
+        nodes.invite(tmp_path, "laptop", ["transcribe"])
+    write(tmp_path / ".env", "")
+    write(tmp_path / "secrets/storage/s3.json", '{"identities": []}')
+    with pytest.raises(ClusterError, match="not a hub"):
+        nodes.invite(tmp_path, "laptop", ["transcribe"])
+    assert not (tmp_path / "secrets/redis/nodes/laptop").exists()
+
+
 @pytest.mark.parametrize("name", ["hub", "Bad Name", "-x", "", "a" * 40, "a_b"])
 def test_invite_refuses_an_invalid_name(tmp_path, name):
     hub(tmp_path)
@@ -155,7 +159,7 @@ def test_invite_writes_the_password_and_the_invite_file(tmp_path):
     assert invitation["hub_address"] == ADDRESS
     assert invitation["tasks"] == ["transcribe", "arrange"]
     assert invitation["secrets"]["redis_password"] == password
-    assert todo == {"storage_changed": False, "shared_keys": []}
+    assert todo == {"storage_changed": True, "shared_keys": []}
 
 
 def test_inviting_again_needs_again_and_changes_the_password(tmp_path):
@@ -168,42 +172,36 @@ def test_inviting_again_needs_again_and_changes_the_password(tmp_path):
     assert (tmp_path / "secrets/redis/nodes/laptop").read_text() != first
 
 
-def test_invite_with_home_storage_gives_the_node_its_own_limited_keys(tmp_path):
-    hub(tmp_path, storage=True)
-    hub_access = (tmp_path / "secrets/storage_access_key").read_text()
-    hub_secret = (tmp_path / "secrets/storage_secret_key").read_text()
+def test_invite_gives_the_node_its_own_limited_keys_to_the_hubs_bucket(tmp_path):
+    hub(tmp_path)
+    hub_access = (tmp_path / "secrets/cluster_storage_access_key").read_text()
+    hub_secret = (tmp_path / "secrets/cluster_storage_secret_key").read_text()
     path, todo = nodes.invite(tmp_path, "laptop", ["transcribe"])
     entry = identity(tmp_path, "node-laptop")
     assert entry is not None and "Admin" not in entry["actions"]
     assert all(action.endswith(":piano-jobs") for action in entry["actions"])
     secrets = invite_json(tmp_path)["secrets"]
-    assert secrets["storage_access_key"] == entry["credentials"][0]["accessKey"]
-    assert secrets["storage_secret_key"] == entry["credentials"][0]["secretKey"]
+    assert secrets["cluster_storage_access_key"] == entry["credentials"][0]["accessKey"]
+    assert secrets["cluster_storage_secret_key"] == entry["credentials"][0]["secretKey"]
     assert hub_access not in path.read_text() and hub_secret not in path.read_text()
     assert todo == {"storage_changed": True, "shared_keys": []}
 
 
-def test_invite_with_home_storage_beside_a_runpod_bucket_uses_job_storage_names(tmp_path):
-    hub(tmp_path, storage=True, server_env="STORAGE_BUCKET=runpod\n")
-    write(tmp_path / "secrets/storage_access_key", "runpod-access")
-    write(tmp_path / "secrets/storage_secret_key", "runpod-secret")
-    nodes.invite(tmp_path, "laptop", ["transcribe"])
+@pytest.mark.parametrize("server_env, tasks, shared", [
+    ("", ["transcribe"], False),
+    ("JOB_STORAGE=s3\n", ["transcribe"], True),
+    ("", ["transcribe", "dispatch"], True),
+])
+def test_the_cloud_buckets_keys_go_only_where_they_are_needed(tmp_path, server_env, tasks, shared):
+    hub(tmp_path, server_env=server_env)
+    write(tmp_path / "secrets/storage_access_key", "cloud-access")
+    write(tmp_path / "secrets/storage_secret_key", "cloud-secret")
+    _, todo = nodes.invite(tmp_path, "laptop", tasks)
     secrets = invite_json(tmp_path)["secrets"]
-    assert "job_storage_access_key" in secrets and "storage_access_key" not in secrets
-    assert "runpod-secret" not in json.dumps(secrets)
-
-
-def test_invite_without_home_storage_copies_the_bucket_keys_and_reports_them(tmp_path):
-    hub(tmp_path)
-    for name in ("storage_access_key", "storage_secret_key", "job_storage_access_key", "job_storage_secret_key"):
-        write(tmp_path / "secrets" / name, f"value-{name}")
-    _, todo = nodes.invite(tmp_path, "laptop", ["transcribe"])
-    secrets = invite_json(tmp_path)["secrets"]
-    for name in ("storage_access_key", "storage_secret_key", "job_storage_access_key", "job_storage_secret_key"):
-        assert secrets[name] == f"value-{name}"
-    assert todo["shared_keys"] == sorted(["storage_access_key", "storage_secret_key", "job_storage_access_key",
-                                          "job_storage_secret_key"])
-    assert todo["storage_changed"] is False
+    assert ("storage_secret_key" in secrets) is shared
+    assert todo["shared_keys"] == (["storage_access_key", "storage_secret_key"] if shared else [])
+    # The hub's bucket keys are the node's own either way.
+    assert secrets["cluster_storage_access_key"] != "cloud-access"
 
 
 def test_invite_includes_the_runpod_key_only_for_dispatch(tmp_path):
@@ -226,11 +224,12 @@ def test_invite_never_holds_the_hubs_other_secrets(tmp_path):
     text = path.read_text()
     for value in ("gp-secret", "pg-secret", "tunnel-secret", "operator-secret"):
         assert value not in text
-    assert set(invite_json(tmp_path)["secrets"]) <= {"redis_password", "runpod_api_key", "error_report_token"}
+    assert set(invite_json(tmp_path)["secrets"]) <= {"redis_password", "runpod_api_key", "error_report_token",
+                                                     "cluster_storage_access_key", "cluster_storage_secret_key"}
 
 
 def test_revoke_removes_the_files_and_the_node_identity_only(tmp_path):
-    hub(tmp_path, storage=True)
+    hub(tmp_path)
     nodes.invite(tmp_path, "laptop", ["transcribe"])
     nodes.invite(tmp_path, "desktop", ["transcribe"])
     result = nodes.revoke(tmp_path, "laptop")
@@ -239,7 +238,7 @@ def test_revoke_removes_the_files_and_the_node_identity_only(tmp_path):
     assert identity(tmp_path, "node-laptop") is None
     assert identity(tmp_path, "node-desktop") and identity(tmp_path, "hub")
     assert (tmp_path / "secrets/redis/nodes/desktop").exists()
-    assert result["storage_changed"] is True and result["home_storage"] is True
+    assert result["storage_changed"] is True and result["cloud_keys"] is False
     assert sorted(result["removed"]) == sorted([str(Path("secrets/redis/nodes/laptop")),
                                                 str(Path("secrets/invites/laptop.json"))])
 
@@ -860,7 +859,7 @@ class AdminStack(admin.STACKS.ComposeStack):
 def admin_hub(root, *arguments):
     write(root / ".env", "")
     write(root / "server.env", "")
-    admin.NODES.setup_hub(root, server, ADDRESS, "--storage" in arguments, None)
+    admin.NODES.setup_hub(root, server, ADDRESS, None)
 
 
 def test_admin_invite_reloads_redis_and_registers_the_node(tmp_path):
@@ -873,11 +872,12 @@ def test_admin_invite_reloads_redis_and_registers_the_node(tmp_path):
     assert command[3:] == ("nodes", "register", "laptop", "transcribe", "--reason", "invited")
     assert env["ADMIN_COMMAND"] == "python scripts/admin.py"
     assert (tmp_path / "secrets/invites/laptop.json").is_file()
-    assert stack.restarted == []
+    # The node's keys to the hub's bucket: the bucket reads them again.
+    assert stack.restarted == [["storage"]]
 
 
-def test_admin_invite_with_home_storage_restarts_the_bucket(tmp_path):
-    admin_hub(tmp_path, "--storage")
+def test_admin_invite_restarts_the_bucket_for_the_nodes_keys(tmp_path):
+    admin_hub(tmp_path)
     stack = AdminStack(tmp_path)
     assert admin.main(["nodes", "invite", "laptop"], stack) == 0
     assert stack.restarted == [["storage"]]
@@ -954,3 +954,19 @@ def test_admin_other_nodes_commands_run_in_the_container(tmp_path, monkeypatch):
     stack = AdminStack(tmp_path)
     assert admin.main(["nodes", "list"], stack) == 0
     assert stack.api[0][1] == ("python", "-m", "app.admin", "nodes", "list")
+
+
+@pytest.mark.parametrize("server_env, cloud", [("", False), ("JOB_STORAGE=s3\n", True), ("OUTSOURCE_PROVIDER=runpod\n", True)])
+def test_revoke_says_when_nodes_had_the_cloud_buckets_keys(tmp_path, server_env, cloud):
+    hub(tmp_path, server_env=server_env)
+    nodes.invite(tmp_path, "laptop", ["transcribe"])
+
+    assert nodes.revoke(tmp_path, "laptop")["cloud_keys"] is cloud
+
+
+def test_an_invite_with_the_old_job_storage_names_is_refused(tmp_path):
+    invitation = {"format": 1, "node": "laptop", "hub_address": ADDRESS, "tasks": ["transcribe"],
+                  "secrets": {"redis_password": "x", "job_storage_access_key": "y"}}
+    path = write(tmp_path / "laptop.json", json.dumps(invitation))
+    with pytest.raises(ClusterError, match="job_storage_access_key"):
+        nodes.read_invite(path)

@@ -668,13 +668,13 @@ def check_admin_web(config, http=requests) -> list[Result]:
 
 
 def check_job_storage(config, storage_factory: Callable | None = None) -> Result:
-    """With JOB_STORAGE=s3: what job storage needs beyond what check_storage
-    tests. Listing finds expired jobs, and metadata keeps when a video was
-    checked."""
-    from app.job_storage import PREFIX, S3JobStorage
+    """With job files in a bucket, the STORAGE_ one or a home cluster hub's:
+    what job storage needs beyond what check_storage tests. Listing finds
+    expired jobs, and metadata keeps when a video was checked."""
+    from app.job_storage import PREFIX, S3JobStorage, uses_hub_bucket
 
     try:
-        storage = (storage_factory or S3JobStorage.from_settings)(config)
+        storage = (storage_factory or (S3JobStorage.hub if uses_hub_bucket(config) else S3JobStorage.from_settings))(config)
     except Exception as error:
         return Result("Job storage", "fail", str(error))
     job_id = f"online-check-{uuid.uuid4().hex}"
@@ -712,7 +712,9 @@ def run_checks(config) -> list[Result]:
         results.extend(check_admin_web(config))
     if config.outsource.provider == "runpod" or config.jobs.storage == "s3":
         results.append(check_storage(config))
-    if config.jobs.storage == "s3":
+    from app.job_storage import uses_bucket
+
+    if uses_bucket(config):
         results.append(check_job_storage(config))
     if config.outsource.provider == "runpod":
         results.extend(check_runpod(config))

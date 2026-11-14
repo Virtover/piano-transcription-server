@@ -148,23 +148,6 @@ def _admin_web_off_problems(config: Settings, role: str) -> list[str]:
     return app_config.admin_web_problems(config, check_profile=True)
 
 
-def _job_storage_problems(config: Settings, role: str) -> list[str]:
-    """Beyond the object storage it needs: a bucket of the job files' own
-    (JOB_STORAGE_BUCKET, as one on a cluster's hub beside RunPod's) needs
-    its own keys. Each JOB_STORAGE_ value left out is STORAGE_'s."""
-    jobs, secrets = config.jobs, config.secrets
-    problems = []
-    own = (secrets.job_storage_access_key is not None, secrets.job_storage_secret_key is not None)
-    if any(own) and not all(own):
-        problems.append("The secret files job_storage_access_key and job_storage_secret_key go together: add the other")
-    if jobs.storage_bucket and not any(own) and jobs.storage_bucket != config.storage.bucket:
-        problems.append(
-            "JOB_STORAGE_BUCKET is another bucket than STORAGE_BUCKET: give it its own keys in "
-            "job_storage_access_key and job_storage_secret_key"
-        )
-    return problems
-
-
 def _admin_switch(config: Settings) -> str:
     return f"ADMIN_WEB_MODE={config.admin_web.mode}"
 
@@ -294,7 +277,7 @@ FEATURES: tuple[Feature, ...] = (
     Feature(
         key="object_storage",
         kubernetes=('needed', 'job files in object storage need it'),
-        cluster=('needed', 'job files in a bucket need it; nodes hub --storage gives one on the hub'),
+        cluster=('optional', "with JOB_STORAGE=local, job files are in the hub's own bucket"),
         title="Object storage",
         summary="An S3-compatible bucket, which outsourcing and JOB_STORAGE=s3 use.",
         switch="STORAGE_BUCKET",
@@ -312,7 +295,7 @@ FEATURES: tuple[Feature, ...] = (
     Feature(
         key="job_storage",
         kubernetes=('needed', 'set by deploy/kubernetes/base/wiring.yaml: several machines share no folder'),
-        cluster=('needed', 'nodes share no folder with the hub'),
+        cluster=('optional', "JOB_STORAGE=local keeps job files in the hub's own bucket, which nodes reach"),
         title="Job files in object storage",
         summary="Uploads and results in the bucket, for API replicas and workers on several machines.",
         switch="JOB_STORAGE=s3",
@@ -320,14 +303,8 @@ FEATURES: tuple[Feature, ...] = (
         docs="docs/architecture.md#job-storage",
         turn_on={"JOB_STORAGE": "s3"},
         turn_off={"JOB_STORAGE": "local"},
-        settings=("JOB_STORAGE_BUCKET", "JOB_STORAGE_ENDPOINT", "JOB_STORAGE_REGION", "JOB_STORAGE_PUBLIC_ENDPOINT",
-                  "RESULT_DOWNLOAD"),
-        secrets=(
-            Secret("job_storage_access_key", "Access key ID of the job files' own bucket", optional=True),
-            Secret("job_storage_secret_key", "Secret access key of the job files' own bucket", optional=True),
-        ),
+        settings=("RESULT_DOWNLOAD",),
         needs=("object_storage",),
-        problems=_job_storage_problems,
         roles=("api", "worker", "remote", "all"),
         requirement_sections=("Storage",),
     ),

@@ -659,10 +659,11 @@ def get_midi(
         if key != job_storage.S3JobStorage.key(job_id, job_storage.RESULT_FILE_NAME):
             raise HTTPException(status_code=500, detail="Invalid result path")
         try:
-            bucket = job_storage.s3()
-            if settings.limits.result_download == "api":
-                # The API sends the file, as with job files on one machine:
-                # the bucket need not be reachable from the internet.
+            bucket, key = job_storage.stored_result(path)
+            # The API sends the file, as with job files on one machine: from
+            # the hub's bucket, which only the hub and its nodes reach, and
+            # with RESULT_DOWNLOAD=api.
+            if not bucket.links or settings.limits.result_download == "api":
                 body = bucket.read_result(key)
                 if body is None:
                     raise HTTPException(status_code=404, detail="MIDI result is no longer available")

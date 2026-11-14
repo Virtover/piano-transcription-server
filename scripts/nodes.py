@@ -2,7 +2,7 @@
 
 The hub's side, run by scripts/admin.py:
 
-    python scripts/admin.py nodes hub 100.101.102.103 [--storage] [--registry hub.example.ts.net]
+    python scripts/admin.py nodes hub 100.101.102.103 [--registry hub.example.ts.net]
     python scripts/admin.py nodes invite laptop --tasks transcribe,arrange
     python scripts/admin.py nodes revoke laptop
 
@@ -45,7 +45,8 @@ HOSTNAME = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-
 TASKS = ("transcribe", "arrange", "dispatch", "check")
 # What a node may get from the hub's secrets, by the task that needs it.
 STORAGE_KEYS = ("storage_access_key", "storage_secret_key")
-JOB_STORAGE_KEYS = ("job_storage_access_key", "job_storage_secret_key")
+# The hub's bucket for job files: the hub's keys, and on a node its own.
+HUB_KEYS = ("cluster_storage_access_key", "cluster_storage_secret_key")
 RUNPOD_KEYS = ("runpod_api_key", "runpod_read_api_key")
 ALWAYS = ("error_report_token",)
 # Variables of node.env that scripts/server.py writes.
@@ -135,9 +136,9 @@ def write_s3_config(root: Path, config: dict) -> None:
     write_secret(root / S3_CONFIG, json.dumps(config, indent=2))
 
 
-def setup_hub(root: Path, server, address: str, storage: bool, registry: str | None) -> list[str]:
-    """Make this machine a hub: .env publishes Redis on the tailnet address,
-    and with storage, a bucket on this machine for the job files. server is
+def setup_hub(root: Path, server, address: str, registry: str | None) -> list[str]:
+    """Make this machine a hub: .env publishes Redis and the hub's bucket on
+    the tailnet address, and the bucket gets the hub's keys. server is
     scripts/server.py, whose EnvFile edits .env and server.env in place."""
     address = check_address(address)
     messages = []
@@ -154,43 +155,23 @@ def setup_hub(root: Path, server, address: str, storage: bool, registry: str | N
         compose.set("HUB_REGISTRY", registry)
         messages.append(f"the registry for nodes' images: run `tailscale serve --bg --https=443 http://127.0.0.1:5000` "
                         f"on this machine, then nodes pull from {registry}")
-    server_env = server.EnvFile(root / "server.env")
-    if storage:
-        compose.add_profile("storage")
-        config = read_s3_config(root)
-        if config is not None and any(identity.get("name") == "hub" for identity in config["identities"]):
-            # Set up before: keep the place it chose then, by its key files.
-            own_bucket = read_secret(root, JOB_STORAGE_KEYS[0]) is not None
-        else:
-            # RunPod's bucket stays as it is; the hub's is the job files' own.
-            own_bucket = bool(server_env.get("STORAGE_BUCKET"))
-        keys = JOB_STORAGE_KEYS if own_bucket else STORAGE_KEYS
-        prefix = "JOB_STORAGE" if own_bucket else "STORAGE"
-        config = read_s3_config(root) or {"identities": []}
-        if not any(identity.get("name") == "hub" for identity in config["identities"]):
-            access, secret = random_key(10), random_key(20)
-            for name, value in zip(keys, (access, secret)):
-                write_secret(root / "secrets" / name, value)
-            config["identities"].append(seaweed_identity("hub", access, secret, True, HUB_BUCKET))
-            write_s3_config(root, config)
-            messages.append(f"created the bucket's keys for the hub in secrets/{keys[0]} and secrets/{keys[1]}")
-        server_env.set(f"{prefix}_ENDPOINT", f"http://{address}:{STORAGE_PORT}")
-        server_env.set(f"{prefix}_BUCKET", HUB_BUCKET)
-        server_env.set(f"{prefix}_REGION", "us-east-1")
-        if server_env.get("JOB_STORAGE") != "s3":
-            messages.append("JOB_STORAGE is now s3: restart only while no job is queued, as jobs queued with local "
-                            "files cannot move")
-        server_env.set("JOB_STORAGE", "s3")
-        # Phones download results through the API: the bucket stays private.
-        server_env.set("RESULT_DOWNLOAD", "api")
-        messages.append(f"job files go to the bucket {HUB_BUCKET} on this machine "
-                        f"({'RunPod keeps the STORAGE_ bucket' if own_bucket else 'as STORAGE_'}); results are sent by the API")
-    elif server_env.get("JOB_STORAGE") != "s3":
-        messages.append("nodes need job files in a bucket: set JOB_STORAGE=s3 with your STORAGE_ bucket, "
-                        "or run this again with --storage for a bucket on this machine")
-    server_env.save()
+    config = read_s3_config(root) or {"identities": []}
+    if not any(identity.get("name") == "hub" for identity in config["identities"]) or not read_secret(root, HUB_KEYS[0]):
+        access, secret = random_key(10), random_key(20)
+        for name, value in zip(HUB_KEYS, (access, secret)):
+            write_secret(root / "secrets" / name, value)
+        config["identities"] = [identity for identity in config["identities"] if identity.get("name") != "hub"]
+        config["identities"].append(seaweed_identity("hub", access, secret, True, HUB_BUCKET))
+        write_s3_config(root, config)
+        messages.append(f"created the keys of the hub's bucket, in secrets/{HUB_KEYS[0]} and secrets/{HUB_KEYS[1]}")
+    if env_values(root / "server.env").get("JOB_STORAGE") == "s3":
+        messages.append("job files stay in your STORAGE_ bucket (JOB_STORAGE=s3), which every node gets the keys of; "
+                        "with JOB_STORAGE=local they would go to the hub's own bucket, which nodes have keys of their own to")
+    else:
+        messages.append(f"job files go to the hub's own bucket on {address}:{STORAGE_PORT} (JOB_STORAGE=local); "
+                        "results are sent by the API, so the bucket stays private")
     compose.save()
-    messages.append(f"Redis is published on {address}:{REDIS_PORT} only, for the nodes; PostgreSQL stays private")
+    messages.append(f"Redis and the bucket are published on {address} only, for the nodes; PostgreSQL stays private")
     messages.append("apply it with: python scripts/server.py restart 1m")
     return messages
 
@@ -202,7 +183,8 @@ def invite(root: Path, name: str, tasks: list[str], again: bool = False) -> tupl
     name = check_name(name)
     compose_values = env_values(root / ".env")
     address = compose_values.get("HUB_ADDRESS")
-    if not address:
+    config = read_s3_config(root)
+    if not address or config is None:
         raise ClusterError("This machine is not a hub yet: run python scripts/admin.py nodes hub <its tailnet address>")
     password_file = root / NODE_PASSWORDS / name
     if password_file.exists() and not again:
@@ -211,27 +193,25 @@ def invite(root: Path, name: str, tasks: list[str], again: bool = False) -> tupl
     password = random_key()
     write_secret(password_file, password)
     node_secrets = {"redis_password": password}
-    config = read_s3_config(root)
-    storage_changed = False
-    if config is not None:
-        # The hub's bucket: keys of the node's own, which revoke removes.
-        access, secret = random_key(10), random_key(20)
-        config["identities"] = [identity for identity in config["identities"] if identity.get("name") != f"node-{name}"]
-        config["identities"].append(seaweed_identity(f"node-{name}", access, secret, False, HUB_BUCKET))
-        write_s3_config(root, config)
-        storage_changed = True
-        own_bucket = read_secret(root, JOB_STORAGE_KEYS[0]) is not None
-        node_secrets.update(zip(JOB_STORAGE_KEYS if own_bucket else STORAGE_KEYS, (access, secret)))
-    else:
-        for key in JOB_STORAGE_KEYS + STORAGE_KEYS:
+    # The hub's bucket: keys of the node's own, which revoke removes.
+    access, secret = random_key(10), random_key(20)
+    config["identities"] = [identity for identity in config["identities"] if identity.get("name") != f"node-{name}"]
+    config["identities"].append(seaweed_identity(f"node-{name}", access, secret, False, HUB_BUCKET))
+    write_s3_config(root, config)
+    node_secrets.update(zip(HUB_KEYS, (access, secret)))
+    # The STORAGE_ bucket's keys, which every node then shares: for job files
+    # with JOB_STORAGE=s3, and for RunPod's audio with dispatch.
+    cloud_job_files = env_values(root / "server.env").get("JOB_STORAGE") == "s3"
+    if cloud_job_files or "dispatch" in tasks:
+        for key in STORAGE_KEYS:
             value = read_secret(root, key)
             if value:
                 node_secrets[key] = value
     if "dispatch" in tasks:
-        for key in RUNPOD_KEYS + STORAGE_KEYS:
+        for key in RUNPOD_KEYS:
             value = read_secret(root, key)
             if value:
-                node_secrets.setdefault(key, value)
+                node_secrets[key] = value
     for key in ALWAYS:
         value = read_secret(root, key)
         if value:
@@ -246,8 +226,8 @@ def invite(root: Path, name: str, tasks: list[str], again: bool = False) -> tupl
     }
     path = root / INVITES / f"{name}.json"
     write_private(path, json.dumps(invitation, indent=2))
-    shared = sorted(key for key in node_secrets if key in STORAGE_KEYS + JOB_STORAGE_KEYS) if config is None else []
-    return path, {"storage_changed": storage_changed, "shared_keys": shared}
+    shared = sorted(key for key in node_secrets if key in STORAGE_KEYS)
+    return path, {"storage_changed": True, "shared_keys": shared}
 
 
 def revoke(root: Path, name: str) -> dict:
@@ -266,7 +246,10 @@ def revoke(root: Path, name: str) -> dict:
         if storage_changed:
             config["identities"] = kept
             write_s3_config(root, config)
-    return {"removed": removed, "storage_changed": storage_changed, "home_storage": config is not None}
+    server_env = env_values(root / "server.env")
+    # Nodes got the STORAGE_ bucket's keys for job files or RunPod's audio.
+    cloud_keys = server_env.get("JOB_STORAGE") == "s3" or server_env.get("OUTSOURCE_PROVIDER", "none") != "none"
+    return {"removed": removed, "storage_changed": storage_changed, "cloud_keys": cloud_keys}
 
 
 def invited(root: Path) -> list[str]:
@@ -326,7 +309,7 @@ def read_invite(path: Path) -> dict:
     check_tasks(",".join(invitation.get("tasks") or []))
     if not isinstance(invitation.get("secrets"), dict) or not invitation["secrets"].get("redis_password"):
         raise ClusterError(f"{path} has no Redis password; invite the device again on the hub")
-    allowed = {"redis_password", *STORAGE_KEYS, *JOB_STORAGE_KEYS, *RUNPOD_KEYS, *ALWAYS}
+    allowed = {"redis_password", *STORAGE_KEYS, *HUB_KEYS, *RUNPOD_KEYS, *ALWAYS}
     unknown = sorted(set(invitation["secrets"]) - allowed)
     if unknown:
         raise ClusterError(f"{path} holds files no node needs ({', '.join(unknown)}); it was not made by nodes invite")

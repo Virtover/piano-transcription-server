@@ -35,7 +35,7 @@ from app.worker.tasks import (
     resend_stale_queued,
     settle_node_jobs,
 )
-from app import backups, cluster
+from app import backups, cluster, job_storage
 from app.backups import run_backup
 from app.billing import Billing
 from app.leader import Leadership
@@ -149,7 +149,7 @@ def recover_after_takeover() -> None:
 
 
 def clean_stored_jobs(leader: Leadership | None = None) -> None:
-    """With JOB_STORAGE=s3, delete expired jobs' files from the bucket. The
+    """With job files in a bucket, delete expired jobs' files from it. The
     cleanup service cannot: it has no storage keys."""
     while True:
         wait_for_lead(leader)
@@ -313,7 +313,7 @@ def sync_billing_catalog() -> None:
     threading.Thread(target=monitor_backup_health, args=(leadership,), daemon=True).start()
     threading.Thread(target=watch_abandoned_jobs, args=(leadership,), daemon=True).start()
     threading.Thread(target=serve_cluster_nodes, args=(leadership,), daemon=True).start()
-    if settings.jobs.storage == "s3":
+    if job_storage.uses_bucket():
         threading.Thread(target=clean_stored_jobs, args=(leadership,), daemon=True).start()
     if voided_purchases_enabled():
         threading.Thread(target=sync_voided_purchases, args=(leadership,), daemon=True).start()

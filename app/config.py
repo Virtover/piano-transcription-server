@@ -216,6 +216,10 @@ class ServiceSettings(BaseSettings):
     # wiring; it turns the checks of one on or off, such as Compose's
     # profiles, which Kubernetes does not have.
     deployment: Literal["local", "compose", "node", "kubernetes"] = "local"
+    # A home cluster's hub bucket, where JOB_STORAGE=local keeps job files on
+    # the hub and its nodes: http://storage:8333 on the hub, its tailnet
+    # address on a node (docker-compose.hub.yml, docker-compose.node.yml).
+    cluster_storage_endpoint: str = ""
 
     def redis_tls_options(self) -> dict[str, str]:
         """Keyword arguments that verify a rediss:// server's certificate
@@ -327,29 +331,15 @@ class JobSettings(BaseSettings):
     model_config = _group_config("JOB_")
 
     # local: job files on the data volume, which one machine's services
-    # share. s3: in the outsourcing bucket, for API replicas and workers on
+    # share, or on a home cluster's hub in its own bucket, which its nodes
+    # reach. s3: in the STORAGE_ bucket, for API replicas and workers on
     # several machines; see app/job_storage.py.
     storage: Literal["local", "s3"] = "local"
-    # A bucket for job files of their own, such as one on the hub, while
-    # outsourcing keeps the STORAGE_ bucket; each unset one is STORAGE_'s.
-    storage_endpoint: str | None = None
-    storage_bucket: str | None = None
-    storage_region: str | None = None
-    # The address signed result links name, when browsers reach the bucket
-    # elsewhere than the services do, as through a tunnel.
-    storage_public_endpoint: str | None = None
     # Attempts at a job whose worker stopped mid-job, as a device that lost
     # power, before it fails and is refunded.
     max_attempts: int = Field(default=3, ge=1, le=10)
     # How long each job's full error is kept for administrators.
     diagnostics_retention: Duration = 30 * 24 * 60 * 60.0
-
-    @field_validator("storage_public_endpoint")
-    @classmethod
-    def _public_endpoint(cls, value: str | None) -> str | None:
-        if value is not None and not value.lower().startswith("https://"):
-            raise ValueError("must use https://: browsers and RunPod reach it over the internet")
-        return value
 
 
 class CleanupSettings(BaseSettings):
@@ -426,9 +416,10 @@ class SecretSettings(BaseSettings):
     runpod_read_api_key: SecretStr | None = None
     storage_access_key: SecretStr | None = None
     storage_secret_key: SecretStr | None = None
-    # Keys of the job files' own bucket (JOB_STORAGE_BUCKET), if it has one.
-    job_storage_access_key: SecretStr | None = None
-    job_storage_secret_key: SecretStr | None = None
+    # A home cluster's hub bucket (app.job_storage.HUB_BUCKET): the hub's
+    # keys, or on a node its own, which nodes invite and revoke manage.
+    cluster_storage_access_key: SecretStr | None = None
+    cluster_storage_secret_key: SecretStr | None = None
     offsite_backup_access_key: SecretStr | None = None
     offsite_backup_secret_key: SecretStr | None = None
     # Optional. When present, every request except /health and /ready needs it.
@@ -974,6 +965,14 @@ def validate_settings(config: "Settings | None" = None, role: str = "all") -> li
         problems.append("REDIS_CA_FILE is set, but REDIS_URL is not a rediss:// URL: the CA file is only used for TLS")
     elif ca_file and not Path(ca_file).is_file():
         problems.append(f"The Redis CA file {ca_file} (REDIS_CA_FILE) does not exist")
+    # A home cluster's hub bucket, which JOB_STORAGE=local uses there.
+    if config.jobs.storage == "local" and config.service.cluster_storage_endpoint and role != "cleanup" and (
+            config.secrets.cluster_storage_access_key is None or config.secrets.cluster_storage_secret_key is None):
+        problems.append(
+            "The hub's bucket needs its keys, the secret files cluster_storage_access_key and "
+            "cluster_storage_secret_key: on the hub, python scripts/admin.py nodes hub <address> creates them; "
+            "on a node, join with a new invite"
+        )
     # The optional features: what each needs, excludes, and requires.
     from app.features import all_problems
 

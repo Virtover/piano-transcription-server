@@ -291,13 +291,11 @@ def cluster_checks(root: Path, features: dict | None, run=run_quietly, platform:
     if address and addresses and address not in addresses:
         checks.append(ClusterCheck(False, f"HUB_ADDRESS {address} is this machine's Tailscale address",
                                    f"Its address is {addresses[0]}: run python scripts/admin.py nodes hub {addresses[0]}"))
-    job_storage = (features or {}).get("job_storage")
-    if job_storage is not None:
-        missing = Missing.of(job_storage)
+    if address:
+        cloud = NODES.env_values(root / "server.env").get("JOB_STORAGE") == "s3"
         checks.append(ClusterCheck(
-            job_storage["enabled"] and not missing.count, "job files in a bucket (JOB_STORAGE=s3), which nodes share",
-            "Run python scripts/admin.py nodes hub <address> --storage for a bucket on this machine, or "
-            "python scripts/setup.py job_storage for yours"))
+            True, "job files in your STORAGE_ bucket (JOB_STORAGE=s3), whose keys every node gets" if cloud
+            else "job files in the hub's own bucket (JOB_STORAGE=local), each node with keys of its own"))
     invited = NODES.invited(root)
     checks.append(ClusterCheck(bool(invited), f"devices invited: {', '.join(invited)}" if invited else "devices invited",
                                "On this machine: python scripts/admin.py nodes invite <name>", optional=not address))
@@ -488,10 +486,7 @@ class Setup:
         say("")
         if not values.get("HUB_ADDRESS") and addresses and self.console.yes(
                 f"Make this machine the hub, on its Tailscale address {addresses[0]}?", default=False):
-            storage = self.console.yes(
-                "Keep the job files in a bucket on this machine (no provider needed)?",
-                default=not (features or {}).get("job_storage", {}).get("enabled", False))
-            arguments = ["nodes", "hub", addresses[0]] + (["--storage"] if storage else [])
+            arguments = ["nodes", "hub", addresses[0]]
             result = self.run([sys.executable, str(self.root / "scripts" / "admin.py"), *arguments])
             for line in (result.stdout or "").splitlines():
                 say(f"  {line}")

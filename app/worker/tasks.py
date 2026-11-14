@@ -14,7 +14,8 @@ from redis import Redis
 from redis.exceptions import WatchError
 
 from app import cluster, error_report, job_limits
-from app.job_storage import WORK_FOLDER, delete_job_files, job_dir, s3, s3_key, storage, workspace_job_id
+from app.job_storage import WORK_FOLDER, bucket, delete_job_files, job_dir, stored_result, storage, uses_bucket
+from app.job_storage import workspace_job_id
 from app.config import settings
 from app.billing import Billing, cancelled_cost
 from app.errors import GENERIC_MESSAGE, SourceTemporarilyUnavailable, detail, error_code, public_message
@@ -266,12 +267,13 @@ def cleanup_expired_jobs():
 def cleanup_stored_jobs() -> int:
     """With JOB_STORAGE=s3, delete the stored files of jobs that expired.
     Run periodically by the leading API, which has the storage keys."""
-    if settings.jobs.storage != "s3":
+    if not uses_bucket():
         return 0
     removed = 0
-    for job_id in list(s3().job_ids()):
+    files = bucket()
+    for job_id in list(files.job_ids()):
         if not redis.exists(job_key(job_id)):
-            s3().delete(job_id)
+            files.delete(job_id)
             removed += 1
     if removed:
         logger.info("Removed the stored files of %d expired jobs", removed)
@@ -569,9 +571,10 @@ def check_completed_result(job_id: str, job: dict[str, str]) -> bool:
     """Fail a completed job whose durable result is missing or invalid."""
     reference = job.get("result", "")
     try:
-        key = s3_key(reference)
-        if key is not None:
-            if not s3().result_exists(key):
+        stored = stored_result(reference)
+        if stored is not None:
+            files, key = stored
+            if not files.result_exists(key):
                 raise OSError(f"{key} is not in the bucket")
         else:
             result = Path(reference)

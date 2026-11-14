@@ -27,7 +27,7 @@ For a cluster of cloud machines instead, see [Kubernetes](kubernetes.md).
 * **Tailscale** on every device, signed in to one tailnet: it gives each device an address only your devices reach, and encrypts everything between them.
 * **Docker** on every device: Docker Desktop on Windows and macOS, Docker Engine on Linux. With an NVIDIA GPU, its driver, and on Linux the NVIDIA Container Toolkit.
 * **This repository** on every device, at the same version as the hub's.
-* **Job files in a bucket** (`JOB_STORAGE=s3`): nodes share no folder with the hub. Either the bucket you have, such as Cloudflare R2, or one on the hub (`--storage` below).
+* **Nothing else for job files:** with `JOB_STORAGE=local`, the default, the hub keeps them in a bucket of its own, which its nodes reach over the tailnet, each with keys of its own. With `JOB_STORAGE=s3` they stay in your provider's bucket, such as Cloudflare R2, whose keys every node then gets.
 
 `python scripts/setup.py cluster` checks all of this on the machine it runs on, the hub or a node, says what is missing and how to fix it, and offers to make a machine with Tailscale the hub. `python scripts/setup.py status` shows the same in short.
 
@@ -39,12 +39,12 @@ The hub should be the most reliable machine, always on. **Linux is the better hu
 2. **Make this machine the hub**, with its own bucket for job files:
 
    ```shell
-   python scripts/admin.py nodes hub 100.101.102.103 --storage
+   python scripts/admin.py nodes hub 100.101.102.103
    ```
 
-   This publishes Redis on that address only (`docker-compose.hub.yml`), never on the local network, and keeps PostgreSQL private. `--storage` adds a bucket on this machine (SeaweedFS), with keys of its own for the hub and later for each node, and sets `JOB_STORAGE=s3` and `RESULT_DOWNLOAD=api`. If `STORAGE_BUCKET` already names your RunPod bucket, that stays as it is, and job files get the `JOB_STORAGE_` settings instead. Without `--storage`, set `JOB_STORAGE=s3` with your bucket yourself.
+   This publishes Redis and the hub's bucket (SeaweedFS) on that address only (`docker-compose.hub.yml`), never on the local network, and keeps PostgreSQL private. It gives the bucket the hub's keys; each node gets keys of its own when invited. Job files move to that bucket with `JOB_STORAGE=local`, so change nothing else.
 
-3. **Apply it.** Change `JOB_STORAGE` only while no job is queued:
+3. **Apply it**, while no job is queued: jobs queued with files in the data volume's folders cannot move to the bucket.
 
    ```shell
    python scripts/server.py restart 1m
@@ -60,9 +60,9 @@ The hub should be the most reliable machine, always on. **Linux is the better hu
 
 ### Results and the bucket
 
-`RESULT_DOWNLOAD=api` makes the API send each MIDI file from the bucket, as it always did with one machine: apps need nothing new, and a bucket on the hub stays private. `RESULT_DOWNLOAD=link` redirects apps to a signed link instead; with a bucket on the hub, give it a public `https://` address through your tunnel, and set it as `JOB_STORAGE_PUBLIC_ENDPOINT`. See [Job storage](configuration.md#job-storage).
+Results in the hub's bucket are sent by the API, as on one machine: apps need nothing new, and the bucket stays private. With `JOB_STORAGE=s3`, `RESULT_DOWNLOAD` decides, as without a cluster; see [Job storage](configuration.md#job-storage).
 
-RunPod reads audio from the `STORAGE_` bucket, which must be reachable from the internet: keep a cloud bucket for it, with the hub's for job files.
+RunPod reads audio from the `STORAGE_` bucket, which must be reachable from the internet: keep your cloud bucket for it. Job files stay in the hub's bucket.
 
 ## ➕ Adding a device
 
@@ -72,7 +72,7 @@ RunPod reads audio from the `STORAGE_` bucket, which must be reachable from the 
    python scripts/admin.py nodes invite laptop --tasks transcribe,arrange
    ```
 
-   This creates the node's Redis password, and its own bucket keys with `--storage`, and writes `secrets/invites/laptop.json`. The invite holds only what the node needs, never the hub's other secrets. Copy it to the device privately, for example with `tailscale file cp secrets/invites/laptop.json laptop:`; never by email or chat.
+   This creates the node's Redis password and its own keys to the hub's bucket, and writes `secrets/invites/laptop.json`. The invite holds only what the node needs, never the hub's other secrets: the cloud bucket's keys only with `JOB_STORAGE=s3` or the `dispatch` task. Copy it to the device privately, for example with `tailscale file cp secrets/invites/laptop.json laptop:`; never by email or chat.
 
 2. **On the device:** install Tailscale and Docker, get this repository at the hub's version, and join with the invite. `join` writes `node.env` and `secrets/node/`, deletes the invite, and starts the worker:
 
@@ -113,7 +113,7 @@ A switch set on the hub lasts until changed, also across reboots. A device stopp
 Each device builds its worker image itself by default, about 8 GB and a while. Instead, the hub can build once and the devices pull:
 
 ```shell
-python scripts/admin.py nodes hub 100.101.102.103 --storage --registry hub.example.ts.net
+python scripts/admin.py nodes hub 100.101.102.103 --registry hub.example.ts.net
 python scripts/server.py restart 1m
 tailscale serve --bg --https=443 http://127.0.0.1:5000
 python scripts/server.py push-images --legacy

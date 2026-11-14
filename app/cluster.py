@@ -527,17 +527,16 @@ def print_status(redis: Redis) -> int:
 
 
 def create_bucket() -> int:
-    """Create the job files' bucket on the hub's own storage, if missing."""
-    from app.job_storage import bucket_client, bucket_settings
+    """Create the hub's bucket for job files, if missing."""
+    from app.job_storage import S3JobStorage
 
-    values = bucket_settings()
-    client = bucket_client()
+    files = S3JobStorage.hub()
     try:
-        client.head_bucket(Bucket=values["bucket"])
-        print(f"the bucket {values['bucket']} exists")
+        files.client.head_bucket(Bucket=files.bucket)
+        print(f"the hub's bucket {files.bucket} exists")
     except Exception:
-        client.create_bucket(Bucket=values["bucket"])
-        print(f"created the bucket {values['bucket']}")
+        files.client.create_bucket(Bucket=files.bucket)
+        print(f"created the hub's bucket {files.bucket}")
     return 0
 
 

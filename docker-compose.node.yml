@@ -35,6 +35,8 @@ services:
       REDIS_URL: redis://node-${NODE_NAME}@${HUB_ADDRESS:?HUB_ADDRESS is not set in node.env}:6379/0
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       DATA_DIR: /data
+      # The hub's bucket, where JOB_STORAGE=local keeps job files.
+      CLUSTER_STORAGE_ENDPOINT: http://${HUB_ADDRESS}:8333
     volumes:
       # Each attempt's scratch folder; the bucket keeps the job files.
       - data:/data

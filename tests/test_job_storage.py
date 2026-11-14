@@ -78,7 +78,7 @@ def bucket(api_context):
     settings.jobs.storage = "s3"
     job_storage.reset()
     client = FakeS3()
-    job_storage._s3 = S3JobStorage(client, "jobs-bucket")
+    job_storage._buckets[job_storage.S3_REFERENCE] = S3JobStorage(client, "jobs-bucket")
     return client
 
 
@@ -414,43 +414,103 @@ def test_s3_job_storage_needs_the_bucket_and_its_keys(default_settings):
     assert any("STORAGE_BUCKET needs the secret file" in problem for problem in problems)
 
 
-def test_job_files_can_have_a_bucket_of_their_own(default_settings, tmp_path):
-    from pydantic import SecretStr
+# --- A home cluster's hub bucket ---------------------------------------------------------
 
-    from app import job_storage
+@pytest.fixture
+def hub_bucket(api_context):
+    """JOB_STORAGE=local on a home cluster's hub: its own bucket, faked."""
+    _, settings, _ = api_context
+    settings.service.cluster_storage_endpoint = "http://storage:8333"
+    # The chosen storage only: a cloud bucket faked before stays.
+    job_storage._storage = None
+    client = FakeS3()
+    job_storage._buckets[job_storage.HUB_REFERENCE] = S3JobStorage(client, job_storage.HUB_BUCKET,
+                                                                  job_storage.HUB_REFERENCE, links=False)
+    return client
 
+
+def test_on_a_hub_local_job_files_go_to_its_own_bucket(default_settings):
+    assert not job_storage.uses_bucket(default_settings)
+    default_settings.service.cluster_storage_endpoint = "http://storage:8333"
+    assert job_storage.uses_hub_bucket(default_settings) and job_storage.uses_bucket(default_settings)
+    # With JOB_STORAGE=s3 the cloud bucket keeps them, also on a hub.
     default_settings.jobs.storage = "s3"
-    default_settings.storage.bucket = "runpod-audio"
-    default_settings.storage.endpoint = "https://r2.example.com"
-    default_settings.secrets.storage_access_key = SecretStr("key")
-    default_settings.secrets.storage_secret_key = SecretStr("secret")
-    default_settings.jobs.storage_bucket = "home-jobs"
-    default_settings.jobs.storage_endpoint = "http://100.64.0.1:8333"
+    assert not job_storage.uses_hub_bucket(default_settings) and job_storage.uses_bucket(default_settings)
+
+
+def test_the_hub_bucket_needs_its_keys(default_settings):
+    default_settings.service.cluster_storage_endpoint = "http://storage:8333"
+
     problems = validate_settings(default_settings, "worker")
-    assert any("give it its own keys" in problem for problem in problems)
 
-    default_settings.secrets.job_storage_access_key = SecretStr("job-key")
-    problems = validate_settings(default_settings, "worker")
-    assert any("go together" in problem for problem in problems)
-
-    default_settings.secrets.job_storage_secret_key = SecretStr("job-secret")
-    assert not any("JOB_STORAGE" in problem for problem in validate_settings(default_settings, "worker"))
-    values = job_storage.bucket_settings(default_settings)
-    assert (values["bucket"], values["endpoint"], values["access_key"]) == ("home-jobs", "http://100.64.0.1:8333", "job-key")
-
-
-def test_job_bucket_falls_back_to_the_storage_bucket(default_settings):
+    assert any("cluster_storage_access_key" in problem for problem in problems)
     from pydantic import SecretStr
 
-    from app import job_storage
+    default_settings.secrets.cluster_storage_access_key = SecretStr("a")
+    default_settings.secrets.cluster_storage_secret_key = SecretStr("b")
+    assert not any("cluster_storage" in problem for problem in validate_settings(default_settings, "worker"))
 
-    default_settings.storage.bucket = "shared"
-    default_settings.storage.endpoint = "https://r2.example.com"
-    default_settings.secrets.storage_access_key = SecretStr("key")
-    default_settings.secrets.storage_secret_key = SecretStr("secret")
-    values = job_storage.bucket_settings(default_settings)
-    assert (values["bucket"], values["endpoint"], values["secret_key"]) == ("shared", "https://r2.example.com", "secret")
-    assert job_storage.bucket_configured(default_settings)
+
+def test_the_hub_bucket_is_reached_with_its_own_keys(default_settings, monkeypatch):
+    from pydantic import SecretStr
+
+    from app.outsource import storage as outsource_storage
+
+    made = []
+    monkeypatch.setattr(outsource_storage, "client_for", lambda *arguments: made.append(arguments) or object())
+    default_settings.service.cluster_storage_endpoint = "http://100.64.0.1:8333"
+    default_settings.secrets.cluster_storage_access_key = SecretStr("node-key")
+    default_settings.secrets.cluster_storage_secret_key = SecretStr("node-secret")
+
+    bucket = S3JobStorage.hub(default_settings)
+
+    assert made == [("http://100.64.0.1:8333", job_storage.HUB_REGION, "node-key", "node-secret")]
+    assert (bucket.bucket, bucket.reference, bucket.links) == (job_storage.HUB_BUCKET, "hub:", False)
+
+
+def test_a_result_in_the_hub_bucket_is_named_as_such(hub_bucket, tmp_path):
+    midi = tmp_path / "transcription.mid"
+    midi.write_bytes(b"MThd")
+
+    reference = job_storage.storage().save_result("job", midi)
+
+    assert reference == f"hub:{PREFIX}job/transcription.mid"
+    bucket, key = job_storage.stored_result(reference)
+    assert bucket is job_storage.hub() and key == f"{PREFIX}job/transcription.mid"
+
+
+@pytest.mark.parametrize("result_download", ["link", "api"])
+def test_the_api_sends_results_from_the_hub_bucket_which_no_app_reaches(api_context, hub_bucket, result_download):
+    client, settings, _ = api_context
+    settings.limits.result_download = result_download
+    store(hub_bucket, "job", "transcription.mid", b"MThd-hub")
+    tasks.redis.hset(tasks.job_key("job"), mapping={"status": "completed", "result": f"hub:{PREFIX}job/transcription.mid"})
+
+    response = client.get("/api/transcriptions/job/midi", follow_redirects=False)
+
+    assert response.status_code == 200 and response.content == b"MThd-hub"
+    assert hub_bucket.signed == []
+
+
+def test_results_keep_their_bucket_when_job_storage_changes(api_context, bucket, hub_bucket):
+    client, settings, _ = api_context
+    settings.limits.result_download = "api"
+    store(bucket, "cloud", "transcription.mid", b"MThd-cloud")
+    store(hub_bucket, "home", "transcription.mid", b"MThd-home")
+    tasks.redis.hset(tasks.job_key("cloud"), mapping={"status": "completed", "result": f"s3:{PREFIX}cloud/transcription.mid"})
+    tasks.redis.hset(tasks.job_key("home"), mapping={"status": "completed", "result": f"hub:{PREFIX}home/transcription.mid"})
+
+    assert client.get("/api/transcriptions/cloud/midi").content == b"MThd-cloud"
+    assert client.get("/api/transcriptions/home/midi").content == b"MThd-home"
+
+
+def test_cleanup_on_a_hub_deletes_expired_jobs_from_its_bucket(hub_bucket):
+    store(hub_bucket, "expired", "transcription.mid", b"MThd")
+    store(hub_bucket, "kept", "transcription.mid", b"MThd")
+    tasks.redis.hset(tasks.job_key("kept"), "status", "completed")
+
+    assert tasks.cleanup_stored_jobs() == 1
+    assert sorted(hub_bucket.objects) == [f"{PREFIX}kept/transcription.mid"]
 
 
 def test_api_download_sends_the_file_and_refuses_oversized_objects():
@@ -480,20 +540,6 @@ def test_api_download_sends_the_file_and_refuses_oversized_objects():
     assert storage.read_result("jobs/gone/transcription.mid") is None
     with pytest.raises(StorageUnavailable):
         storage.read_result("big")
-
-
-def test_result_links_are_signed_for_the_public_address():
-    from app.job_storage import S3JobStorage
-
-    class Client:
-        def __init__(self, host):
-            self.host = host
-
-        def generate_presigned_url(self, operation, Params, ExpiresIn):
-            return f"{self.host}/{Params['Key']}"
-
-    storage = S3JobStorage(Client("http://100.64.0.1:8333"), "b", Client("https://files.example.com"))
-    assert storage.result_link("jobs/a/transcription.mid").startswith("https://files.example.com/")
 
 
 def test_local_job_storage_needs_no_bucket(default_settings):

@@ -5,6 +5,13 @@
 # hub` writes.
 #
 # PostgreSQL stays unpublished: nodes never reach the billing database.
+#
+# With JOB_STORAGE=local, the hub keeps job files in its own bucket, the
+# storage service below, which its services reach inside Docker and the
+# nodes on the tailnet address.
+
+x-hub-wiring: &hub-wiring
+  CLUSTER_STORAGE_ENDPOINT: http://storage:8333
 
 x-logging: &logging
   driver: json-file
@@ -13,18 +20,27 @@ x-logging: &logging
     max-file: "5"
 
 services:
+  api:
+    environment: *hub-wiring
+    depends_on:
+      storage:
+        condition: service_started
+  worker:
+    environment: *hub-wiring
+  remote-worker:
+    environment: *hub-wiring
+
   # The nodes sign in as node-<name>, each with its own password and rules
   # (redis/node.acl); the default user is refused.
   redis:
     ports:
       - "${HUB_ADDRESS:?HUB_ADDRESS, this machine's tailnet address, is not set in .env}:6379:6379"
 
-  # Optional: a bucket on the hub for job files (COMPOSE_PROFILES=storage),
-  # instead of one at a provider. Each node gets keys of its own, in
-  # secrets/storage/s3.json, which `nodes invite` and `nodes revoke` write.
+  # The hub's bucket for job files, with JOB_STORAGE=local. The hub and
+  # each node have keys of their own, in secrets/storage/s3.json, which
+  # `nodes hub`, `nodes invite`, and `nodes revoke` write.
   storage:
     image: chrislusf/seaweedfs:4.50
-    profiles: [storage]
     command: [server, -dir=/data, -s3, -s3.port=8333, -s3.config=/etc/seaweedfs/s3.json, -volume.max=0]
     ports:
       - "${HUB_ADDRESS:?HUB_ADDRESS, this machine's tailnet address, is not set in .env}:8333:8333"

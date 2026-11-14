@@ -14,7 +14,7 @@ question refuses instead of waiting. See docs/administration.md.
 A home cluster's hub (docs/cluster.md) has three commands of its own, run
 here on the host, because they write files in secrets/:
 
-    python scripts/admin.py nodes hub 100.101.102.103 [--storage] [--registry hub.example.ts.net]
+    python scripts/admin.py nodes hub 100.101.102.103 [--registry hub.example.ts.net]
     python scripts/admin.py nodes invite laptop [--tasks transcribe,arrange] [--again]
     python scripts/admin.py nodes revoke laptop
 
@@ -71,7 +71,6 @@ def node_command(arguments: list[str], stack) -> int:
     commands = parser.add_subparsers(dest="action", required=True)
     hub = commands.add_parser("hub", help="make this machine a home cluster's hub")
     hub.add_argument("address", help="this machine's Tailscale address, from `tailscale ip -4`")
-    hub.add_argument("--storage", action="store_true", help="also a bucket for the job files on this machine")
     hub.add_argument("--registry", metavar="NAME", help="this machine's Tailscale name, for a registry of nodes' images")
     invite = commands.add_parser("invite", help="write an invite file for a new node")
     invite.add_argument("node", help="the device's name, such as laptop")
@@ -84,7 +83,7 @@ def node_command(arguments: list[str], stack) -> int:
     try:
         if args.action == "hub":
             server = load_script("server")
-            for message in NODES.setup_hub(root, server, args.address, args.storage, args.registry):
+            for message in NODES.setup_hub(root, server, args.address, args.registry):
                 say(message)
             return 0
         if args.action == "invite":
@@ -136,8 +135,9 @@ def finish_revoke(stack, name: str, result: dict) -> int:
     code = in_container(stack, "nodes", "forget", name, "--reason", "revoked")
     say(f"{name} is cut off" + (f"; removed {', '.join(result['removed'])}" if result["removed"] else ""))
     say("its running jobs are queued again elsewhere within a minute")
-    if not result["home_storage"]:
-        say("it had the bucket's keys: replace them at your bucket provider if the device may be in wrong hands")
+    if result["cloud_keys"]:
+        say("nodes may have had your STORAGE_ bucket's keys (JOB_STORAGE=s3, or RunPod): replace them at the "
+            "provider if the device may be in the wrong hands")
     return 0 if ok and code == 0 else 1
 
 

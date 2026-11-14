@@ -598,7 +598,8 @@ def test_a_node_takes_the_hubs_settings_but_keeps_its_own(default_settings):
 def test_wiring_the_database_and_device_settings_are_never_taken_from_the_hub():
     names = cluster.synced_names()
 
-    assert "RESULT_RETENTION" in names and "JOB_STORAGE_BUCKET" in names
+    assert "RESULT_RETENTION" in names and "JOB_STORAGE" in names
+    assert "CLUSTER_STORAGE_ENDPOINT" not in names
     for name in ("REDIS_URL", "DATA_DIR", "DEPLOYMENT", "DATABASE_URL", "DATABASE_BACKUPS", "NODE_NAME",
                  "NODE_EGRESS", "WORKER_THREADS", "WORKER_ENFORCE_CPU", "WORKER_MAX_CONCURRENCY", "COMPOSE_PROFILES",
                  # Only the API's: never shown to a node.

@@ -31,8 +31,7 @@ def storage_configured(config=None) -> bool:
 
 
 def s3_client(config=None) -> Any:
-    """A client for the bucket of outsourcing, and of job storage unless it
-    has a bucket of its own (app.job_storage.bucket_settings)."""
+    """A client for the bucket of outsourcing and JOB_STORAGE=s3."""
     config = config or settings
     return client_for(
         config.storage.endpoint,
