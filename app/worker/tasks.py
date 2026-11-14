@@ -507,6 +507,38 @@ def fail_abandoned_jobs(reason: str = WORKER_STOPPED) -> int:
     return failed
 
 
+# A queued job waiting this long, with no message sent for it this long,
+# gets its message again: one may have been lost, as with a device that
+# failed a message. Only one delivery can claim a job, so a second is harmless.
+STALE_QUEUED = 600
+
+
+def resend_stale_queued(now: float | None = None) -> int:
+    """Run periodically by the leading API."""
+    now = time.time() if now is None else now
+    resent = 0
+    for key in redis.scan_iter(match="transcription:*"):
+        job = redis.hgetall(key)
+        if job.get("status") != "queued":
+            continue
+        try:
+            last = max(float(job.get("queued_at") or job.get("created_at") or now), float(job.get("resent_at") or 0))
+        except ValueError:
+            continue
+        if now - last < STALE_QUEUED:
+            continue
+        job_id = key.removeprefix("transcription:")
+        redis.hset(key, "resent_at", str(now))
+        try:
+            send_job(job_id, job_backend(job), *job_arguments(job))
+            resent += 1
+        except Exception:
+            logger.exception("Could not send the message of queued job %s again", job_id)
+    if resent:
+        logger.warning("Sent the messages of %d long-queued job(s) again", resent)
+    return resent
+
+
 def recover_active_jobs(reason: str) -> None:
     """Run at API startup. Processing jobs without a lease are failed and
     refunded: their worker stopped mid-job. Those with one keep running, as
@@ -1052,7 +1084,11 @@ def send_job(job_id: str, backend: routing.Backend, *arguments, **options) -> No
         actor = arrange_job
     else:
         actor = transcribe_job
-    actor.send(job_id, *arguments, **options)
+    if options:
+        # Message options such as delay; send() would pass them to the actor.
+        actor.send_with_options(args=(job_id, *arguments), **options)
+    else:
+        actor.send(job_id, *arguments)
 
 
 def run_local_job(job_id: str, source_url: str | None, upload_title: str | None) -> None:

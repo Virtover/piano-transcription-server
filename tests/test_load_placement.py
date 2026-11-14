@@ -124,6 +124,22 @@ def test_without_nodes_the_load_moves_nothing(api_context, monkeypatch):
     monkeypatch.setattr(tasks, "load_monitor", None)
 
 
+def test_a_job_handed_on_is_sent_again_with_a_delay_as_a_message_option(api_context, monkeypatch):
+    # The delay is Dramatiq's, never an argument of the actor, which would
+    # fail the message and leave the job queued.
+    tasks.redis.hset(tasks.job_key("job"), mapping={"status": "queued", "source": "upload", "upload_title": "x"})
+    sent = []
+    monkeypatch.setattr(tasks.transcribe_job, "send_with_options",
+                        lambda args=(), kwargs=None, **options: sent.append((args, kwargs, options)))
+    monkeypatch.setattr(tasks.transcribe_job, "send", lambda *args, **kwargs: pytest.fail("send() with options"))
+
+    tasks.send_job("job", "local", None, "x", delay=tasks.PASS_DELAY_MS)
+
+    assert sent == [(("job", None, "x"), None, {"delay": tasks.PASS_DELAY_MS})]
+    message = tasks.transcribe_job.message_with_options(args=("job", None, "x"), delay=tasks.PASS_DELAY_MS)
+    assert message.kwargs == {}
+
+
 # --- Sampling -------------------------------------------------------------------------------
 
 def nvidia_smi(output, code=0):

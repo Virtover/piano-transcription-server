@@ -32,6 +32,7 @@ from app.worker.tasks import (
     fail_abandoned_jobs,
     reconcile_billing,
     recover_active_jobs,
+    resend_stale_queued,
     settle_node_jobs,
 )
 from app import backups, cluster
@@ -106,6 +107,10 @@ def watch_abandoned_jobs(leader: Leadership | None = None) -> None:
             fail_abandoned_jobs()
         except Exception:
             logger.exception("Could not check for abandoned jobs")
+        try:
+            resend_stale_queued()
+        except Exception:
+            logger.exception("Could not check for long-queued jobs")
         try:
             reconcile_billing(min_age=RECONCILE_AFTER)
         except Exception:

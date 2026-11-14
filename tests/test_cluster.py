@@ -205,6 +205,21 @@ def test_the_devices_that_ran_a_job_are_kept(worker, monkeypatch, default_settin
     assert job()["attempt"] == "2"
 
 
+def test_a_job_queued_long_gets_its_message_again_once_a_while(worker, monkeypatch):
+    _, billing = worker
+    sent = []
+    monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments, **options: sent.append(job_id))
+    queue_job(billing, "old", queued_at="1000", source_url="https://example.com/a")
+    queue_job(billing, "new", queued_at="1550", source_url="https://example.com/b")
+    tasks.redis.hset(tasks.job_key("running"), mapping={"status": "processing", "queued_at": "0"})
+
+    assert tasks.resend_stale_queued(now=1000 + tasks.STALE_QUEUED + 1) == 1
+    assert sent == ["old"]
+    # Not again until another while has passed.
+    assert tasks.resend_stale_queued(now=1000 + tasks.STALE_QUEUED + 60) == 0
+    assert tasks.resend_stale_queued(now=1000 + 2 * tasks.STALE_QUEUED + 2) == 2
+
+
 # --- Billing that only the hub writes ------------------------------------------------------------
 
 def test_a_node_only_names_the_jobs_it_ended():
