@@ -302,6 +302,10 @@ class WorkerSettings(BaseSettings):
     max_concurrency: AutoInt = None
     # Give the MIDI the beats and bars of the recording (app/transcription/tempo.py).
     tempo_map: bool = True
+    # In a home cluster: a device whose GPU (or CPU) is at least this busy,
+    # by any program, leaves a new job to a device that is less busy and has
+    # a free place and room in VRAM.
+    busy_utilization: float = Field(default=90.0, gt=0, le=100)
 
 
 # WORKER_GPU_RESERVE_GIB=auto: Transkun and the GPU libraries, and the

@@ -125,6 +125,7 @@ Prints what a setting or secret is without reading the code and this page: the f
 | `WORKER_BATCH_TIMEOUT` | `2s` | Maximum wait for more jobs before running a partial batch. |
 | `WORKER_MAX_CONCURRENCY` | `auto` | Optional cap on concurrent GPU jobs. It can only lower the capacity calculated from VRAM. |
 | `WORKER_TEMPO_MAP` | `true` | Give the MIDI the beats and bars of the recording: a tempo change at every beat, one quarter note each, and time signatures from the downbeats. Notes keep their timing. See [Tempo map](architecture.md#-tempo-map). `false` writes everything at a fixed 120 BPM. On RunPod, set it on the endpoint. |
+| `WORKER_BUSY_UTILIZATION` | `90` | In a [home cluster](cluster.md), placing jobs by load: a device whose GPU, or CPU for a CPU worker, is at least this busy in percent, averaged over the last 20 seconds and counting every program on it, or whose GPU lacks the VRAM one more job needs, leaves a new job to a device that is less busy, has a free place, and has that VRAM. When every device is busy, the job runs where it is. Without nodes it changes nothing. |
 
 ### Billing
 

@@ -247,6 +247,12 @@ def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.t
     def get_limits(email: str = Depends(readable)):
         return limit_controls.current()
 
+    @app.get("/api/nodes")
+    def get_nodes(email: str = Depends(readable)):
+        from app.admin import nodes
+
+        return nodes.overview()
+
     @app.get("/api/announcements")
     def get_announcements(email: str = Depends(readable), ended: bool = False):
         return announce.listing(ended=ended)

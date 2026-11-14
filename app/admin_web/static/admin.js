@@ -1002,6 +1002,59 @@ async function limitsView() {
     ], data.blocked, { empty: "No one is blocked", emptyIcon: "shield" })));
 }
 
+// --- Devices of a home cluster (docs/cluster.md) -------------------------------------------------
+
+const NODE_TASKS = [
+  ["transcribe", "Transcriptions"],
+  ["arrange", "Arrangements"],
+  ["dispatch", "Sending to RunPod"],
+  ["check", "Link checks for the hub"],
+];
+
+async function nodesView() {
+  const subtitle = "What each device may do; a switched-off task finishes its running jobs first";
+  fill(main, head("Devices", subtitle), skeleton("dashboard"));
+  let data;
+  try {
+    data = await api("/api/nodes");
+  } catch (error) {
+    fill(main, head("Devices", subtitle), errorBox(error));
+    return;
+  }
+  const canSwitch = canChange("nodes.switch");
+  const stale = (seen) => Date.now() / 1000 - seen > 45;
+  const cards = data.devices.map((device) => {
+    const allowed = device.tasks === null ? NODE_TASKS.map(([task]) => task) : device.tasks;
+    const running = new Set(device.services.flatMap((service) => service.running));
+    const offered = new Set(device.services.flatMap((service) => service.offered));
+    const live = device.services.some((service) => !stale(service.seen));
+    const color = !device.enabled ? "grey" : live ? "green" : "red";
+    const state = !device.enabled ? badge("switched off", "warn") : live ? badge("running", "good") : badge("not running", "bad");
+    const rows = NODE_TASKS.filter(([task]) => offered.has(task) || allowed.includes(task)).map(([task, title]) => ({
+      task, title, allowed: allowed.includes(task), running: running.has(task), offered: offered.has(task),
+    }));
+    const problems = device.services.filter((service) => service.problem || (service.code && !service.same_code));
+    return iconCard("limits", color, device.node, device.address ? `address ${device.address}` : "address not learned yet",
+      el("div", { class: "btn-row" }, state,
+        canSwitch ? qbtn(device.enabled ? "Switch off" : "Switch on", device.enabled ? "c-red" : "c-green",
+          () => change("nodes.switch", { node: device.node, on: !device.enabled },
+            { title: `${device.enabled ? "Switch off" : "Switch on"} ${device.node}`, after: () => open("nodes") })) : null),
+      table([
+        { label: "Task", key: "title" },
+        { label: "State", render: (row) => (row.running ? badge("running", "good") : !row.allowed ? badge("denied", "warn")
+          : !row.offered ? badge("not on this device", "warn") : badge("idle")) },
+        { label: "", render: (row) => (canChange("nodes.task") ? qbtn(row.allowed ? "Deny" : "Allow", row.allowed ? "c-grey" : "c-green",
+          () => change("nodes.task", { node: device.node, task: row.task, allowed: !row.allowed },
+            { title: `${row.allowed ? "Deny" : "Allow"} ${row.title.toLowerCase()} on ${device.node}`, after: () => open("nodes") })) : null) },
+      ], rows, { empty: "This device has not reported what it can do", emptyIcon: "limits" }),
+      problems.length ? el("p", { class: "secondary pw-hint",
+        text: problems.map((service) => service.problem || `${service.service} runs other code than the hub; update it`).join(" · ") }) : null);
+  });
+  fill(main,
+    head("Devices", canSwitch ? subtitle : "Read-only here; switch devices on the server: python scripts/admin.py nodes"),
+    el("div", { class: "grid three" }, ...cards));
+}
+
 // --- Formatted text --------------------------------------------------------------------------------
 // The announcement formatting, parsed exactly as app/announcements.py does
 // (parse_markup); a test runs both on the same texts. Only the server's
@@ -1769,7 +1822,7 @@ function lowerConfirm(planned, reason) {
 
 // --- Start -------------------------------------------------------------------------------------------
 
-const VIEWS = { overview, jobs, users, billing, limits: limitsView, announcements: announcementsView, audit: auditView, access: accessView };
+const VIEWS = { overview, jobs, users, billing, limits: limitsView, nodes: nodesView, announcements: announcementsView, audit: auditView, access: accessView };
 
 function setCurrent(view) {
   for (const button of document.querySelectorAll(".adm-nav button")) {

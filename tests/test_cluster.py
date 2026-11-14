@@ -3,6 +3,7 @@ attempts that cannot overwrite each other, jobs that move between devices,
 billing that only the hub writes, and rate limits per public address."""
 
 import json
+import re
 import signal
 import sys
 import types
@@ -603,6 +604,36 @@ def test_the_hub_publishes_no_secret(monkeypatch):
     assert info["settings"]["RESULT_RETENTION"] == "1d"
     assert "s3cr3t" not in json.dumps(info)
     assert "REDIS_PASSWORD_FILE" not in info["settings"]
+
+
+# --- The nodes' Redis rules -------------------------------------------------------------------------
+
+def node_rules() -> list[str]:
+    template = Path(__file__).resolve().parent.parent / "redis" / "node.acl"
+    [line] = [line for line in template.read_text(encoding="utf-8").splitlines() if line.startswith("user ")]
+    return line.split()
+
+
+def test_every_rule_of_a_node_is_one_well_formed_token():
+    # Two rules run together would make a pattern that matches nothing; see
+    # tests/test_node_redis_rules.py for the rules on a real Redis.
+    tokens = node_rules()
+    assert tokens[:5] == ["user", "node-{name}", "on", "#{hash}", "resetchannels"]
+    for token in tokens[5:]:
+        assert re.fullmatch(r"(%R~|%RW~|~)[a-z_:*{}.-]+|[+-]@?[a-z_|]+", token), token
+        assert token.count("~") <= 1, token
+
+
+def test_a_nodes_rules_name_no_other_node_and_no_control():
+    patterns = [token.split("~", 1)[1] for token in node_rules() if "~" in token]
+    writable = [token.split("~", 1)[1] for token in node_rules() if token.startswith(("%RW~", "~"))]
+
+    assert not any(pattern.startswith(("controls:", "maintenance:", "admin_web:", "workers:api")) for pattern in patterns)
+    assert not any(pattern == "*" or pattern.startswith("cluster:node:*") and "status" not in pattern for pattern in patterns)
+    # Its own switches are read-only to it; the hub's publications too.
+    assert not any(pattern.endswith(":config") or pattern in ("cluster:hub", "cluster:images", "cluster:nodes")
+                   for pattern in writable)
+    assert all("{name}" in pattern for pattern in writable if pattern.startswith(("cluster:node:", "cluster:egress:")))
 
 
 # --- Switches and status ---------------------------------------------------------------------------

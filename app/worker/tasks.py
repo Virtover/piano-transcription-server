@@ -652,6 +652,66 @@ class AverageDuration:
 local_job_duration = AverageDuration()
 
 
+class RunningJobs:
+    """Local jobs this worker process runs now, for its heartbeat."""
+
+    def __init__(self):
+        self.count = 0
+        self._lock = threading.Lock()
+
+    def add(self, change: int) -> None:
+        with self._lock:
+            self.count = max(0, self.count + change)
+
+
+local_jobs_running = RunningJobs()
+# Set by the heartbeat in a worker that consumes a local queue: how busy
+# this device is (app.worker.load). None elsewhere, as in the API.
+load_monitor = None
+
+
+def job_memory_mib(job: dict[str, str]) -> float:
+    """VRAM one more job of this kind needs, as the worker plans it."""
+    worker = settings.worker
+    gib = worker.arrangement_memory_gib if job.get("mode") == ARRANGEMENT else worker.memory_per_job_gib
+    return gib * 1024
+
+
+def busy_here(job: dict[str, str]) -> bool:
+    """Whether this device is too busy for one more job: its GPU or CPU at
+    WORKER_BUSY_UTILIZATION or more, by any program, or its GPU without the
+    VRAM the job needs."""
+    if load_monitor is None:
+        return False
+    load = load_monitor.current()
+    if load.utilization is not None and load.utilization >= settings.worker.busy_utilization:
+        return True
+    return load.gpu and load.free_mib is not None and load.free_mib < job_memory_mib(job)
+
+
+def roomier_device(job: dict[str, str], task: str) -> str | None:
+    """Another device whose worker for task has a free place, is less busy
+    than WORKER_BUSY_UTILIZATION, and has the VRAM the job needs."""
+    node = cluster.node_name()
+    need = job_memory_mib(job)
+    # A busy GPU is still faster than an idle CPU: a GPU device hands jobs
+    # to GPU devices only.
+    on_gpu = load_monitor is not None and load_monitor.current().gpu
+    for worker in routing.local_workers(redis):
+        if not worker["node"] or worker["node"] == node or (on_gpu and not worker["gpu"]):
+            continue
+        if not worker["arrangement" if task == "arrange" else "transcription"]:
+            continue
+        if worker["running"] >= worker["capacity"] or worker["utilization"] is None:
+            continue
+        if worker["utilization"] >= settings.worker.busy_utilization:
+            continue
+        if worker["gpu"] and worker["free_mib"] is not None and worker["free_mib"] < need:
+            continue
+        return worker["node"]
+    return None
+
+
 def run_job(
     job_id: str,
     backend: routing.Backend,
@@ -673,6 +733,8 @@ def run_job(
         if not claim_job(job_id, lease.token):
             return
         claimed = True
+        if backend == "local":
+            local_jobs_running.add(1)
         lease.start()
         record_job(job_id)
         started = time.monotonic()
@@ -752,6 +814,8 @@ def run_job(
         storage().discard_inputs(job_id, output_dir)
     finally:
         if claimed:
+            if backend == "local":
+                local_jobs_running.add(-1)
             lease.stop()
             # With S3, the attempt's scratch folder; the kept files stay.
             storage().release(output_dir)
@@ -943,6 +1007,10 @@ def pass_reason(job: dict[str, str], backend: routing.Backend) -> str | None:
         others = [name for name, tasks in cluster.running_tasks(redis).items() if task in tasks and name not in ran_on]
         if others:
             return "it was interrupted on this device"
+    if backend == "local" and busy_here(job):
+        other = roomier_device(job, task)
+        if other:
+            return f"this device is busy, and {other} has room"
     return None
 
 
@@ -1093,12 +1161,20 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
             return
         capacity = worker.worker_threads
         stop = self._stop = threading.Event()
+        global load_monitor
+        from app.worker import load
+
+        monitor = load_monitor = load.LoadMonitor(gpu=not settings.worker.enforce_cpu and load.sample_gpus() is not None)
+        monitor.start()
 
         def beat():
             while not stop.is_set():
                 try:
+                    current = monitor.current()
                     routing.publish_heartbeat(redis, capacity, local_job_duration.value, arrangement=arranges,
-                                              transcription=transcribes)
+                                              transcription=transcribes, node=cluster.node_name(),
+                                              running=local_jobs_running.count, utilization=current.utilization,
+                                              free_mib=current.free_mib, gpu=current.gpu)
                 except Exception:
                     logger.exception("Could not publish the worker heartbeat")
                 stop.wait(self.interval)
@@ -1106,6 +1182,8 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
         threading.Thread(target=beat, name="worker-heartbeat", daemon=True).start()
 
     def before_worker_shutdown(self, broker, worker):
+        if load_monitor is not None:
+            load_monitor.stop()
         if self._stop is not None:
             self._stop.set()
             try:

@@ -12,8 +12,8 @@ undone.
 from dataclasses import dataclass
 from typing import Callable
 
-from app import announcements, controls, video_sites
-from app.admin import announce, jobs, limits, users
+from app import announcements, cluster, controls, video_sites
+from app.admin import announce, jobs, limits, nodes, users
 from app.admin.common import AdminError, find_user, parse_duration
 from app.config import settings
 from app.worker import tasks
@@ -135,6 +135,25 @@ def _announcement_id(args: dict) -> dict:
     return {"id": _text(args, "id", length=64)}
 
 
+def _node_switch(args: dict) -> dict:
+    if args.get("on") not in (True, False):
+        raise AdminError("on must be true or false")
+    return {"node": nodes.check_node(_text(args, "node", length=31)), "on": args["on"]}
+
+
+def _node_task(args: dict) -> dict:
+    if args.get("allowed") not in (True, False):
+        raise AdminError("allowed must be true or false")
+    task = _text(args, "task", length=16)
+    nodes.check_tasks([task])
+    return {"node": nodes.check_node(_text(args, "node", length=31)), "task": task, "allowed": args["allowed"]}
+
+
+def _node_plan(args: dict) -> dict:
+    config = cluster.node_config(tasks.redis, args["node"])
+    return {**args, "enabled_now": config["enabled"], "tasks_now": nodes.task_list(config["tasks"])}
+
+
 def _user_plan(args: dict) -> dict:
     user = find_user(args["user"])
     return {"user_id": user["user_id"], "email": user["email"], "blocked_now": controls.blocked(tasks.redis, user["user_id"]) is not None}
@@ -231,5 +250,19 @@ ACTIONS: dict[str, Action] = {
             "back_to_setting": args["limit"] is None,
         },
         lambda args, actor, reason: limits.set_per_user_limit(args["limit"], args["for"], actor, reason),
+    ),
+    # A home cluster's devices (docs/cluster.md). Inviting and revoking stay
+    # on the command line: they write the hub's secret files.
+    "nodes.switch": Action(
+        "Switch a device on or off",
+        _node_switch,
+        _node_plan,
+        lambda args, actor, reason: nodes.switch(args["node"], args["on"], actor, reason),
+    ),
+    "nodes.task": Action(
+        "Allow or deny a task on a device",
+        _node_task,
+        _node_plan,
+        lambda args, actor, reason: nodes.allow(args["node"], [args["task"]], args["allowed"], actor, reason),
     ),
 }

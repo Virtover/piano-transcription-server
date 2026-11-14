@@ -278,10 +278,13 @@ def test_the_heartbeat_says_whether_the_worker_arranges(worker, monkeypatch, que
 
     monkeypatch.setattr(tasks.routing, "publish_heartbeat", publish)
     monkeypatch.setattr(tasks.threading, "Thread", lambda target, **options: types.SimpleNamespace(start=target))
+    monkeypatch.setattr("app.worker.load.LoadMonitor.start", lambda self: None)
+    monkeypatch.setattr("app.worker.load.sample_gpus", lambda: None)
 
     middleware.after_worker_boot(tasks.broker, dramatiq_worker(queues))
 
-    assert beats == [{"arrangement": published, "transcription": queues is None or tasks.LOCAL_QUEUE in queues}]
+    assert [{name: beat[name] for name in ("arrangement", "transcription")} for beat in beats] == [
+        {"arrangement": published, "transcription": queues is None or tasks.LOCAL_QUEUE in queues}]
 
 
 def test_a_worker_kept_to_arrangements_beats_without_transcriptions(worker, monkeypatch):
@@ -296,10 +299,13 @@ def test_a_worker_kept_to_arrangements_beats_without_transcriptions(worker, monk
 
     monkeypatch.setattr(tasks.routing, "publish_heartbeat", publish)
     monkeypatch.setattr(tasks.threading, "Thread", lambda target, **options: types.SimpleNamespace(start=target))
+    monkeypatch.setattr("app.worker.load.LoadMonitor.start", lambda self: None)
+    monkeypatch.setattr("app.worker.load.sample_gpus", lambda: None)
 
     middleware.after_worker_boot(tasks.broker, dramatiq_worker([tasks.ARRANGEMENT_QUEUE]))
 
-    assert beats == [{"arrangement": True, "transcription": False}]
+    assert [{name: beat[name] for name in ("arrangement", "transcription", "node", "running")} for beat in beats] == [
+        {"arrangement": True, "transcription": False, "node": "hub", "running": 0}]
 
 
 # --- Routing ---------------------------------------------------------------------

@@ -51,10 +51,17 @@ def publish_heartbeat(
     worker: str | None = None,
     arrangement: bool = False,
     transcription: bool = True,
+    node: str = "",
+    running: int = 0,
+    utilization: float | None = None,
+    free_mib: float | None = None,
+    gpu: bool = False,
 ) -> None:
     """Called periodically by each GPU worker. Expires if the worker stops.
     arrangement and transcription: whether it consumes the arrangement
-    queue, and the local one, which a cluster switch can turn off."""
+    queue, and the local one, which a cluster switch can turn off. node,
+    running, utilization, free_mib, and gpu: its device, the jobs it runs,
+    and how busy the device is, for placing jobs across a home cluster."""
     worker = worker or worker_id()
     now = time.time()
     with redis.pipeline() as pipe:
@@ -65,6 +72,11 @@ def publish_heartbeat(
                 "average_job_seconds": average_job_seconds or "",
                 "arrangement": "1" if arrangement else "0",
                 "transcription": "1" if transcription else "0",
+                "node": node,
+                "running": running,
+                "utilization": "" if utilization is None else f"{utilization:.1f}",
+                "free_mib": "" if free_mib is None else f"{free_mib:.0f}",
+                "gpu": "1" if gpu else "0",
                 "updated_at": now,
             },
         )
@@ -116,9 +128,21 @@ def local_workers(redis: Redis) -> list[dict]:
             "arrangement": heartbeat.get("arrangement") == "1",
             # Missing from workers of before cluster switches: they transcribe.
             "transcription": heartbeat.get("transcription", "1") == "1",
+            "node": heartbeat.get("node") or "",
+            "running": _number(heartbeat.get("running"), int) or 0,
+            "utilization": _number(heartbeat.get("utilization"), float),
+            "free_mib": _number(heartbeat.get("free_mib"), float),
+            "gpu": heartbeat.get("gpu") == "1",
             "updated_at": updated_at,
         })
     return alive
+
+
+def _number(value, kind):
+    try:
+        return kind(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def local_capacity(redis: Redis, arrangement: bool = False) -> tuple[int, float]:
