@@ -651,6 +651,13 @@ def test_a_nodes_rules_name_no_other_node_and_no_control():
     assert all("{name}" in pattern for pattern in writable if pattern.startswith(("cluster:node:", "cluster:egress:")))
 
 
+def test_the_launchers_own_variable_is_no_unknown_setting():
+    from app import config, error_report
+
+    assert error_report.SERVICE_ENVIRONMENT in config.INTERNAL_VARIABLES
+    assert config.unknown_variable_warnings({error_report.SERVICE_ENVIRONMENT: "worker"}) == []
+
+
 def test_the_code_version_ignores_line_endings(tmp_path, monkeypatch):
     def version(text: bytes) -> str:
         (tmp_path / "app").mkdir(exist_ok=True)

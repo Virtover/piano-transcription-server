@@ -170,6 +170,64 @@ def test_only_node_names_become_users(redis_port):
     assert not any(" " in user or user == "node-bad name" for user in users)
 
 
+def wait_for(port, password=PASSWORDS["operator"], timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            Redis(port=port, username="operator", password=password, socket_timeout=2).ping()
+            return
+        except Exception:
+            time.sleep(0.3)
+    pytest.fail("Redis did not come back")
+
+
+def test_transactions_survive_a_restart_and_redis_stays_closed_while_loading(tmp_path):
+    """Redis replays its append-only file as the default user, which may do
+    nothing: redis/start.sh loads it with the port closed, then the users."""
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    for name, password in PASSWORDS.items():
+        (secrets / name).write_text(password, encoding="utf-8")
+    name = f"piano-aof-test-{uuid.uuid4().hex[:8]}"
+    subprocess.run(
+        ["docker", "run", "-d", "--name", name, "-p", "127.0.0.1::6379", "--restart", "unless-stopped",
+         "-v", f"{ROOT / 'redis'}:/redis:ro", "-v", f"{secrets}:/run/secrets/redis:ro",
+         "--entrypoint", "/bin/sh", "redis:7-alpine", "/redis/start.sh",
+         "redis-server", "--appendonly", "yes", "--appendfsync", "always"],
+        check=True, capture_output=True,
+    )
+    try:
+        port = int(subprocess.run(["docker", "port", name, "6379/tcp"], capture_output=True, text=True,
+                                  check=True).stdout.split(":")[-1])
+        wait_for(port)
+        app = Redis(port=port, username="app", password=PASSWORDS["app"], decode_responses=True)
+        with app.pipeline() as pipe:
+            pipe.hset("transcription:job", "status", "completed")
+            pipe.expire("transcription:job", 3600)
+            pipe.execute()
+        app.set("plain", "1")
+
+        # A crash: Redis exits by itself, and Docker starts it again.
+        try:
+            Redis(port=port, username="operator", password=PASSWORDS["operator"]).shutdown(nosave=True)
+        except Exception:
+            pass
+        time.sleep(1)
+        port = int(subprocess.run(["docker", "port", name, "6379/tcp"], capture_output=True, text=True,
+                                  check=True).stdout.split(":")[-1])
+        wait_for(port)
+
+        app = Redis(port=port, username="app", password=PASSWORDS["app"], decode_responses=True)
+        assert app.hget("transcription:job", "status") == "completed"
+        assert app.get("plain") == "1"
+        with pytest.raises(Exception):
+            Redis(port=port, socket_timeout=2).set("x", "1")
+        logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
+        assert "NOPERM" not in logs.stdout + logs.stderr
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
 def test_a_node_signs_in_with_its_own_password_only(redis_port):
     with pytest.raises(Exception):
         Redis(port=redis_port, username="node-laptop", password=NODES["desktop"]).ping()

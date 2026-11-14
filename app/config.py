@@ -837,9 +837,14 @@ def resolve_secret_aliases(secrets_dir: str | None) -> dict[str, str]:
     return values
 
 
+# Set by the worker launcher for each Dramatiq process: which service reports
+# its errors (app.error_report.SERVICE_ENVIRONMENT). Not a setting.
+INTERNAL_VARIABLES = {"ERROR_REPORT_SERVICE"}
+
+
 def unknown_variable_warnings(environment: dict[str, str]) -> list[str]:
     # Docker Compose's own, such as WORKER_GPU_BUILD, are known too.
-    known = set(known_variables()) | set(ALIASES) | COMPOSE_ONLY_VARIABLES
+    known = set(known_variables()) | set(ALIASES) | COMPOSE_ONLY_VARIABLES | INTERNAL_VARIABLES
     messages = []
     for name in sorted(environment):
         if not name.startswith(CHECKED_PREFIXES) or name in known:
