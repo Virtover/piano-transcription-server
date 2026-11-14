@@ -125,6 +125,28 @@ python scripts/admin.py limits per-user default
 
 `--for` (a duration such as `30m`, `2h`, or `7d`) removes a control on its own after that time; without it, it lasts until removed. A pause or links-off with `--for` sends `Retry-After` with the time left. The controls are kept in Redis, so they last through a restart of the API but not a loss of Redis data.
 
+In a [home cluster](cluster.md), a video site's state is kept per public address, and `limits` lists each address that has one; `sites reset` resets every address.
+
+## 🖥️ Devices
+
+The devices of a [home cluster](cluster.md), and what each may do. The hub itself is the device `hub`, also without other devices.
+
+```shell
+python scripts/admin.py nodes
+python scripts/admin.py nodes off laptop --reason "travelling"
+python scripts/admin.py nodes on laptop
+python scripts/admin.py nodes deny hub transcribe arrange
+python scripts/admin.py nodes allow laptop dispatch
+python scripts/admin.py nodes invite desktop --tasks transcribe,arrange
+python scripts/admin.py nodes revoke laptop
+```
+
+* **`nodes`** lists every device: whether it takes work, its allowed tasks, its public address, and each service's state, what it runs now, and when it was last seen.
+* **`off`** and **`on`** stop a device taking work, or let it again; running jobs finish either way. **`allow`** and **`deny`** change its tasks: `transcribe`, `arrange`, `dispatch`, `check`, or `all`. They apply within 10 seconds and are written to the audit log.
+* **`invite`**, **`revoke`**, and **`hub`** run on the host, because they write files in `secrets/`; see [Home cluster](cluster.md).
+
+The admin web page's **Devices** section shows the same, and in read-write mode has the switches.
+
 ## 📣 Announcements
 
 Messages the apps show, for example how to keep using the app if it is no longer in its store. Apps read them from [`GET /api/announcements`](api.md#-announcements) within about 15 seconds of a change.

@@ -1084,11 +1084,13 @@ def send_job(job_id: str, backend: routing.Backend, *arguments, **options) -> No
         actor = arrange_job
     else:
         actor = transcribe_job
-    if options:
-        # Message options such as delay; send() would pass them to the actor.
-        actor.send_with_options(args=(job_id, *arguments), **options)
+    # delay is Dramatiq's; send() would hand it to the actor as an argument.
+    # Every other keyword, such as upload_title, is the actor's.
+    delay = options.pop("delay", None)
+    if delay is not None:
+        actor.send_with_options(args=(job_id, *arguments), kwargs=options or None, delay=delay)
     else:
-        actor.send(job_id, *arguments)
+        actor.send(job_id, *arguments, **options)
 
 
 def run_local_job(job_id: str, source_url: str | None, upload_title: str | None) -> None:

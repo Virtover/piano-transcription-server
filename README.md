@@ -32,6 +32,7 @@ Optional features, such as HTTPS, Google Play billing, or outsourcing to RunPod,
 * [HTTPS through a Cloudflare Tunnel](docs/cloudflare-tunnel.md) - an HTTPS address for the server without opening ports, turned on from `.env`.
 * [Outsourcing to RunPod](docs/runpod.md) - step by step: Cloudflare R2 storage, Docker Hub, the RunPod endpoint, and a free local test.
 * [Scaling beyond one machine](docs/scaling.md) - the two ways to run the server, what makes several machines work, and moving a running server.
+* [Home cluster](docs/cluster.md) - your other devices, Linux or Windows, with a GPU or without, run work for the server over Tailscale; switch each device and task on and off; jobs move away from a busy or lost device.
 * [Kubernetes](docs/kubernetes.md) - several machines: API replicas, GPU workers added as the queue grows, managed Redis and PostgreSQL; `python scripts/kube.py`, also for a test cluster on this PC. Tested only on that test cluster so far, not yet on real infrastructure.
 * [Administration](docs/administration.md) - server status, jobs, user accounts and credits, the billing report, and temporary limits, with `python scripts/admin.py`.
 * [Configuration and environment](docs/configuration.md) - environment variables, GPU memory and batching, secrets, error reports, and database backups.

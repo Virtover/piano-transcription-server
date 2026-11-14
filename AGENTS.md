@@ -15,7 +15,9 @@ python scripts/setup.py status                                  # the same for p
 docker compose up -d --build                                     # the stack; OUTSOURCE_PROVIDER in server.env switches RunPod on
 python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start (also first start), status, cancel
 python scripts/server.py restore 2                               # billing database from a backup: latest, a name, or Nth newest; --from local, --fallback
-python scripts/admin.py status                                  # live picture; also jobs, user, users find, billing, limits, audit
+python scripts/admin.py status                                  # live picture; also jobs, user, users find, billing, limits, nodes, audit
+python scripts/admin.py nodes invite laptop                     # home cluster hub: nodes hub <tailnet ip>, invite, revoke, on/off, allow/deny
+python scripts/server.py join laptop.json                       # on a device: become a node; then start, stop, restart, update, status
 python scripts/kube.py local up                                 # Kubernetes: a test cluster on this PC; up, update, status, down for a real one
 python scripts/kube.py restart 5m                               # server.py's and admin.py's commands on a cluster: restart, stop, start, cancel, admin
 ```
@@ -33,6 +35,10 @@ python scripts/kube.py restart 5m                               # server.py's an
 | `app/api/routes/` | HTTP endpoints |
 | `app/worker/tasks.py` | Job lifecycle, billing settlement, local and remote actors |
 | `app/outsource/` | Routing between local and RunPod, storage, the RunPod client |
+| `app/cluster.py`, `docs/cluster.md` | A home cluster: the hub and its nodes, their switches and status, the settings nodes take from the hub, public addresses, billing nodes leave to the hub |
+| `app/worker/supervisor.py`, `app/worker/load.py` | With Compose: Dramatiq as children, by the cluster's switches; how busy the device is, for placing jobs |
+| `app/video_check.py` | Reading a video's length with yt-dlp, by the API or, while a site refuses the hub's address, by a node |
+| `docker-compose.hub.yml`, `docker-compose.node.yml`, `scripts/nodes.py`, `redis/node.acl` | The hub's published services; a node's worker; the host side of hub setup, invites, and join; a node's Redis rules |
 | `app/transcription/` | Audio, batching, and the model |
 | `app/transcription/amt_apc/` | Vendored AMT-APC inference (MIT), for piano arrangements; weights `apc.pth` are fetched, with a sha256, at image build |
 | `app/transcription/arrangement.py`, `styles.py` | The arrangement batcher, and the styles a request may ask for |
@@ -89,6 +95,9 @@ People can run `python scripts/setup.py`. For guided setup by an agent, use the 
 - The workers cover `secrets/cloudflare` (the tunnel token) with an empty folder, which needs the folder to exist: without it they fail with `make mountpoint "/run/secrets/cloudflare": read-only file system`. `scripts/server.py start` creates it.
 - A stopped container keeps the ID of its network; once the network is created again (`docker network prune`, a Docker Desktop reset), it fails with `failed to set up container networking: network ... not found`. `scripts/server.py start` and `restart` remove such containers first, so `up` creates them anew.
 - Every service drops all Linux capabilities and runs with `no-new-privileges`; `prepare` keeps only `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, and `FSETID` (without `FSETID` the setgid bit on `billing-data` folders is silently lost). A new service gets the same, through `<<: *unprivileged`.
+- Redis replays its append-only file as its locked `default` user: `redis/start.sh` loads it with the port closed, then the users. Never start Redis with `--aclfile` directly, or transactions vanish at its next restart. A change to Redis's users or start: run `tests/test_node_redis_rules.py` with `PIANO_DOCKER_TESTS=1`.
+- `docker kill` is a deliberate stop to Docker, which does not restart the container; to test a crash, make the process exit (`SHUTDOWN NOSAVE` for Redis).
+- A node never reaches PostgreSQL: `tasks.billing` is `cluster.HubBilling` there, and the leading API settles from the job's state. Keep worker code from calling other billing methods.
 - Redis refuses clients without a password. Every service signs in as `app` with `REDIS_PASSWORD_FILE`; only the `redis` service sees all of `secrets/redis`, which an empty mount hides from services that mount `secrets/`. A new Redis client must pass `**settings.service.redis_options()`; Dramatiq gets a client, because it ignores a password beside a URL. fakeredis does not enforce Redis's user rules.
 - The RunPod image installs PyTorch for a fixed CUDA version, `RUNPOD_CUDA_VERSION` in `app/requirements.py`; a test keeps `Dockerfile.runpod` in sync with it. pip's default PyTorch targets a newer CUDA and fails on hosts whose driver does not support it.
 - Settings and secrets are read once, at startup: after writing a secret file, `docker compose restart <service>`. `docker compose up -d` restarts only services whose configuration changed.

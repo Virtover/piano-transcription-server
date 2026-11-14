@@ -45,6 +45,24 @@ Tests that import `torch` or `transkun` (`tests/test_arrangement*.py`, `tests/te
 docker compose run --rm --no-deps -v ./tests:/app/tests:ro -v ./pytest.ini:/app/pytest.ini:ro worker sh -c "python3 -m pip install -q pytest && python3 -m pytest -q tests/test_amt_apc.py tests/test_budget.py tests/test_arrangement.py"
 ```
 
+## 🧱 Tests on a real Redis
+
+fakeredis does not enforce Redis's users, and does not restart. `tests/test_node_redis_rules.py` starts `redis:7-alpine` with `redis/start.sh`, as the stack does, and checks that a [cluster](cluster.md) node's rules allow everything a worker does, Dramatiq's scripts included, and nothing else, and that transactions survive a restart of Redis. It needs Docker, and is skipped unless asked for:
+
+**Windows (PowerShell)**
+
+```powershell
+$env:PIANO_DOCKER_TESTS = "1"; .\.venv\Scripts\python -m pytest -q tests/test_node_redis_rules.py
+```
+
+**macOS and Linux**
+
+```bash
+PIANO_DOCKER_TESTS=1 .venv/bin/python -m pytest -q tests/test_node_redis_rules.py
+```
+
+Run it after changing `redis/users.acl`, `redis/node.acl`, `redis/start.sh`, or a Redis key a worker uses.
+
 ## ⚡ Benchmarking CPU versus GPU
 
 The repository includes [scripts/benchmark_transcription.py](../scripts/benchmark_transcription.py).
@@ -122,6 +140,10 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | --- | --- |
 | `test_arrangement.py`, `test_arrangement_api.py`, `test_arrangement_tasks.py` | Piano arrangements: the arrangement batcher and styles, the `mode` and `style` request fields and their refusals, and the arrangement job lifecycle and routing. The first needs the worker's packages. |
 | `test_budget.py`, `test_amt_apc.py` | The shared per-device memory budget, and the vendored AMT-APC inference. Both need the worker's packages. |
+| `test_cluster.py` | A [home cluster](cluster.md): attempt tokens, so a device that lost its job writes nothing; jobs queued again after an interruption, and once only refunded; billing the hub settles from the job's state; jobs handed to another device; rate limits per public address; link checks by a node; the settings nodes take from the hub; switches and status; the supervisor; the shape of a node's Redis rules. |
+| `test_load_placement.py` | Placing jobs by load: a busy GPU, or one without VRAM, leaves a job to a less busy device with room; GPU and CPU sampling. |
+| `test_cluster_scripts.py` | The cluster's host scripts: `nodes hub`, `invite`, `revoke`, and `join`, what an invite holds and never holds, node mode of `scripts/server.py`, and the registry's images. |
+| `test_node_redis_rules.py` | A node's Redis rules, and transactions across a Redis restart, on a real Redis (Docker; see [Tests on a real Redis](#-tests-on-a-real-redis)). |
 | `test_transcriptions_api.py` | Job creation, status, cancellation, MIDI download, path checks, job ownership, reservations, and startup and worker errors. |
 | `test_billing_api.py` | Server info, cost, balance, Google Play purchase verification, and free-minute grants. |
 | `test_account_api.py` | Account deletion: removed data, kept anonymous purchases, running jobs, free-minute abuse protection, and deletion with `app.admin user ... delete`. |

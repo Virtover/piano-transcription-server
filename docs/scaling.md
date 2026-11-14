@@ -17,6 +17,8 @@ The server runs in one of two ways, from the same code:
 
 Clients see one difference: with `JOB_STORAGE=s3`, the MIDI download answers with a redirect to a signed link instead of the file. Apps must follow it without their `Authorization` header; see [Following a job](api.md#-following-a-job).
 
+A third way, between the two: a [home cluster](cluster.md), the Compose stack on one machine with workers on your other devices, over Tailscale. It needs no managed services or Kubernetes; the hub remains one machine.
+
 One machine is the right choice until it is not enough: a busy GPU that RunPod outsourcing cannot relieve affordably, or an outage you cannot accept while the machine restarts. `python scripts/admin.py billing` shows the minutes sold and used, against the fixed cost of managed services and a cluster.
 
 ## 🧩 What makes several machines work

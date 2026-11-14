@@ -140,6 +140,21 @@ def test_a_job_handed_on_is_sent_again_with_a_delay_as_a_message_option(api_cont
     assert message.kwargs == {}
 
 
+def test_the_actors_own_keywords_stay_the_actors(api_context, monkeypatch):
+    # As the API queues an upload: its title is an argument of the job.
+    tasks.redis.hset(tasks.job_key("job"), mapping={"status": "queued", "source": "upload"})
+    sent = []
+    monkeypatch.setattr(tasks.transcribe_job, "send", lambda *args, **kwargs: sent.append(("send", args, kwargs)))
+    monkeypatch.setattr(tasks.transcribe_job, "send_with_options",
+                        lambda args=(), kwargs=None, **options: sent.append(("options", args, kwargs, options)))
+
+    tasks.send_job("job", "local", upload_title="My Song")
+    tasks.send_job("job", "local", upload_title="My Song", delay=5)
+
+    assert sent == [("send", ("job",), {"upload_title": "My Song"}),
+                    ("options", ("job",), {"upload_title": "My Song"}, {"delay": 5})]
+
+
 # --- Sampling -------------------------------------------------------------------------------
 
 def nvidia_smi(output, code=0):
