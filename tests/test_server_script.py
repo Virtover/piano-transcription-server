@@ -110,7 +110,12 @@ class FakeStack(server.ComposeStack):
 
     def up(self, command=None, build=True):
         self.up_call = (self.clock.now(), command, build)
+        self.calls.append(("up", command))
         return self.up_code
+
+    def stop_services(self, services):
+        self.calls.append(("stop_services", tuple(services)))
+        return 0
 
     def stop(self, down):
         self.stop_call = (self.clock.now(), down)
@@ -1207,3 +1212,19 @@ def test_compose_exec_passes_variables_and_a_terminal(tmp_path):
         ["docker", "compose", "build", "--quiet", "api"],
     ]
     assert all(options["cwd"] == tmp_path for _, options in calls)
+
+
+def test_a_restart_stops_the_services_before_recreating_any(capsys):
+    # Services still connected while Redis is recreated would only report
+    # losing it; drained, they have nothing left to finish.
+    code, stack, _ = run(["restart", "0s", "--no-build"])
+
+    assert code == 0
+    steps = [call for call in stack.calls if call[0] in ("stop_services", "up")]
+    assert steps == [("stop_services", tuple(server.BILLING_SERVICES)), ("up", None)]
+
+
+def test_a_custom_restart_command_stops_nothing_first():
+    code, stack, _ = run(["restart", "0s", "--command", "docker compose up -d api"])
+
+    assert ("stop_services", tuple(server.BILLING_SERVICES)) not in stack.calls

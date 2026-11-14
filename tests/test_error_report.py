@@ -403,3 +403,83 @@ def test_an_unwritable_directory_turns_the_watch_off(tmp_path):
     instance, _ = reporter()
 
     assert error_report.watch_crashes(instance, tmp_path / "missing", "api") is False
+
+
+# --- Redis's short outages -------------------------------------------------------------------
+
+def outage_record(message, name="dramatiq.worker.ConsumerThread(remote)", error=None):
+    record = logging.LogRecord(name, logging.CRITICAL, "worker.py", 326, message, (), None)
+    if error is not None:
+        record.exc_info = (type(error), error, None)
+    return record
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def gated(clock):
+    sent = []
+    reporter = error_report.Reporter("https://example.com", "token", "worker", send=lambda *a: 200, background=False)
+    reporter.submit = lambda report: sent.append(report) or True
+    return error_report.ReportHandler(reporter, clock=clock), sent
+
+
+@pytest.mark.parametrize("message, name, error", [
+    # As the reports during a restart said.
+    ("Consumer encountered a connection error: Error 111 connecting to redis:6379. Connection refused.",
+     "dramatiq.worker.ConsumerThread(remote)", None),
+    ("Consumer encountered a connection error: Error -3 connecting to redis:6379. Temporary failure in name resolution.",
+     "dramatiq.worker.ConsumerThread(arrangement)", None),
+    ("Could not clear the worker heartbeat", "app.worker.tasks", "redis"),
+])
+def test_a_short_redis_outage_is_not_reported(message, name, error):
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    clock = Clock()
+    handler, sent = gated(clock)
+    failure = RedisConnectionError("Error -3 connecting to redis:6379.") if error else None
+
+    handler.emit(outage_record(message, name, failure))
+    clock.now += 60
+    handler.emit(outage_record(message, name, failure))
+
+    assert sent == []
+
+
+def test_a_long_redis_outage_is_reported():
+    clock = Clock()
+    handler, sent = gated(clock)
+    message = "Consumer encountered a connection error: Error 111 connecting to 100.64.0.1:6379. Connection refused."
+
+    for _ in range(5):
+        handler.emit(outage_record(message))
+        clock.now += 40
+
+    assert len(sent) >= 1
+
+
+def test_a_new_outage_after_a_quiet_while_waits_again():
+    clock = Clock()
+    handler, sent = gated(clock)
+    message = "Consumer encountered a connection error: Error 111 connecting to redis:6379. Connection refused."
+    handler.emit(outage_record(message))
+    clock.now += error_report.OUTAGE_GRACE + 300
+    handler.emit(outage_record(message))
+
+    assert sent == []
+
+
+def test_other_errors_are_reported_at_once():
+    clock = Clock()
+    handler, sent = gated(clock)
+
+    handler.emit(outage_record("Job 1 failed", name="app.worker.tasks"))
+    # A connection refused by something other than Redis.
+    handler.emit(outage_record("Could not reach Google Play: Connection refused", name="app.google_play"))
+
+    assert len(sent) == 2

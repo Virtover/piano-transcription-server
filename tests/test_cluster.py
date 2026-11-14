@@ -933,3 +933,15 @@ def test_the_hub_does_not_check_links_for_itself(monkeypatch, default_settings):
     assert "check" not in supervisor.Supervisor.capabilities(instance)
     assert "dispatch" not in supervisor.Supervisor.capabilities(instance)
     assert instance.problem.startswith("outsourcing is off")
+
+
+def test_a_service_is_not_called_other_code_before_the_hub_published_its_own(api_context):
+    from app.admin import nodes
+
+    # As before the hub's API published its own; the test's API may have.
+    tasks.redis.delete(cluster.HUB_KEY)
+    cluster.publish_status(tasks.redis, "hub", "worker", {"running": ["transcribe"], "code": "abc"})
+    assert nodes.overview()["devices"][0]["services"][0]["same_code"]
+
+    tasks.redis.hset(cluster.HUB_KEY, mapping={"protocol": str(cluster.PROTOCOL), "code": "def", "settings": "{}"})
+    assert not nodes.overview()["devices"][0]["services"][0]["same_code"]

@@ -205,14 +205,49 @@ def report_from_record(record: logging.LogRecord) -> dict:
     }
 
 
+# A lost connection to Redis, as while it restarts or the hub of a home
+# cluster reboots: every service logs it, and reconnects by itself. Reported
+# only once it has lasted OUTAGE_GRACE, which a planned restart never does.
+REDIS_OUTAGE = re.compile(
+    r"(Error -?\d+ connecting to \S+:\d+|Connection refused|Connection closed by server|"
+    r"Temporary failure in name resolution|Name or service not known|Timeout connecting to server|"
+    r"Connection reset by peer|Network is unreachable)"
+)
+OUTAGE_GRACE = 120.0
+
+
+def is_redis_outage(record: logging.LogRecord) -> bool:
+    error = record.exc_info[1] if record.exc_info else None
+    if error is not None:
+        module = type(error).__module__ or ""
+        if module.startswith("redis") and type(error).__name__ in ("ConnectionError", "TimeoutError", "BusyLoadingError"):
+            return True
+    message = record.getMessage()
+    if not REDIS_OUTAGE.search(message):
+        return False
+    # Dramatiq's consumers lose only Redis; others name it.
+    return record.name.startswith("dramatiq") or "redis" in message.lower()
+
+
 class ReportHandler(logging.Handler):
-    def __init__(self, reporter: Reporter):
+    def __init__(self, reporter: Reporter, clock: Callable[[], float] = time.monotonic):
         super().__init__(level=logging.ERROR)
         self.reporter = reporter
+        self.clock = clock
+        # When the current outage of Redis began, and when it was last seen.
+        self.outage_started: float | None = None
+        self.outage_seen = 0.0
 
     def emit(self, record: logging.LogRecord) -> None:
         if record.name == __name__:
             return
+        if is_redis_outage(record):
+            now = self.clock()
+            if self.outage_started is None or now - self.outage_seen > OUTAGE_GRACE:
+                self.outage_started = now
+            self.outage_seen = now
+            if now - self.outage_started < OUTAGE_GRACE:
+                return
         try:
             self.reporter.submit(report_from_record(record))
         except Exception:

@@ -65,7 +65,8 @@ def overview() -> dict:
                     "problem": status.get("problem") or "",
                     "protocol": status.get("protocol"),
                     "code": status.get("code"),
-                    "same_code": bool(hub.get("code")) and status.get("code") == hub.get("code"),
+                    # Unknown until the hub's API published its own: then not different.
+                    "same_code": not hub.get("code") or not status.get("code") or status.get("code") == hub.get("code"),
                     "seen": status["updated_at"],
                 }
                 for status in services

@@ -600,6 +600,10 @@ def restart(args, stack: Stack, clock: Clock) -> int:
     persist_redis(stack, clock)
     say("restarting")
     remove_stale_containers(stack)
+    if isinstance(stack, ComposeStack) and not args.command:
+        # Before Redis may be recreated: services still connected would only
+        # report losing it. Drained, they have nothing to finish.
+        stack.stop_services(BILLING_SERVICES)
     code = stack.up(args.command)
     if code != 0:
         say(f"the restart command failed with exit code {code}")
