@@ -29,6 +29,8 @@ For a cluster of cloud machines instead, see [Kubernetes](kubernetes.md).
 * **This repository** on every device, at the same version as the hub's.
 * **Job files in a bucket** (`JOB_STORAGE=s3`): nodes share no folder with the hub. Either the bucket you have, such as Cloudflare R2, or one on the hub (`--storage` below).
 
+`python scripts/setup.py cluster` checks all of this on the machine it runs on, the hub or a node, says what is missing and how to fix it, and offers to make a machine with Tailscale the hub. `python scripts/setup.py status` shows the same in short.
+
 The hub should be the most reliable machine, always on. **Linux is the better hub:** Docker starts at boot, and the published addresses work as described. On Windows, Docker Desktop starts only when a user signs in; set it to start with Windows and sign in automatically, and keep the machine from sleeping.
 
 ## 🚀 Setting up the hub

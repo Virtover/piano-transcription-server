@@ -4,6 +4,7 @@
     python scripts/setup.py status            # what is on and what is missing
     python scripts/setup.py outsourcing       # set one feature up
     python scripts/setup.py off outsourcing   # turn one off
+    python scripts/setup.py cluster           # a home cluster: what it needs, and this machine as its hub
 
 A basic server needs none of this: python scripts/server.py start runs it.
 
@@ -225,6 +226,94 @@ class Missing:
             console.wrap(f"! {problem}", indent, "red")
 
 
+# --- A home cluster's checks, on the host --------------------------------------------------
+
+NODES = SERVER_SCRIPT.NODES
+DOCKER_AFTER_TAILSCALE = Path("/etc/systemd/system/docker.service.d/tailscale.conf")
+
+
+def run_quietly(command: list[str]) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return subprocess.CompletedProcess(command, 127, "", str(error))
+
+
+def tailscale_addresses(run=run_quietly) -> list[str]:
+    """This machine's Tailscale IPv4 addresses; none without Tailscale."""
+    if shutil.which("tailscale") is None:
+        return []
+    result = run(["tailscale", "ip", "-4"])
+    return [line.strip() for line in (result.stdout or "").splitlines() if result.returncode == 0 and line.strip()]
+
+
+@dataclass
+class ClusterCheck:
+    ok: bool
+    text: str
+    fix: str = ""
+    # Not needed; only shown.
+    optional: bool = False
+
+
+def cluster_checks(root: Path, features: dict | None, run=run_quietly, platform: str = sys.platform) -> list[ClusterCheck]:
+    """What a home cluster needs on this machine (docs/cluster.md): a hub's
+    or, with node.env, a node's. features is `features --json`, or None when
+    it cannot be read here, as on a node, which has no API image."""
+    checks = []
+    addresses = tailscale_addresses(run)
+    installed = shutil.which("tailscale") is not None
+    checks.append(ClusterCheck(
+        bool(addresses), f"Tailscale, signed in: {', '.join(addresses)}" if addresses else "Tailscale, signed in",
+        "Install Tailscale from tailscale.com on every device and sign in to one tailnet" if not installed
+        else "Tailscale is installed but has no address: sign in with `tailscale up`"))
+    checks.append(ClusterCheck(shutil.which("docker") is not None, "Docker", "Install Docker Desktop or Docker Engine"))
+    if NODES.is_node(root):
+        values = NODES.env_values(root / NODES.NODE_ENV)
+        hub = values.get("HUB_ADDRESS", "")
+        checks.append(ClusterCheck(True, f"joined as the node {values['NODE_NAME']}, of the hub at {hub}"))
+        checks.append(ClusterCheck((root / NODES.NODE_SECRETS / "redis_password").is_file(),
+                                   "its password from the invite, in secrets/node",
+                                   "Invite this device again on the hub and join with the new invite"))
+        checks.append(ClusterCheck(bool(hub) and NODES.reachable(hub, NODES.REDIS_PORT, timeout=3),
+                                   f"the hub's Redis answers at {hub}:{NODES.REDIS_PORT}",
+                                   "Start the hub, and check Tailscale on both devices (`tailscale ping <hub>`)"))
+        if values.get("NODE_PROCESSOR", "gpu") != "cpu":
+            checks.append(ClusterCheck(shutil.which("nvidia-smi") is not None, "an NVIDIA driver, for the GPU",
+                                       "Install the NVIDIA driver, or join again with --cpu"))
+        return checks
+    values = NODES.env_values(root / ".env")
+    address = values.get("HUB_ADDRESS")
+    checks.append(ClusterCheck(
+        bool(address) and "docker-compose.hub.yml" in values.get("COMPOSE_FILE", ""),
+        f"this machine is the hub, on {address}" if address else "this machine is the hub",
+        "Run: python scripts/setup.py cluster, or python scripts/admin.py nodes hub <its Tailscale address>"))
+    if address and addresses and address not in addresses:
+        checks.append(ClusterCheck(False, f"HUB_ADDRESS {address} is this machine's Tailscale address",
+                                   f"Its address is {addresses[0]}: run python scripts/admin.py nodes hub {addresses[0]}"))
+    job_storage = (features or {}).get("job_storage")
+    if job_storage is not None:
+        missing = Missing.of(job_storage)
+        checks.append(ClusterCheck(
+            job_storage["enabled"] and not missing.count, "job files in a bucket (JOB_STORAGE=s3), which nodes share",
+            "Run python scripts/admin.py nodes hub <address> --storage for a bucket on this machine, or "
+            "python scripts/setup.py job_storage for yours"))
+    invited = NODES.invited(root)
+    checks.append(ClusterCheck(bool(invited), f"devices invited: {', '.join(invited)}" if invited else "devices invited",
+                               "On this machine: python scripts/admin.py nodes invite <name>", optional=not address))
+    if platform.startswith("linux") and address:
+        checks.append(ClusterCheck(DOCKER_AFTER_TAILSCALE.is_file(), "Docker starts after Tailscale, after a power cut",
+                                   "See step 4 of \"Setting up the hub\" in docs/cluster.md"))
+    if platform == "win32" and address:
+        checks.append(ClusterCheck(False, "Docker Desktop starts with Windows, and Windows signs in by itself",
+                                   "A Windows hub serves only once Docker Desktop runs; a Linux hub is the better hub",
+                                   optional=True))
+    checks.append(ClusterCheck(bool(values.get("HUB_REGISTRY")), "a registry for the nodes' image",
+                               "Optional: python scripts/admin.py nodes hub <address> --registry <its Tailscale name>",
+                               optional=True))
+    return checks
+
+
 @dataclass
 class Setup:
     console: Console = field(default_factory=Console)
@@ -232,6 +321,8 @@ class Setup:
     config: Callable[..., subprocess.CompletedProcess] = run_config
     build: Callable[[], None] = build_api_image
     descriptions: dict[str, str] = field(default_factory=dict)
+    # Runs a program on the host, for the home cluster's checks.
+    run: Callable[..., subprocess.CompletedProcess] = field(default=lambda command, **options: run_quietly(command))
 
     @property
     def secrets_dir(self) -> Path:
@@ -268,15 +359,16 @@ class Setup:
         "unavailable": ("not used", ("yellow",)),
     }
 
-    def kubernetes_use(self, feature: dict) -> tuple[str, tuple[str, ...]]:
-        use = feature.get("kubernetes", {}).get("use", "optional")
+    def kubernetes_use(self, feature: dict, where: str = "kubernetes") -> tuple[str, tuple[str, ...]]:
+        use = feature.get(where, {}).get("use", "optional")
         return self.KUBERNETES_USES.get(use, (use, ()))
 
     @staticmethod
-    def differs_on_kubernetes(feature: dict) -> bool:
-        """Whether the cluster has it otherwise than this machine: required
-        there and off here, or on here and not used there."""
-        use = feature.get("kubernetes", {}).get("use", "optional")
+    def differs_on_kubernetes(feature: dict, where: str = "kubernetes") -> bool:
+        """Whether the cluster (Kubernetes, or with where="cluster" a home
+        cluster) has it otherwise than this machine: required there and off
+        here, or on here and not used there."""
+        use = feature.get(where, {}).get("use", "optional")
         return (use == "needed" and not feature["enabled"]) or (use == "unavailable" and feature["enabled"])
 
     def status(self) -> int:
@@ -295,45 +387,125 @@ class Setup:
         name_width = max(len(key) for key in features)
         state_width = max(len("Status"), *(len(state) for _, state, _ in states.values()))
 
-        def row(number: str, title: str, name: str, state: str, kubernetes: str) -> str:
-            return f"  {number:>2}  {title}  {name}  {state}  {kubernetes}".rstrip()
+        def row(number: str, title: str, name: str, state: str, cluster: str, kubernetes: str) -> str:
+            return f"  {number:>2}  {title}  {name}  {state}  {cluster}  {kubernetes}".rstrip()
 
+        # Every use is at most "required *" long.
+        cluster_width = max(len("Home cluster"), len("required *"))
         say(style("Optional features", "bold") + style("  (a basic server needs none of them)", "dim"))
         say("")
         say(style(row("#", "Feature".ljust(title_width), "Name".ljust(name_width),
-                      "Status".ljust(state_width), "On Kubernetes"), "bold"))
-        different = []
+                      "Status".ljust(state_width), "Home cluster".ljust(cluster_width), "On Kubernetes"), "bold"))
+        different = {"cluster": [], "kubernetes": []}
         for number, (key, feature) in enumerate(features.items(), 1):
             missing, state, state_styles = states[key]
-            kubernetes, kubernetes_styles = self.kubernetes_use(feature)
-            if self.differs_on_kubernetes(feature):
-                different.append(feature)
-                kubernetes += " *"
+            uses = {}
+            for where in different:
+                text, styles = self.kubernetes_use(feature, where)
+                if self.differs_on_kubernetes(feature, where):
+                    different[where].append(feature)
+                    text += " *"
+                uses[where] = (text, styles)
             title = feature["title"].ljust(title_width)
             say(row(str(number), style(title, "dim") if not feature["enabled"] else title,
                     style(key.ljust(name_width), "cyan"), style(state.ljust(state_width), *state_styles),
-                    style(kubernetes, *kubernetes_styles)))
+                    style(uses["cluster"][0].ljust(cluster_width), *uses["cluster"][1]),
+                    style(uses["kubernetes"][0], *uses["kubernetes"][1])))
             missing.show(self.console, " " * 6)
 
         say("")
         legend = [
             ("Status", "on or off in server.env, which the server on this machine runs with; "
                        "ready when nothing it needs is missing"),
+            ("Home cluster", "required: must be on on the hub, for its nodes too; optional: your choice; "
+                             "not used: must be off there (docs/cluster.md)"),
             ("On Kubernetes", "required: must be on in the cluster; optional: your choice; "
                               "not used: must be off there"),
         ]
         for label, text in legend:
             self.console.labelled(label.ljust(15), text, "  ", "bold")
-        if different:
-            say("")
-            say(f"  {style('*', 'bold')} Different on Kubernetes than here, and why:")
-            for feature in different:
-                self.console.labelled(f"{feature['key']:{name_width}}  ", feature["kubernetes"]["why"], "    ", "cyan")
+        for where, place in (("cluster", "in a home cluster"), ("kubernetes", "on Kubernetes")):
+            if different[where]:
+                say("")
+                say(f"  {style('*', 'bold')} Different {place} than here, and why:")
+                for feature in different[where]:
+                    self.console.labelled(f"{feature['key']:{name_width}}  ", feature[where]["why"], "    ", "cyan")
+        say("")
+        self.show_cluster(features, brief=True)
         say("")
         for label, command in [("Set one up", "python scripts/setup.py <name>"),
                                ("Turn one off", "python scripts/setup.py off <name>"),
-                               ("The cluster", "python scripts/kube.py status")]:
+                               ("Home cluster", "python scripts/setup.py cluster"),
+                               ("Kubernetes", "python scripts/kube.py status")]:
             say(f"  {style(label.ljust(15), 'dim')}{command}")
+        return 0
+
+    # --- A home cluster (docs/cluster.md) ----------------------------------------------------
+
+    def show_cluster(self, features: dict | None, brief: bool = False) -> list[ClusterCheck]:
+        """What a home cluster needs here, and what is missing: on a node,
+        the node's side; elsewhere, the hub's. Brief: a few lines for status."""
+        say, style = self.console.say, self.style
+        checks = cluster_checks(self.root, features, self.run)
+        node = NODES.is_node(self.root)
+        title = "Home cluster: this device is a node" if node else "Home cluster"
+        ready = all(check.ok or check.optional for check in checks)
+        hub = not node and bool(NODES.env_values(self.root / ".env").get("HUB_ADDRESS"))
+        if brief and not (node or hub):
+            say(style(title, "bold") + style("  (other devices run work for this server; not set up)", "dim"))
+            return checks
+        state = style("ready", "green") if ready else style("not ready", "yellow", "bold")
+        say(style(title, "bold") + f"  {state}" + style("  (docs/cluster.md)", "dim"))
+        for check in checks:
+            if brief and (check.ok or check.optional):
+                continue
+            mark = style("ok  ", "green") if check.ok else style("--  ", "dim") if check.optional else style("no  ", "red")
+            say(f"  {mark}{check.text}")
+            if not check.ok and check.fix and not brief:
+                self.console.wrap(check.fix, "        ", "dim")
+        return checks
+
+    def cluster(self) -> int:
+        """Show what a home cluster needs; on a machine that is no hub yet,
+        offer to make it one."""
+        self.console.heading("== Home cluster ==")
+        self.console.wrap("Your other devices, Linux or Windows, with a GPU or without, run work for this server over "
+                          "Tailscale. This machine is the hub; the others join as nodes. See docs/cluster.md.")
+        say = self.console.say
+        say("")
+        features = None
+        if not NODES.is_node(self.root):
+            # A node has no API image to ask; its settings are the hub's.
+            try:
+                features = self.features()
+            except SystemExit:
+                pass
+        checks = self.show_cluster(features)
+        if NODES.is_node(self.root):
+            return 0 if all(check.ok or check.optional for check in checks) else 1
+        values = NODES.env_values(self.root / ".env")
+        addresses = tailscale_addresses(self.run)
+        say("")
+        if not values.get("HUB_ADDRESS") and addresses and self.console.yes(
+                f"Make this machine the hub, on its Tailscale address {addresses[0]}?", default=False):
+            storage = self.console.yes(
+                "Keep the job files in a bucket on this machine (no provider needed)?",
+                default=not (features or {}).get("job_storage", {}).get("enabled", False))
+            arguments = ["nodes", "hub", addresses[0]] + (["--storage"] if storage else [])
+            result = self.run([sys.executable, str(self.root / "scripts" / "admin.py"), *arguments])
+            for line in (result.stdout or "").splitlines():
+                say(f"  {line}")
+            if result.returncode != 0:
+                self.console.say(self.style((result.stderr or "").strip(), "red"))
+                return 1
+            say("")
+            self.show_cluster(None)
+        say("")
+        for label, command in [("Apply on the hub", "python scripts/server.py restart 1m"),
+                               ("Invite a device", "python scripts/admin.py nodes invite <name>"),
+                               ("On the device", "python scripts/server.py join <name>.json"),
+                               ("See every device", "python scripts/admin.py nodes")]:
+            say(f"  {self.style(label.ljust(18), 'dim')}{command}")
         return 0
 
     # --- Setting a feature up --------------------------------------------------------------
@@ -645,9 +817,22 @@ def main(arguments: list[str], setup: Setup | None = None) -> int:
         prog="python scripts/setup.py",
         description="Set up the server's optional features, or turn them off. A basic server needs none.",
     )
-    parser.add_argument("command", nargs="?", help="status, off, or a feature's name; nothing for a menu")
+    parser.add_argument("command", nargs="?",
+                        help="status, off, cluster (a home cluster), or a feature's name; nothing for a menu")
     parser.add_argument("feature", nargs="?", help="with off: the feature to turn off")
     args = parser.parse_args(arguments)
+    # A node of a home cluster has none of the hub's files, and gets none: it
+    # takes the server's settings from the hub.
+    on_node = NODES.is_node(setup.root if setup else ROOT)
+    if args.command == "cluster" or on_node:
+        if on_node and args.command not in (None, "status", "cluster"):
+            print("This device is a node of a home cluster: set features up on the hub. See: "
+                  "python scripts/setup.py cluster", file=sys.stderr)
+            return 1
+        setup = setup or Setup(console=Console(style=Style.for_terminal()), descriptions=setting_descriptions(),
+                               config=run_config if shutil.which("docker") else
+                               (lambda *arguments, **options: subprocess.CompletedProcess(arguments, 1, "", "")))
+        return setup.cluster()
     if setup is None:
         if shutil.which("docker") is None:
             print("The docker CLI is needed: it runs the server's own configuration check.", file=sys.stderr)

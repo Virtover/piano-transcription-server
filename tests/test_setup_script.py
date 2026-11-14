@@ -378,9 +378,23 @@ def test_status_names_its_columns_and_explains_them(server):
     setup.status()
 
     header = next(line for line in script.said if "Feature" in line)
-    assert header.split() == ["#", "Feature", "Name", "Status", "On", "Kubernetes"]
+    assert header.split() == ["#", "Feature", "Name", "Status", "Home", "cluster", "On", "Kubernetes"]
     assert any(line.strip().startswith("Status") and "server.env" in line for line in script.said)
+    assert any(line.strip().startswith("Home cluster") and "required:" in line for line in script.said)
     assert any(line.strip().startswith("On Kubernetes") and "required:" in line for line in script.said)
+
+
+def test_status_says_what_a_home_cluster_needs(server):
+    setup, script = make(server)
+
+    setup.status()
+
+    job_storage = next(line for line in script.said if "job_storage" in line and "Job files" in line)
+    assert "required *" in job_storage
+    assert "Different in a home cluster than here, and why:" in script.text
+    assert "nodes share no folder with the hub" in script.text
+    provider = next(line for line in script.said if "provider_backups" in line and "provider" in line.lower())
+    assert "not used" in provider
 
 
 def test_status_says_what_kubernetes_needs(server):
@@ -490,3 +504,91 @@ def test_the_command_line(server):
     assert setup_script.main(["status"], setup) == 0
     with pytest.raises(SystemExit):
         setup_script.main(["off"], setup)
+
+
+# --- A home cluster -----------------------------------------------------------------------
+
+def no_tailscale(monkeypatch):
+    real = shutil.which
+    monkeypatch.setattr(setup_script.shutil, "which", lambda name: None if name == "tailscale" else real(name))
+
+
+def with_tailscale(monkeypatch, address="100.101.102.103"):
+    real = shutil.which
+    monkeypatch.setattr(setup_script.shutil, "which", lambda name: f"/usr/bin/{name}" if name in ("tailscale", "docker") else real(name))
+    return lambda command, **options: subprocess.CompletedProcess(command, 0, f"{address}\n" if command[:2] == ["tailscale", "ip"] else "", "")
+
+
+def test_status_says_a_home_cluster_is_not_set_up(server, monkeypatch):
+    no_tailscale(monkeypatch)
+    setup, script = make(server)
+
+    setup.status()
+
+    assert "Home cluster" in script.text and "not set up" in script.text
+    assert "python scripts/setup.py cluster" in script.text
+
+
+def test_the_cluster_lists_what_a_hub_needs_and_how(server, monkeypatch):
+    no_tailscale(monkeypatch)
+    setup, script = make(server, answers=[])
+
+    assert setup.cluster() == 0
+
+    assert "Install Tailscale" in script.text
+    assert "this machine is the hub" in script.text
+    assert "job files in a bucket" in script.text
+    assert "python scripts/admin.py nodes invite <name>" in script.text
+
+
+def test_the_cluster_offers_to_make_this_machine_the_hub(server, monkeypatch):
+    root, _ = server
+    run = with_tailscale(monkeypatch)
+    ran = []
+
+    def runner(command, **options):
+        ran.append(command)
+        return run(command)
+
+    setup, script = make(server, answers=["y", "y"])
+    setup.run = runner
+
+    assert setup.cluster() == 0
+
+    [hub] = [command for command in ran if command[-4:-1] == ["nodes", "hub", "100.101.102.103"] or command[-3:-1] == ["hub", "100.101.102.103"]]
+    assert hub[-1] == "--storage"
+    assert "Tailscale, signed in: 100.101.102.103" in script.text
+
+
+def test_a_hub_whose_address_is_not_tailscales_is_told(server, monkeypatch):
+    root, _ = server
+    with (root / ".env").open("a", encoding="utf-8") as stream:
+        stream.write("\nHUB_ADDRESS=100.1.1.1\nCOMPOSE_FILE=docker-compose.yml:docker-compose.hub.yml\n")
+    run = with_tailscale(monkeypatch)
+
+    checks = setup_script.cluster_checks(root, None, run, platform="linux")
+
+    by_text = {check.text: check for check in checks}
+    assert by_text["this machine is the hub, on 100.1.1.1"].ok
+    assert not by_text["HUB_ADDRESS 100.1.1.1 is this machine's Tailscale address"].ok
+    assert "nodes hub 100.101.102.103" in by_text["HUB_ADDRESS 100.1.1.1 is this machine's Tailscale address"].fix
+    assert not by_text["devices invited"].ok
+    assert not by_text["Docker starts after Tailscale, after a power cut"].ok or setup_script.DOCKER_AFTER_TAILSCALE.is_file()
+
+
+def test_on_a_node_setup_shows_the_nodes_side_and_creates_no_hub_files(tmp_path, monkeypatch):
+    no_tailscale(monkeypatch)
+    (tmp_path / "node.env").write_text("NODE_NAME=laptop\nHUB_ADDRESS=127.0.0.9\nNODE_PROCESSOR=cpu\n", encoding="utf-8")
+    monkeypatch.setattr(setup_script.NODES, "reachable", lambda host, port, timeout=5: False)
+    script = Script()
+    console = setup_script.Console(ask=script.ask, ask_hidden=script.ask_hidden, say=script.say)
+    setup = setup_script.Setup(console=console, root=tmp_path,
+                               config=lambda *arguments, **options: pytest.fail("the hub's configuration asked on a node"))
+
+    assert setup_script.main(["status"], setup) == 1
+
+    assert "this device is a node" in script.text
+    assert "joined as the node laptop" in script.text
+    assert "the hub's Redis answers at 127.0.0.9:6379" in script.text
+    assert not (tmp_path / ".env").exists() and not (tmp_path / "billing-data").exists()
+    assert setup_script.main(["outsourcing"], setup) == 1

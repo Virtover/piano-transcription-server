@@ -74,6 +74,9 @@ class Feature:
     # need applies, if not always.
     kubernetes: tuple[str, str] = ("optional", "")
     kubernetes_applies: Callable[[Settings], bool] | None = None
+    # In a home cluster (docs/cluster.md), set on the hub: needed, optional,
+    # or unavailable, and why.
+    cluster: tuple[str, str] = ("optional", "")
 
     def switch_text(self, config: Settings) -> str:
         return self.switch(config) if callable(self.switch) else self.switch
@@ -256,6 +259,7 @@ FEATURES: tuple[Feature, ...] = (
         kubernetes=('needed', 'set by deploy/kubernetes/base/wiring.yaml: no folder outlives a pod'),
         # A test cluster's own database has no provider; the API backs it up.
         kubernetes_applies=lambda config: app_config.runs_elsewhere(app_config.effective_database_url(config)),
+        cluster=('unavailable', "the hub runs its own PostgreSQL, which no provider backs up"),
         title="Backups by the database's provider",
         summary="A managed PostgreSQL's provider backs the billing database up, instead of the server.",
         switch="DATABASE_BACKUPS=provider",
@@ -290,6 +294,7 @@ FEATURES: tuple[Feature, ...] = (
     Feature(
         key="object_storage",
         kubernetes=('needed', 'job files in object storage need it'),
+        cluster=('needed', 'job files in a bucket need it; nodes hub --storage gives one on the hub'),
         title="Object storage",
         summary="An S3-compatible bucket, which outsourcing and JOB_STORAGE=s3 use.",
         switch="STORAGE_BUCKET",
@@ -307,6 +312,7 @@ FEATURES: tuple[Feature, ...] = (
     Feature(
         key="job_storage",
         kubernetes=('needed', 'set by deploy/kubernetes/base/wiring.yaml: several machines share no folder'),
+        cluster=('needed', 'nodes share no folder with the hub'),
         title="Job files in object storage",
         summary="Uploads and results in the bucket, for API replicas and workers on several machines.",
         switch="JOB_STORAGE=s3",
@@ -327,6 +333,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="outsourcing",
+        cluster=('optional', 'nodes allowed the dispatch task send jobs to RunPod too'),
         title="Outsourcing to RunPod",
         summary="Jobs run on RunPod Serverless GPUs when the local GPU is busy.",
         switch="OUTSOURCE_PROVIDER=runpod",
@@ -552,6 +559,7 @@ def describe_features(config: Settings) -> list[dict]:
             "docs": feature.docs,
             "requirement_sections": list(feature.requirement_sections),
             "kubernetes": {"use": feature.kubernetes[0], "why": feature.kubernetes[1]},
+            "cluster": {"use": feature.cluster[0], "why": feature.cluster[1]},
         })
     return listed
 
