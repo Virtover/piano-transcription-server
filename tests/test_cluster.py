@@ -1060,3 +1060,33 @@ def test_a_revoked_nodes_refusals_are_not_reported_but_the_hubs_are(monkeypatch)
     assert error_report.is_redis_outage(record)
     monkeypatch.setenv("DEPLOYMENT", "compose")
     assert not error_report.is_redis_outage(record)
+
+
+def test_a_node_without_the_cloud_buckets_keys_does_not_take_its_settings():
+    # The hub's STORAGE_ bucket is RunPod's; a node that does not dispatch,
+    # with job files in the hub's own bucket, has none of its keys.
+    hub = {"STORAGE_BUCKET": "runpod-audio", "STORAGE_ENDPOINT": "https://r2.example.com", "RESULT_RETENTION": "1d"}
+
+    without = cluster.apply_hub_settings({}, hub, storage_keys=False)
+    assert "STORAGE_BUCKET" not in without and "STORAGE_ENDPOINT" not in without
+    assert without["RESULT_RETENTION"] == "1d"
+
+    with_keys = cluster.apply_hub_settings({}, hub, storage_keys=True)
+    assert with_keys["STORAGE_BUCKET"] == "runpod-audio"
+
+
+def test_a_node_reads_whether_it_has_the_cloud_keys_from_its_secrets(monkeypatch, tmp_path, default_settings):
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.hset(cluster.HUB_KEY, mapping={"protocol": str(cluster.PROTOCOL),
+                                         "settings": json.dumps({"STORAGE_BUCKET": "runpod-audio"})})
+    monkeypatch.delenv(cluster.SYNCED_HASH_VARIABLE, raising=False)
+    default_settings.secrets_dir = str(tmp_path)
+    calls = []
+
+    supervisor.take_hub_settings(redis, ["node"], execve=lambda path, args, env: calls.append(env))
+    assert "STORAGE_BUCKET" not in calls[-1]
+
+    (tmp_path / "storage_access_key").write_text("a")
+    (tmp_path / "storage_secret_key").write_text("b")
+    supervisor.take_hub_settings(redis, ["node"], execve=lambda path, args, env: calls.append(env))
+    assert calls[-1]["STORAGE_BUCKET"] == "runpod-audio"

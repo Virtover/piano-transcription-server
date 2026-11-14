@@ -94,7 +94,11 @@ def take_hub_settings(redis: Redis, arguments: list[str], execve=os.execve) -> d
     otherwise this returns what the hub published."""
     info = wait_for_hub(redis)
     if os.environ.get(cluster.SYNCED_HASH_VARIABLE) != cluster.settings_hash(info["settings"]):
-        environment = cluster.apply_hub_settings(dict(os.environ), info["settings"])
+        keys = Path(settings.secrets_dir)
+        environment = cluster.apply_hub_settings(
+            dict(os.environ), info["settings"],
+            storage_keys=(keys / "storage_access_key").is_file() and (keys / "storage_secret_key").is_file(),
+        )
         say("starting with the hub's settings")
         execve(sys.executable, [sys.executable, "-m", "app.worker.launcher", *arguments], environment)
     return info

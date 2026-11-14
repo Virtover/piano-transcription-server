@@ -342,15 +342,23 @@ def hub_info(redis: Redis) -> dict | None:
     }
 
 
-def apply_hub_settings(environment: dict[str, str], values: dict[str, str]) -> dict[str, str]:
+# The cloud bucket's settings, which a node without its keys never takes.
+STORAGE_SETTINGS = ("STORAGE_ENDPOINT", "STORAGE_BUCKET", "STORAGE_REGION")
+
+
+def apply_hub_settings(environment: dict[str, str], values: dict[str, str],
+                       storage_keys: bool = True) -> dict[str, str]:
     """The environment a node's services run with: the hub's settings,
     except where the node's own environment (node.env) sets one. Names taken
-    from the hub before are replaced, so a setting removed on the hub goes."""
+    from the hub before are replaced, so a setting removed on the hub goes.
+    Without storage_keys, the STORAGE_ bucket's keys, which its invite holds
+    only for JOB_STORAGE=s3 or dispatch, the node does not take its address:
+    it neither needs nor could reach that bucket."""
     result = dict(environment)
     for name in result.get(SYNCED_NAMES_VARIABLE, "").split(","):
         if name:
             result.pop(name, None)
-    names = synced_names()
+    names = synced_names() - (set() if storage_keys else set(STORAGE_SETTINGS))
     taken = []
     for name, value in values.items():
         if name in names and name not in result:
