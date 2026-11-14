@@ -1,4 +1,5 @@
-# Runs the test suite on every push to main and every pull request. The tests
+# Runs the test suite on every push to main and every pull request, and from
+# the Actions tab ("Run workflow") when a push did not start a run. The tests
 # need no Docker, GPU, or credentials; model tests that need PyTorch are
 # skipped, as without the worker requirements locally.
 name: Tests
@@ -7,6 +8,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
