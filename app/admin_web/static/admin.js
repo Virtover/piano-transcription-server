@@ -1030,22 +1030,28 @@ async function nodesView() {
     const live = device.services.some((service) => !stale(service.seen));
     const color = !device.enabled ? "grey" : live ? "green" : "red";
     const state = !device.enabled ? badge("switched off", "warn") : live ? badge("running", "good") : badge("not running", "bad");
-    const rows = NODE_TASKS.filter(([task]) => offered.has(task) || allowed.includes(task)).map(([task, title]) => ({
+    // Every task, so each can be turned on or off; what a device cannot do shows so.
+    const rows = NODE_TASKS.map(([task, title]) => ({
       task, title, allowed: allowed.includes(task), running: running.has(task), offered: offered.has(task),
     }));
     const problems = device.services.filter((service) => service.problem || (service.code && !service.same_code));
-    return iconCard("limits", color, device.node, device.address ? `address ${device.address}` : "address not learned yet",
+    return iconCard("limits", color, device.node, device.address ? `public address ${device.address}` + (device.shares_address_with.length
+      ? `, shared with ${device.shares_address_with.join(", ")}: video sites limit them together` : "")
+      : "public address not learned yet",
       el("div", { class: "btn-row" }, state,
         canSwitch ? qbtn(device.enabled ? "Switch off" : "Switch on", device.enabled ? "c-red" : "c-green",
           () => change("nodes.switch", { node: device.node, on: !device.enabled },
             { title: `${device.enabled ? "Switch off" : "Switch on"} ${device.node}`, after: () => open("nodes") })) : null),
       table([
         { label: "Task", key: "title" },
-        { label: "State", render: (row) => (row.running ? badge("running", "good") : !row.allowed ? badge("denied", "warn")
+        // The hub checks links itself; nodes check them for it while a site refuses its address.
+        { label: "State", render: (row) => (device.node === "hub" && row.task === "check" ? badge("the hub does this itself", "good")
+          : row.running ? badge("running", "good") : !row.allowed ? badge("off", "warn")
           : !row.offered ? badge("not on this device", "warn") : badge("idle")) },
-        { label: "", render: (row) => (canChange("nodes.task") ? qbtn(row.allowed ? "Deny" : "Allow", row.allowed ? "c-grey" : "c-green",
-          () => change("nodes.task", { node: device.node, task: row.task, allowed: !row.allowed },
-            { title: `${row.allowed ? "Deny" : "Allow"} ${row.title.toLowerCase()} on ${device.node}`, after: () => open("nodes") })) : null) },
+        { label: "", render: (row) => (!canChange("nodes.task") || (device.node === "hub" && row.task === "check") ? null
+          : qbtn(row.allowed ? "Turn off" : "Turn on", row.allowed ? "c-grey" : "c-green",
+            () => change("nodes.task", { node: device.node, task: row.task, allowed: !row.allowed },
+              { title: `Turn ${row.title.toLowerCase()} ${row.allowed ? "off" : "on"} on ${device.node}`, after: () => open("nodes") }))) },
       ], rows, { empty: "This device has not reported what it can do", emptyIcon: "limits" }),
       problems.length ? el("p", { class: "secondary pw-hint",
         text: problems.map((service) => service.problem || `${service.service} runs other code than the hub; update it`).join(" · ") }) : null);

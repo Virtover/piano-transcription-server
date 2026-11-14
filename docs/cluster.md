@@ -66,7 +66,7 @@ RunPod reads audio from the `STORAGE_` bucket, which must be reachable from the 
 
 ## ➕ Adding a device
 
-1. **On the hub, invite it**, naming what it may do (default: all):
+1. **On the hub, invite it**, naming what it may do. The default is `transcribe,arrange,check`; `dispatch`, sending jobs to RunPod, copies the RunPod key to the device, and the hub already does it, so give it only to a device that should send jobs to RunPod when the hub cannot:
 
    ```shell
    python scripts/admin.py nodes invite laptop --tasks transcribe,arrange

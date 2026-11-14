@@ -881,7 +881,10 @@ def test_admin_invite_restarts_the_bucket_for_the_nodes_keys(tmp_path):
     stack = AdminStack(tmp_path)
     assert admin.main(["nodes", "invite", "laptop"], stack) == 0
     assert stack.restarted == [["storage"]]
-    assert stack.api[0][1][-1] == "invited" and "dispatch" in stack.api[0][1]
+    # By default not dispatch, which would copy the RunPod key to the device.
+    assert stack.api[0][1][-1] == "invited"
+    assert stack.api[0][1][3:7] == ("nodes", "register", "laptop", "transcribe") and "dispatch" not in stack.api[0][1]
+    assert "runpod_api_key" not in json.loads((tmp_path / "secrets/invites/laptop.json").read_text())["secrets"]
 
 
 def test_admin_invite_fails_when_redis_does_not_reload(tmp_path, capsys):

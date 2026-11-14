@@ -72,6 +72,8 @@ def overview() -> dict:
                 for status in services
             ],
         })
+    for device in devices:
+        device["shares_address_with"] = sharing(device, devices)
     return {"protocol": cluster.PROTOCOL, "hub_code": hub.get("code"), "devices": devices}
 
 
@@ -168,6 +170,21 @@ def service_line(service: dict) -> list:
             ago(service["seen"])]
 
 
+def sharing(device: dict, devices: list[dict]) -> list[str]:
+    """The other devices behind the same public address: video sites see
+    them as one, and limit them together."""
+    if not device["address"]:
+        return []
+    return [other["node"] for other in devices if other["node"] != device["node"] and other["address"] == device["address"]]
+
+
+def address_text(device: dict, devices: list[dict]) -> str:
+    if not device["address"]:
+        return "not learned yet"
+    others = sharing(device, devices)
+    return device["address"] + (f" (shared with {', '.join(others)}: video sites limit them together)" if others else "")
+
+
 def run_list(args) -> None:
     data = overview()
     if args.json:
@@ -177,7 +194,7 @@ def run_list(args) -> None:
         header = device["node"]
         if not device["enabled"]:
             header += "  [off]"
-        print(f"{header}  allowed: {task_list(device['tasks'])}  address: {device['address'] or '-'}")
+        print(f"{header}  allowed: {task_list(device['tasks'])}  public address: {address_text(device, data['devices'])}")
         if not device["services"]:
             print("  not running")
         else:

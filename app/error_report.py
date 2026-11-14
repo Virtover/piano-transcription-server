@@ -216,13 +216,24 @@ REDIS_OUTAGE = re.compile(
 OUTAGE_GRACE = 120.0
 
 
+# On a node, the hub refusing its password means it was revoked: its
+# supervisor stops the workers within seconds. Elsewhere, a refused password
+# is a mistake to report at once.
+REFUSED_PASSWORD = re.compile(r"invalid username-password pair|WRONGPASS")
+
+
 def is_redis_outage(record: logging.LogRecord) -> bool:
     error = record.exc_info[1] if record.exc_info else None
+    on_node = os.environ.get("DEPLOYMENT") == "node"
     if error is not None:
         module = type(error).__module__ or ""
         if module.startswith("redis") and type(error).__name__ in ("ConnectionError", "TimeoutError", "BusyLoadingError"):
             return True
+        if on_node and module.startswith("redis") and type(error).__name__ == "AuthenticationError":
+            return True
     message = record.getMessage()
+    if on_node and REFUSED_PASSWORD.search(message):
+        return True
     if not REDIS_OUTAGE.search(message):
         return False
     # Dramatiq's consumers lose only Redis; others name it.

@@ -1005,3 +1005,58 @@ def test_the_reconciliation_and_the_hub_charge_the_same(worker, monkeypatch):
     tasks.settle_node_jobs()
 
     assert billing.get_balance("user") == 10
+
+
+def test_devices_behind_one_public_address_are_shown_as_sharing_it(api_context, capsys):
+    from app.admin import nodes
+
+    for node in ("hub", "pc", "laptop"):
+        if node != "hub":
+            cluster.register(tasks.redis, node, ["transcribe"])
+    tasks.redis.set(cluster.egress_key("hub"), "203.0.113.7")
+    tasks.redis.set(cluster.egress_key("pc"), "203.0.113.7")
+    tasks.redis.set(cluster.egress_key("laptop"), "198.51.100.2")
+
+    devices = {device["node"]: device for device in nodes.overview()["devices"]}
+
+    assert devices["pc"]["shares_address_with"] == ["hub"]
+    assert devices["laptop"]["shares_address_with"] == []
+    nodes.run_list(type("Args", (), {"json": False})())
+    text = capsys.readouterr().out
+    assert "public address: 203.0.113.7 (shared with pc: video sites limit them together)" in text
+    assert "public address: 198.51.100.2\n" in text
+
+
+def test_a_node_the_hub_refuses_stops_its_workers(monkeypatch):
+    from redis.exceptions import AuthenticationError
+
+    instance, redis, started, _ = make_supervisor(monkeypatch, role="node", offered=cluster.TASKS)
+    monkeypatch.setattr(cluster.settings.service, "deployment", "node")
+    instance.step()
+    assert started
+
+    def refused(*arguments):
+        raise AuthenticationError("invalid username-password pair or user is disabled.")
+
+    monkeypatch.setattr(cluster, "allowed_tasks", refused)
+    instance.step()
+
+    assert instance.state == supervisor.REFUSED
+    assert all(process.signals == [signal.SIGTERM] for process in started)
+
+
+def test_a_revoked_nodes_refusals_are_not_reported_but_the_hubs_are(monkeypatch):
+    import logging
+
+    from redis.exceptions import AuthenticationError
+
+    from app import error_report
+
+    error = AuthenticationError("invalid username-password pair or user is disabled.")
+    record = logging.LogRecord("app.worker.tasks", logging.ERROR, "tasks.py", 1, "Could not update the lease", (), None)
+    record.exc_info = (type(error), error, None)
+
+    monkeypatch.setenv("DEPLOYMENT", "node")
+    assert error_report.is_redis_outage(record)
+    monkeypatch.setenv("DEPLOYMENT", "compose")
+    assert not error_report.is_redis_outage(record)

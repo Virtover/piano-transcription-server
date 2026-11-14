@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from redis import Redis
+from redis.exceptions import AuthenticationError
 
 from app import cluster
 from app.config import ConfigError, ensure_valid, settings
@@ -47,6 +48,7 @@ DRAIN_FILE = Path("/tmp/worker-drain")
 CHECK_THREADS = 2
 RESTART_BACKOFF = (5, 15, 30, 60)
 HUB_WAIT_REPORT = 60
+REFUSED = "refused by the hub: join again with a new invite"
 
 
 @dataclass
@@ -119,6 +121,7 @@ class Supervisor:
         self.failures: dict[str, int] = {}
         self.retry_at: dict[str, float] = {}
         self.stopping = False
+        self.refused_since: float | None = None
         self.allowed: list[str] = []
         self.state = "starting"
         self.problem = ""
@@ -221,6 +224,19 @@ class Supervisor:
         try:
             self.allowed = cluster.allowed_tasks(self.redis, self.node, self.offered)
             self.state = "running" if self.allowed else "off"
+            self.refused_since = None
+        except AuthenticationError:
+            # On a node: revoked, or its password replaced. Its workers stop,
+            # instead of failing on every job; a new invite and join start them.
+            if cluster.is_node():
+                if self.refused_since is None:
+                    self.refused_since = self.clock()
+                    say("the hub refuses this device's password: it was revoked, or invited again. "
+                        "Join with a new invite: python scripts/server.py join <invite>")
+                self.allowed = []
+                self.state = REFUSED
+            else:
+                self.state = "Redis refuses this service's password"
         except Exception as error:
             # Keep doing what was allowed while Redis is away; Dramatiq
             # reconnects by itself.
