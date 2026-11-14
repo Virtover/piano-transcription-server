@@ -225,6 +225,9 @@ class ComposeStack(Stack):
     def stop_services(self, services: list[str]) -> int:
         return self.docker(self.compose() + ["stop", *services]).returncode
 
+    def restart_services(self, services: list[str]) -> int:
+        return self.docker(self.compose() + ["restart", *services]).returncode
+
     def remove_stale_containers(self) -> list[str]:
         # A stopped container keeps the ID of its network. After the network
         # is created again, for example by `docker network prune` or a Docker
@@ -259,3 +262,70 @@ class ComposeStack(Stack):
 
     def restart_command(self, service: str) -> str:
         return f"docker compose restart {service}"
+
+    # --- Images for a home cluster's nodes (the hub's registry) -------------
+
+    def build_image(self, dockerfile: str, tag: str, build_args: dict[str, str]) -> int:
+        arguments = [part for name, value in build_args.items() for part in ("--build-arg", f"{name}={value}")]
+        return self.docker(["docker", "build", "-f", dockerfile, *arguments, "-t", tag, "."]).returncode
+
+    def push_image(self, tag: str) -> str | None:
+        """Push tag and return its reference by digest, or None."""
+        if self.docker(["docker", "push", tag]).returncode != 0:
+            return None
+        result = self.docker(["docker", "image", "inspect", "--format", "{{range .RepoDigests}}{{println .}}{{end}}", tag],
+                             capture_output=True, text=True)
+        repository = tag.rsplit(":", 1)[0]
+        for line in (result.stdout or "").splitlines():
+            if line.startswith(repository + "@sha256:"):
+                return line.strip()
+        return None
+
+
+class NodeStack(ComposeStack):
+    """A device of a home cluster: docker-compose.node.yml, with the GPU
+    file on a device with an NVIDIA GPU, as the project piano-node, with
+    node.env. It has no API, no database, and no Redis of its own."""
+
+    script = "python scripts/server.py"
+    owns_redis = False
+    cannot_restore = "This device is a node of a home cluster and has no billing database; restore on the hub"
+    PROJECT = "piano-node"
+    ENV_FILE = "node.env"
+
+    def __init__(self, gpu: bool, run=subprocess.run, popen=subprocess.Popen, root: Path = ROOT):
+        super().__init__([], run=run, popen=popen, root=root)
+        self.gpu = gpu
+
+    def compose(self, profiles: list[str] | None = None) -> list[str]:
+        files = ["-f", "docker-compose.node.yml"] + (["-f", "docker-compose.node-gpu.yml"] if self.gpu else [])
+        return ["docker", "compose", "-p", self.PROJECT, *files, "--env-file", self.ENV_FILE]
+
+    def up(self, command: str | None = None, build: bool = True) -> int:
+        return self.docker(self.compose() + ["up", "-d"] + (["--build"] if build else [])).returncode
+
+    def pull(self) -> int:
+        return self.docker(self.compose() + ["pull", "worker"]).returncode
+
+    def stop(self, down: bool) -> int:
+        return self.docker(self.compose() + (["down"] if down else ["stop"])).returncode
+
+    def drain(self, timeout: float) -> int:
+        """Let the worker finish its jobs and take no new ones."""
+        return self.exec("worker", "python3", "-m", "app.worker.supervisor", "drain", f"{timeout:g}s",
+                         capture=False).returncode
+
+    def running(self) -> bool:
+        result = self.docker(self.compose() + ["ps", "--status", "running", "-q", "worker"],
+                             capture_output=True, text=True)
+        return result.returncode == 0 and bool((result.stdout or "").strip())
+
+    def status(self) -> int:
+        return self.exec("worker", "python3", "-m", "app.cluster", "status", capture=False).returncode
+
+    def logs_command(self, service: str) -> str:
+        files = " -f docker-compose.node-gpu.yml" if self.gpu else ""
+        return f"docker compose -p {self.PROJECT} -f docker-compose.node.yml{files} --env-file {self.ENV_FILE} logs {service}"
+
+    def restart_command(self, service: str) -> str:
+        return "python scripts/server.py restart"

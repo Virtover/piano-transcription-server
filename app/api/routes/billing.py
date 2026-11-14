@@ -1,7 +1,6 @@
 import hashlib
 import json
 import logging
-import subprocess
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -12,12 +11,12 @@ from redis import Redis
 
 from app.billing import Billing, transcription_cost
 from app.config import settings
-from app import controls, google_play, maintenance, video_info, video_sites
+from app import controls, google_play, maintenance, video_check, video_sites
 from app.errors import SourceBusy, SourceError, SourceTimedOut, SourceUnsupported, SourceVideoUnavailable
 from app.maintenance import NoticeResponse
 from app.slots import VIDEO_CHECKS_KEY, LeasedSlot
 from app.auth import AuthenticatedUser, current_user, google_oauth_client_ids
-from app.url_safety import YT_DLP_SAFETY_OPTIONS, ensure_safe_source_url
+from app.url_safety import ensure_safe_source_url
 
 
 logger = logging.getLogger(__name__)
@@ -158,41 +157,22 @@ def run_check(key: str, safe_url: str) -> dict[str, Any]:
 
 
 def read_video_info(safe_url: str) -> dict[str, Any]:
-    site = video_sites.site_of(safe_url)
-    slot = LeasedSlot(redis, METADATA_SLOTS_KEY, settings.limits.max_video_checks)
-    if not slot.take(METADATA_WAIT):
-        raise SourceBusy(video_sites.BUSY_MESSAGE, retry_after=5)
-    try:
-        with video_sites.access(site, METADATA_WAIT):
-            try:
-                result = subprocess.run(
-                    [
-                        "yt-dlp",
-                        *YT_DLP_SAFETY_OPTIONS,
-                        *video_sites.YT_DLP_SITE_OPTIONS,
-                        "--dump-single-json",
-                        "--no-download",
-                        "--",
-                        safe_url,
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-                raise video_sites.failure(site, error) from error
-            except OSError as error:
-                raise SourceError("Unable to read video metadata") from error
-        info = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise SourceError("Unable to read video metadata") from error
-    finally:
-        slot.release()
-    duration = info.get("duration") if isinstance(info, dict) else None
-    if not isinstance(duration, (int, float)) or duration <= 0:
-        raise SourceError("Video duration is unavailable")
-    return video_info.slim(info)
+    """The video's info, from this server's address, or in a home cluster,
+    while the site refuses it, from a node's (app.video_check). A node's
+    answer is marked `delegated`, and its info is never saved for the
+    download."""
+    if video_check.should_delegate(redis, safe_url):
+        slot = LeasedSlot(redis, METADATA_SLOTS_KEY, settings.limits.max_video_checks)
+        if not slot.take(METADATA_WAIT):
+            raise SourceBusy(video_sites.BUSY_MESSAGE, retry_after=5)
+        try:
+            from app.worker.tasks import check_video_link
+
+            info = video_check.delegate(redis, safe_url, check_video_link.send)
+        finally:
+            slot.release()
+        return {**info, video_check.DELEGATED_MARK: True}
+    return video_check.read_video_info(redis, safe_url)
 
 
 def error_detail(error: SourceError) -> dict[str, str]:
@@ -222,8 +202,11 @@ def ensure_accepting(user_id: str, link: bool, submission: bool = True, source_u
             detail=message,
             headers={"Retry-After": str(retry_after)} if retry_after else None,
         )
-    # Refused before anything is checked or held.
-    if source_url is not None and (limited := video_sites.refusal(video_sites.site_of(source_url))) is not None:
+    # Refused before anything is checked or held: in a home cluster, only
+    # when no node can check the link from an address the site accepts.
+    if source_url is not None and (
+        limited := video_check.refusal_everywhere(redis, video_sites.site_of(source_url))
+    ) is not None:
         raise source_refusal(limited)
 
 

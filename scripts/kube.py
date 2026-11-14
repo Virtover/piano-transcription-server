@@ -1004,7 +1004,10 @@ class KubeStack(SERVER_SCRIPT.Stack):
 COMMANDS = ("up", "update", "down", "status", "check", "logs", "build", "config", "admin")
 # scripts/server.py's commands, run on the cluster; kube.py's status also
 # shows the notice that server.py's status prints.
-SERVER_COMMANDS = tuple(action for action in SERVER_SCRIPT.actions() if action not in COMMANDS)
+# Those of a home cluster's Compose hub and nodes are not a Kubernetes cluster's.
+COMPOSE_CLUSTER_COMMANDS = ("join", "push-images")
+SERVER_COMMANDS = tuple(action for action in SERVER_SCRIPT.actions()
+                        if action not in COMMANDS and action not in COMPOSE_CLUSTER_COMMANDS)
 # What changes the cluster, so it asks first, naming the kubectl context.
 ASKS_FIRST = ("restart", "stop", "start")
 

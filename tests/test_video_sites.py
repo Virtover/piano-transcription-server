@@ -8,7 +8,7 @@ import types
 import pytest
 from fastapi import HTTPException
 
-from app import video_info, video_sites
+from app import video_check, video_info, video_sites
 from app.admin.__main__ import main
 from app.api.routes import billing as billing_routes
 from app.errors import (
@@ -483,7 +483,7 @@ def yt_dlp(api_context, monkeypatch):
         return subprocess.CompletedProcess(command, 0, stdout=output["stdout"])
 
     monkeypatch.setattr(billing_routes, "ensure_safe_source_url", lambda url: url)
-    monkeypatch.setattr(billing_routes.subprocess, "run", fake_run)
+    monkeypatch.setattr(video_check.subprocess, "run", fake_run)
     return output
 
 

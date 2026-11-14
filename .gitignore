@@ -9,5 +9,6 @@ __pycache__/
 /deploy/kubernetes/cluster.env
 /deploy/kubernetes/cluster/
 /server.env
+/node.env
 /.env.before-split
 /deploy/kubernetes/local/settings.env

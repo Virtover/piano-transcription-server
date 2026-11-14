@@ -40,7 +40,9 @@ SECRETS_DIR = "/run/secrets"
 CHECKED_PREFIXES = ("WORKER_", "BILLING_", "DATABASE_", "JOB_", "OUTSOURCE_", "STORAGE_", "RUNPOD_", "GOOGLE_PLAY_", "CLOUDFLARE_", "OFFSITE_", "ERROR_REPORT_")
 MIN_SERVER_PASSWORD_LENGTH = 12
 # Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
-COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD"}
+COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD",
+                     # A home cluster's hub (docker-compose.hub.yml, docs/cluster.md).
+                     "HUB_ADDRESS", "HUB_REGISTRY", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR"}
 # The two files: .env holds what Docker Compose reads, server.env the
 # server's settings, the same on every deployment. COMPOSE_PROFILES and
 # ADMIN_WEB_MODE are both: Compose starts services by the one and picks the
@@ -209,10 +211,11 @@ class ServiceSettings(BaseSettings):
     # CA rather than a public one, as many managed Redis services do.
     redis_ca_file: str = ""
     data_dir: str = "/data"
-    # Where the services run: local (outside containers), compose, or
-    # kubernetes. Set as wiring; it turns the checks of one on or off, such
-    # as Compose's profiles, which Kubernetes does not have.
-    deployment: Literal["local", "compose", "kubernetes"] = "local"
+    # Where the services run: local (outside containers), compose, node (a
+    # device of a home cluster, see docs/cluster.md), or kubernetes. Set as
+    # wiring; it turns the checks of one on or off, such as Compose's
+    # profiles, which Kubernetes does not have.
+    deployment: Literal["local", "compose", "node", "kubernetes"] = "local"
 
     def redis_tls_options(self) -> dict[str, str]:
         """Keyword arguments that verify a rediss:// server's certificate
@@ -248,6 +251,9 @@ class LimitsSettings(BaseSettings):
     max_active_jobs_per_user: UnlimitedInt = Field(default=5, ge=1)
     # How long a finished job's status and MIDI file can be retrieved.
     result_retention: Duration = 60 * 60.0
+    # With results in a bucket: link redirects to a signed link to it, api
+    # sends the file from the API, as with job files on one machine.
+    result_download: Literal["link", "api"] = "link"
     # After a video site rate-limits this server, links are refused this
     # long; each incident in a row doubles it, up to the maximum.
     video_site_cooldown: Duration = 30 * 60.0
@@ -320,8 +326,26 @@ class JobSettings(BaseSettings):
     # share. s3: in the outsourcing bucket, for API replicas and workers on
     # several machines; see app/job_storage.py.
     storage: Literal["local", "s3"] = "local"
+    # A bucket for job files of their own, such as one on the hub, while
+    # outsourcing keeps the STORAGE_ bucket; each unset one is STORAGE_'s.
+    storage_endpoint: str | None = None
+    storage_bucket: str | None = None
+    storage_region: str | None = None
+    # The address signed result links name, when browsers reach the bucket
+    # elsewhere than the services do, as through a tunnel.
+    storage_public_endpoint: str | None = None
+    # Attempts at a job whose worker stopped mid-job, as a device that lost
+    # power, before it fails and is refunded.
+    max_attempts: int = Field(default=3, ge=1, le=10)
     # How long each job's full error is kept for administrators.
     diagnostics_retention: Duration = 30 * 24 * 60 * 60.0
+
+    @field_validator("storage_public_endpoint")
+    @classmethod
+    def _public_endpoint(cls, value: str | None) -> str | None:
+        if value is not None and not value.lower().startswith("https://"):
+            raise ValueError("must use https://: browsers and RunPod reach it over the internet")
+        return value
 
 
 class CleanupSettings(BaseSettings):
@@ -398,6 +422,9 @@ class SecretSettings(BaseSettings):
     runpod_read_api_key: SecretStr | None = None
     storage_access_key: SecretStr | None = None
     storage_secret_key: SecretStr | None = None
+    # Keys of the job files' own bucket (JOB_STORAGE_BUCKET), if it has one.
+    job_storage_access_key: SecretStr | None = None
+    job_storage_secret_key: SecretStr | None = None
     offsite_backup_access_key: SecretStr | None = None
     offsite_backup_secret_key: SecretStr | None = None
     # Optional. When present, every request except /health and /ready needs it.
@@ -567,6 +594,27 @@ class ErrorReportSettings(BaseSettings):
         return value
 
 
+class NodeSettings(BaseSettings):
+    """This device in a home cluster (app/cluster.py, docs/cluster.md). A
+    node's node.env sets them; the hub's services are the node `hub`."""
+
+    model_config = _group_config("NODE_")
+
+    name: str = "hub"
+    # How video sites see this device: auto learns its public address, so
+    # devices behind one router share their rate limits; a name of your own
+    # groups devices by hand.
+    egress: str = "auto"
+
+    @field_validator("name")
+    @classmethod
+    def _node_name(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.match(r"^[a-z0-9][a-z0-9-]{0,30}$", value):
+            raise ValueError("must be 1 to 31 lowercase letters, digits, and hyphens")
+        return value
+
+
 class RunPodSettings(BaseSettings):
     model_config = _group_config("RUNPOD_")
 
@@ -592,6 +640,7 @@ GROUPS: dict[str, type[BaseSettings]] = {
     "tunnel": TunnelSettings,
     "admin_web": AdminWebSettings,
     "error_report": ErrorReportSettings,
+    "node": NodeSettings,
     "secrets": SecretSettings,
 }
 
@@ -614,6 +663,7 @@ class Settings:
     tunnel: TunnelSettings
     admin_web: AdminWebSettings
     error_report: ErrorReportSettings
+    node: NodeSettings
     secrets: SecretSettings
     secrets_dir: str = SECRETS_DIR
 

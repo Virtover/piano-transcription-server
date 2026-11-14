@@ -739,7 +739,11 @@ def serving(cluster):
 
 
 def test_every_server_command_runs_on_a_cluster():
-    assert set(kube_script.SERVER_SCRIPT.actions()) <= set(kube_script.COMMANDS + kube_script.SERVER_COMMANDS)
+    # But those of a home cluster's Compose hub and nodes.
+    assert set(kube_script.SERVER_SCRIPT.actions()) - set(kube_script.COMPOSE_CLUSTER_COMMANDS) <= set(
+        kube_script.COMMANDS + kube_script.SERVER_COMMANDS
+    )
+    assert not set(kube_script.COMPOSE_CLUSTER_COMMANDS) & set(kube_script.SERVER_COMMANDS)
 
 
 def test_restart_is_server_scripts_with_a_rolling_update(project):

@@ -22,6 +22,7 @@ from app.transcription.device import (
 LOCAL_QUEUE = "default"
 REMOTE_QUEUE = "remote"
 ARRANGEMENT_QUEUE = "arrangement"
+CHECK_QUEUE = "checks"
 
 
 @dataclass(frozen=True)
@@ -130,11 +131,23 @@ def idle(reason: str) -> None:
 def main(arguments: list[str] | None = None) -> None:
     """Start Dramatiq for a role: `local` (default) runs the model on this
     machine and consumes the default queue; `remote` dispatches to the
-    outsourcing provider and consumes the remote queue, without GPU libraries."""
+    outsourcing provider and consumes the remote queue, without GPU
+    libraries; `node` is a home cluster device's worker, which may do both
+    and check links for the hub.
+
+    With Docker Compose, on the hub or a node, a supervisor runs Dramatiq
+    and follows the cluster's switches (app.worker.supervisor); elsewhere,
+    as on Kubernetes, Dramatiq replaces this process."""
     arguments = sys.argv[1:] if arguments is None else arguments
     role = arguments[0] if arguments else "local"
-    if role not in ("local", "remote"):
-        raise SystemExit(f"Unknown worker role {role!r}; use local or remote")
+    if role not in ("local", "remote", "node"):
+        raise SystemExit(f"Unknown worker role {role!r}; use local, remote, or node")
+
+    if role == "node" or settings.service.deployment in ("compose", "node"):
+        from app.worker import supervisor
+
+        supervisor.main(role, arguments)
+        return
 
     if role == "remote":
         if settings.outsource.provider == "none":

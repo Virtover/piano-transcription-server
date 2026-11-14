@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from app import google_play, main, video_info
+from app import google_play, main, video_check, video_info
 from app.api.routes import billing as billing_routes
 from app.slots import LeasedSlot, in_use
 
@@ -91,7 +91,7 @@ def yt_dlp(api_context, monkeypatch):
         return subprocess.CompletedProcess(command, 0, stdout=output["stdout"])
 
     monkeypatch.setattr(billing_routes, "ensure_safe_source_url", lambda url: url)
-    monkeypatch.setattr(billing_routes.subprocess, "run", fake_run)
+    monkeypatch.setattr(video_check.subprocess, "run", fake_run)
     return output
 
 
@@ -187,7 +187,7 @@ def test_cost_needs_sign_in_when_billing(api_context, monkeypatch):
 
 def test_unsafe_urls_are_rejected_before_yt_dlp(api_context, monkeypatch):
     client, _, _ = api_context
-    monkeypatch.setattr(billing_routes.subprocess, "run", lambda *args, **kwargs: pytest.fail("yt-dlp ran"))
+    monkeypatch.setattr(video_check.subprocess, "run", lambda *args, **kwargs: pytest.fail("yt-dlp ran"))
 
     assert duration_error("http://localhost/video") == 422
     response = client.get("/api/billing/cost", params={"source_url": "http://127.0.0.1/video"})

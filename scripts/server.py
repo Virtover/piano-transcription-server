@@ -7,6 +7,16 @@
     python scripts/server.py status
     python scripts/server.py cancel                      # also stops a waiting script
     python scripts/server.py restore [latest|NAME|N]     # billing database from a backup; --from local, --fallback
+    python scripts/server.py push-images [--legacy]      # a cluster hub: images for the nodes, to its registry
+
+On a device of a home cluster (docs/cluster.md), the same script runs that
+device alone, without notices: the rest of the cluster keeps serving.
+
+    python scripts/server.py join laptop.json            # once: this device becomes the node of the invite
+    python scripts/server.py start | stop | restart | update | status
+
+stop and restart let the running jobs finish first (--grace, default 5m),
+and update takes the hub's newest image or builds again.
 
 Runs on the host with only the Python standard library. On a new
 installation, start creates .env from .env.example, a random PostgreSQL
@@ -53,7 +63,8 @@ def load_script(name: str):
 
 
 STACKS = load_script("stacks")
-Stack, ComposeStack = STACKS.Stack, STACKS.ComposeStack
+Stack, ComposeStack, NodeStack = STACKS.Stack, STACKS.ComposeStack, STACKS.NodeStack
+NODES = load_script("nodes")
 
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 DEFAULT_GRACE = "5m"
@@ -101,7 +112,8 @@ def remaining_text(seconds: float) -> str:
 # COMPOSE_ONLY_VARIABLES in app/config.py, which a test compares; another
 # test fails if docker-compose.yml reads a variable missing here.
 COMPOSE_ONLY_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD",
-                          "COMPOSE_PROFILES", "ADMIN_WEB_MODE"}
+                          "COMPOSE_PROFILES", "ADMIN_WEB_MODE",
+                          "HUB_ADDRESS", "HUB_REGISTRY", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR"}
 COMPOSE_ENV, SERVER_ENV = ".env", "server.env"
 ADDED_HEADER = "# --- Added by scripts/setup.py or scripts/server.py"
 # A line that python-dotenv and Docker Compose read as a setting: also with
@@ -567,7 +579,16 @@ def reload_redis_users(stack: Stack) -> None:
             f"{stack.restart_command('redis')}")
 
 
+def needs_delay(args, action: str) -> bool:
+    if args.delay is None:
+        say(f"give the time until the {action}, for example: {args.prog_name} {args.action} 5m")
+        return False
+    return True
+
+
 def restart(args, stack: Stack, clock: Clock) -> int:
+    if not needs_delay(args, "restart"):
+        return 2
     if not prepare(stack):
         return 1
     if args.command:
@@ -594,10 +615,13 @@ def restart(args, stack: Stack, clock: Clock) -> int:
         return 1
     stack.maintenance("cancel")
     say("done: the API is ready and the notice is removed")
+    serve_hub(stack)
     return 0
 
 
 def stop(args, stack: Stack, clock: Clock) -> int:
+    if not needs_delay(args, "shutdown"):
+        return 2
     code = countdown(stack, clock, "shutdown", args, build_images=False)
     if code is not None:
         return code
@@ -635,7 +659,165 @@ def start(args, stack: Stack, clock: Clock) -> int:
         say(f"the API is not ready after {READY_TIMEOUT} s; check `{stack.logs_command('api')}`")
         return 1
     say("done: the API is ready")
+    serve_hub(stack)
     return 0
+
+
+# --- A home cluster's hub ------------------------------------------------------------
+
+def hub_values(stack: Stack) -> dict[str, str]:
+    return NODES.env_values(stack.root / COMPOSE_ENV) if isinstance(stack, ComposeStack) else {}
+
+
+def serve_hub(stack: Stack) -> None:
+    """After the hub started: its bucket exists, and with its registry,
+    the nodes' images are pushed again, so `update` on a node takes the code
+    that runs here. Nothing for a stack that is no cluster hub."""
+    values = hub_values(stack)
+    if not values.get("HUB_ADDRESS"):
+        return
+    profiles = {profile.strip() for profile in values.get("COMPOSE_PROFILES", "").split(",")}
+    if "storage" in profiles:
+        result = stack.exec("api", "python", "-m", "app.cluster", "create-bucket")
+        say((result.stdout or "").strip() or f"could not create the bucket: {STACKS.failure(result, 'no answer')}")
+    if values.get("HUB_REGISTRY"):
+        try:
+            pushed = stack.redis("hkeys", NODES.IMAGES_KEY).split()
+        except RuntimeError:
+            pushed = []
+        variants = [name.removeprefix("worker-") for name in pushed if name.startswith("worker-")]
+        if variants:
+            say(f"pushing the nodes' images again ({', '.join(variants)}), so their update takes this version")
+            push_images(stack, variants)
+
+
+def push_images(stack: Stack, variants: list[str]) -> int:
+    """Build the worker for each GPU build and push it to the hub's registry,
+    and tell the nodes its digest, by which they pull it."""
+    registry = hub_values(stack).get("HUB_REGISTRY")
+    if not registry:
+        say("this machine has no registry for nodes: python scripts/admin.py nodes hub <address> --registry <its "
+            "Tailscale name>")
+        return 1
+    for variant in variants:
+        tag = f"{registry}/{NODES.IMAGE_NAME}:{variant}"
+        say(f"building {tag}")
+        if stack.build_image("Dockerfile.worker", tag, {"GPU_BUILD": variant}) != 0:
+            say(f"the build of {variant} failed; nodes keep the image they have")
+            return 1
+        reference = stack.push_image(tag)
+        if reference is None:
+            say(f"could not push {tag}: is `tailscale serve` running for the registry, and the registry started?")
+            return 1
+        stack.redis("hset", NODES.IMAGES_KEY, f"worker-{variant}", reference)
+        say(f"nodes with the {variant} build take {reference.split('@')[1][:19]} on their next update")
+    return 0
+
+
+# --- A device of a home cluster ----------------------------------------------------------
+
+NODE_ACTIONS = ("start", "stop", "restart", "update", "status")
+NODE_START_TIMEOUT = 60
+
+
+def node_stack(root: Path) -> "NodeStack":
+    values = NODES.env_values(root / NODES.NODE_ENV)
+    return NodeStack(gpu=values.get("NODE_PROCESSOR", "gpu") != "cpu", root=root)
+
+
+def node_image(stack: "NodeStack") -> bool:
+    """With the hub's registry, the image the hub pushed for this device's
+    GPU build, written to node.env: True to pull it. False to build here."""
+    env = stack.root / NODES.NODE_ENV
+    values = NODES.env_values(env)
+    if not values.get("NODE_REGISTRY"):
+        return False
+    variant = values.get("WORKER_GPU_BUILD") or "current"
+    try:
+        reference = NODES.hub_image(stack.root, variant)
+    except (OSError, NODES.ClusterError) as error:
+        say(f"cannot ask the hub for its image ({error}); building here instead")
+        reference = None
+    if not reference:
+        say(f"the hub has pushed no {variant} image yet (python scripts/server.py push-images"
+            f"{' --legacy' if variant == 'legacy' else ''} on the hub); building here")
+        NODES.set_env_value(env, "NODE_WORKER_IMAGE", None)
+        return False
+    NODES.set_env_value(env, "NODE_WORKER_IMAGE", reference)
+    return True
+
+
+def node_start(args, stack: "NodeStack", clock: Clock) -> int:
+    if not (stack.root / NODES.NODE_SECRETS / "redis_password").is_file():
+        say("secrets/node/redis_password is missing: invite this device again on the hub and join with the new invite")
+        return 1
+    if getattr(args, "legacy_gpu", False):
+        NODES.set_env_value(stack.root / NODES.NODE_ENV, "WORKER_GPU_BUILD", "legacy")
+    pulled = node_image(stack)
+    remove_stale_containers(stack)
+    if pulled and stack.pull() != 0:
+        say("could not pull the hub's image; is Tailscale up, and `tailscale serve` running on the hub?")
+        return 1
+    say("starting this device's worker" + ("" if pulled else ", building it if it changed"))
+    code = stack.up(build=not pulled)
+    if code != 0:
+        say(f"docker failed with exit code {code}")
+        return code
+    deadline = clock.now() + NODE_START_TIMEOUT
+    while not stack.running():
+        if clock.now() >= deadline:
+            say(f"the worker is not running; check `{stack.logs_command('worker')}`")
+            return 1
+        clock.sleep(2)
+    say(f"started. It takes work as the hub's switches allow; see: {stack.script} status")
+    return 0
+
+
+def node_drain(args, stack: "NodeStack") -> None:
+    if stack.running():
+        say(f"letting the running jobs finish, up to {remaining_text(args.grace)}")
+        stack.drain(args.grace)
+
+
+def node_stop(args, stack: "NodeStack", clock: Clock) -> int:
+    node_drain(args, stack)
+    code = stack.stop(getattr(args, "down", False))
+    if code == 0:
+        say(f"stopped: this device takes no work until `{stack.script} start`. The cluster keeps serving")
+    return code
+
+
+def node_restart(args, stack: "NodeStack", clock: Clock) -> int:
+    node_drain(args, stack)
+    return node_start(args, stack, clock)
+
+
+def node_status(args, stack: "NodeStack", clock: Clock) -> int:
+    if not stack.running():
+        say(f"this device's worker is not running; start it with: {stack.script} start")
+        return 0
+    return stack.status()
+
+
+def join(args, root: Path, stack: "NodeStack | None" = None, clock: Clock | None = None) -> int:
+    try:
+        for message in NODES.join(root, Path(args.invite), "cpu" if args.cpu else ("gpu" if args.gpu else None),
+                                  args.legacy_gpu):
+            say(message)
+    except NODES.ClusterError as error:
+        say(str(error))
+        return 1
+    if args.no_start:
+        return 0
+    return node_start(args, stack if isinstance(stack, NodeStack) else node_stack(root), clock or Clock())
+
+
+def node_main(args, stack: "NodeStack", clock: Clock) -> int:
+    if args.action not in NODE_ACTIONS:
+        say(f"{args.action} is for the hub; this device is the node {NODES.env_values(stack.root / NODES.NODE_ENV)['NODE_NAME']}")
+        return 1
+    return {"start": node_start, "stop": node_stop, "restart": node_restart, "update": node_restart,
+            "status": node_status}[args.action](args, stack, clock)
 
 
 def read_key() -> str:
@@ -756,6 +938,7 @@ def actions() -> list[str]:
 def parse_arguments(arguments: list[str], prog: str = "python scripts/server.py") -> argparse.Namespace:
     args = build_parser(prog).parse_args(arguments)
     args.profile = list(getattr(args, "profile", []))
+    args.prog_name = prog
     return args
 
 
@@ -774,7 +957,9 @@ def build_parser(prog: str = "python scripts/server.py") -> argparse.ArgumentPar
                                help="build the worker for older NVIDIA GPUs such as the GTX 1050 Ti")
 
     def timing(subparser, noun):
-        subparser.add_argument("delay", type=parse_duration, help=f"time until the {noun}, for example 5m or 30s")
+        # Needed on the hub; a cluster node stops or restarts itself at once.
+        subparser.add_argument("delay", type=parse_duration, nargs="?",
+                               help=f"time until the {noun}, for example 5m or 30s (not on a cluster node)")
         subparser.add_argument("--grace", type=parse_duration, default=parse_duration(DEFAULT_GRACE),
                                help=f"how long running jobs may take to finish (default {DEFAULT_GRACE})")
         subparser.add_argument("--reason", help="optional text shown to clients")
@@ -804,8 +989,23 @@ def build_parser(prog: str = "python scripts/server.py") -> argparse.ArgumentPar
     restore_parser.add_argument("--yes", action="store_true", help="do not ask before replacing the database")
     profiles(restore_parser)
 
-    commands.add_parser("status", help="print the pending restart or shutdown")
+    commands.add_parser("status", help="print the pending restart or shutdown; on a cluster node, what it runs")
     commands.add_parser("cancel", help="cancel the pending restart or shutdown")
+
+    # A home cluster (docs/cluster.md).
+    join_parser = commands.add_parser("join", help="make this device a node of a home cluster, from its invite file")
+    join_parser.add_argument("invite", help="the invite file that `python scripts/admin.py nodes invite` wrote on the hub")
+    processor = join_parser.add_mutually_exclusive_group()
+    processor.add_argument("--cpu", action="store_true", help="run on the CPU, even with an NVIDIA GPU")
+    processor.add_argument("--gpu", action="store_true", help="use the NVIDIA GPU, even if nvidia-smi is not found")
+    join_parser.add_argument("--legacy-gpu", action="store_true",
+                             help="build the worker for older NVIDIA GPUs such as the GTX 1050 Ti")
+    join_parser.add_argument("--no-start", action="store_true", help="only write the files; start later")
+    update_parser = commands.add_parser("update", help="on a cluster node: take the hub's newest image, or build again")
+    update_parser.add_argument("--grace", type=parse_duration, default=parse_duration(DEFAULT_GRACE),
+                               help=f"how long running jobs may take to finish (default {DEFAULT_GRACE})")
+    push_parser = commands.add_parser("push-images", help="on a cluster hub: build the nodes' image and push it to its registry")
+    push_parser.add_argument("--legacy", action="store_true", help="also the build for older GPUs such as the GTX 10 series")
     return parser
 
 
@@ -813,11 +1013,20 @@ def main(arguments: list[str], stack: Stack | None = None, clock: Clock | None =
     args = parse_arguments(arguments, stack.script if stack else "python scripts/server.py")
     if getattr(args, "outsource", False):
         say(OUTSOURCE_NOTE)
+    clock = clock or Clock()
+    if args.action == "join":
+        return join(args, stack.root if stack else ROOT, stack, clock)
+    if isinstance(stack, NodeStack) or (stack is None and NODES.is_node(ROOT)):
+        return node_main(args, stack or node_stack(ROOT), clock)
+    if args.action == "update":
+        say("update is for a cluster node; on this server, use: python scripts/server.py restart 5m")
+        return 1
     if stack is None:
         share_billing_data(os.environ)
         select_gpu_build(args, os.environ)
     stack = stack or ComposeStack(args.profile, prepare=prepare_files)
-    clock = clock or Clock()
+    if args.action == "push-images":
+        return push_images(stack, ["current", "legacy"] if args.legacy else ["current"])
     try:
         if args.action == "status":
             notice = json.loads(stack.maintenance("status") or "null")

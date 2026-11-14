@@ -1,0 +1,56 @@
+# A device of a home cluster (docs/cluster.md): a worker only, which reaches
+# the hub's Redis, and its bucket if it has one, over the tailnet, and never
+# the billing database. scripts/server.py runs it, when node.env exists, as
+#
+#   docker compose -p piano-node -f docker-compose.node.yml [-f docker-compose.node-gpu.yml] --env-file node.env
+#
+# `python scripts/server.py join <invite>` writes node.env and secrets/node.
+# The worker takes the server's settings from the hub; node.env holds only
+# this device's: its name, the hub's address, and any override.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 20m
+    max-file: "5"
+
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      args:
+        # legacy builds for older GPUs such as the GTX 10 series.
+        GPU_BUILD: ${WORKER_GPU_BUILD:-current}
+    # With the hub's registry, the image it pushed, by digest; otherwise
+    # the one built here.
+    image: ${NODE_WORKER_IMAGE:-piano-node-worker:local}
+    command: ["python3", "-m", "app.worker.launcher", "node"]
+    env_file:
+      - path: node.env
+        required: true
+    environment:
+      DEPLOYMENT: node
+      NODE_NAME: ${NODE_NAME:?NODE_NAME is not set in node.env; run python scripts/server.py join}
+      REDIS_URL: redis://node-${NODE_NAME}@${HUB_ADDRESS:?HUB_ADDRESS is not set in node.env}:6379/0
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      DATA_DIR: /data
+    volumes:
+      # Each attempt's scratch folder; the bucket keeps the job files.
+      - data:/data
+      # This node's secrets only: its Redis password, the bucket's keys,
+      # and RunPod's if it sends jobs there. Never the hub's other secrets.
+      - ./secrets/node:/run/secrets:ro
+    # The same hardening as on the hub: user 10001, no capability, no way
+    # to gain privileges through a setuid program.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # Running jobs finish when the worker stops; a job still running after
+    # this is queued again elsewhere.
+    stop_grace_period: 2m
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  data:

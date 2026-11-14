@@ -7,7 +7,8 @@ Each place holds one kind of thing, so the server's settings are the same on eve
 | Place | Holds | Read by |
 | --- | --- | --- |
 | `server.env`, from [server.env.example](../server.env.example) | **The server's settings**: limits, workers, the database's backups, and the optional features. Every setting below unless it says otherwise. | the server, on every deployment |
-| `.env`, from [.env.example](../.env.example) | **What Docker Compose itself reads**: `COMPOSE_PROFILES`, `ADMIN_WEB_MODE`, `API_BIND_ADDRESS`, `POSTGRES_DATA_LOCATION`, `WORKER_GPU_BUILD`. The services get it too, so the server reads `COMPOSE_PROFILES` and `ADMIN_WEB_MODE` from it. | Docker Compose |
+| `.env`, from [.env.example](../.env.example) | **What Docker Compose itself reads**: `COMPOSE_PROFILES`, `ADMIN_WEB_MODE`, `API_BIND_ADDRESS`, `POSTGRES_DATA_LOCATION`, `WORKER_GPU_BUILD`, and on a [home cluster's hub](cluster.md) `HUB_ADDRESS`, `HUB_REGISTRY`, `COMPOSE_FILE`, `COMPOSE_PATH_SEPARATOR`. The services get it too, so the server reads `COMPOSE_PROFILES` and `ADMIN_WEB_MODE` from it. | Docker Compose |
+| `node.env` | **A home cluster's node only**: its name, the hub's address, and any setting this device should have its own value of; everything else comes from the hub. See [Home cluster](cluster.md). | Docker Compose and the node's worker |
 | `docker-compose.yml`, `deploy/kubernetes/base/wiring.yaml` | **Wiring**: container paths and service addresses (`REDIS_URL`, `DATA_DIR`, `DATABASE_PATH`, `DATABASE_BACKUP_DIR`, `DEPLOYMENT`), fixed per deployment. The code defaults suit local development outside containers. | the server |
 | `deploy/kubernetes/` | **Kubernetes only**: `cluster.env`, the cluster's own choices such as the registry, GPU nodes, and scaling (see [Cluster choices](kubernetes.md#-cluster-choices)); and `settings.env`, a copy of `server.env` | Kubernetes, through `scripts/kube.py` |
 | `./secrets` | **Secrets**, one file each, mounted read-only at `/run/secrets`. Never read from an env file or the environment, and never in logs or error messages. See [Secrets](#-secrets). | the server |
@@ -31,7 +32,7 @@ A basic server needs no setting: `python scripts/server.py start` runs it with e
 | Backups by the database's provider | `DATABASE_BACKUPS=provider` | a managed PostgreSQL | | [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql) |
 | Off-site backups | `OFFSITE_BACKUP_BUCKET` | the server's own backups: not with `DATABASE_BACKUPS=provider` | `offsite_backup_access_key`, `offsite_backup_secret_key` | [Off-site copies](#off-site-copies) |
 | Object storage | `STORAGE_BUCKET` | | `storage_access_key`, `storage_secret_key` | [Object storage](#object-storage) |
-| Job files in object storage | `JOB_STORAGE=s3` | object storage, for this server alone | | [Job storage](architecture.md#job-storage) |
+| Job files in object storage | `JOB_STORAGE=s3` | object storage, for this server alone | optionally `job_storage_access_key`, `job_storage_secret_key`, for a bucket of their own | [Job storage](architecture.md#job-storage) |
 | Outsourcing to RunPod | `OUTSOURCE_PROVIDER=runpod` | object storage | `runpod_api_key`, optionally `runpod_read_api_key` | [Outsourcing to RunPod](runpod.md) |
 | Piano arrangements | `WORKER_ARRANGEMENT=true`, the default; `false` turns them off | | | [Piano arrangements](architecture.md#-piano-arrangements) |
 | Error reports | `ERROR_REPORT_URL` | | `error_report_token` | [Error reports](#error-reports) |
@@ -104,6 +105,7 @@ Prints what a setting or secret is without reading the code and this page: the f
 | `MAX_VIDEO_CHECKS` | `4` | Video links checked at once, for their length and cost, by every API replica together. Each check runs `yt-dlp` for up to a minute. A request that finds no place within 10 seconds is answered `503` with `Retry-After`. Set to `unlimited` to remove this limit. |
 | `VIDEO_SITE_MAX_DOWNLOADS` | `2` | Downloads from one video site at once, from all workers together, including downloads with the information the link check saved. Further jobs wait for a place. Set to `unlimited` to remove this concurrency limit. |
 | `RESULT_RETENTION` | `1h` | How long a finished job can be retrieved: its status and, when completed, its MIDI file. Counted from when the job completed, failed, or was cancelled. Then the job is gone (`404`) and its files are deleted at the next cleanup. `GET /api/server-info` returns it as `result_retention_seconds`. Longer periods keep more files on disk. |
+| `RESULT_DOWNLOAD` | `link` | With `JOB_STORAGE=s3`, how the MIDI download answers. `link`: `307` with a signed link to the bucket, which apps must follow without their `Authorization` header; the file does not pass through the API. `api`: the API reads the file from the bucket and sends it, as with `JOB_STORAGE=local`, so apps need nothing new and the bucket need not be reachable from the internet, as one on a [home cluster's hub](cluster.md). MIDI files are a few KB; the API refuses to send an object over 16 MB. |
 | `CLEANUP_INTERVAL` | `10m` | How often the cleanup service deletes the files of expired jobs, and with `JOB_STORAGE=s3` how often the leading API deletes them from the bucket. A file can stay up to this long after its job expires, but cannot be downloaded. |
 
 ### Worker
@@ -205,6 +207,12 @@ Where each job's files are kept: the uploaded file, the video information the AP
 | --- | --- | --- |
 | `JOB_STORAGE` | `local` | `local` keeps them in the `data` volume, which the services of one machine share. `s3` keeps them in the [object storage](#object-storage) bucket under `jobs/<job_id>/`, so API replicas and workers on several machines can share them; the `data` volume then holds only each attempt's scratch files, under `work/`. With `s3`, `GET /api/transcriptions/<job_id>/midi` answers `307` with a signed link to the file, valid for 5 minutes, instead of the file itself. See [Job storage](architecture.md#job-storage). |
 
+| `JOB_STORAGE_BUCKET` | unset | A bucket for job files of their own, while outsourcing keeps the `STORAGE_` bucket: as one on a [home cluster's hub](cluster.md), beside RunPod's in the cloud. Unset, job files are in `STORAGE_BUCKET`. Another bucket than that one needs its own keys, the secret files `job_storage_access_key` and `job_storage_secret_key`. |
+| `JOB_STORAGE_ENDPOINT` | unset | That bucket's S3 endpoint, such as `http://100.101.102.103:8333` on a hub's tailnet address. Unset: `STORAGE_ENDPOINT`. |
+| `JOB_STORAGE_REGION` | unset | That bucket's region. Unset: `STORAGE_REGION`. |
+| `JOB_STORAGE_PUBLIC_ENDPOINT` | unset | With `RESULT_DOWNLOAD=link`, the `https://` address signed result links name, when browsers reach the bucket elsewhere than the services do, as through a tunnel. Unset: the endpoint the services use. |
+| `JOB_MAX_ATTEMPTS` | `3` | Attempts at a job whose worker stopped mid-job, as a crash, a restart past its grace, or a device of a [home cluster](cluster.md) that lost power or its network. Until the last, the job is queued again, keeping its reservation; then it fails and is refunded. An upload whose file is gone fails at once. `1` fails at the first interruption, as before. A file that crashes the worker is tried this many times at most. |
+
 Changing `JOB_STORAGE` keeps finished results downloadable: each job remembers where its result is. Queued jobs whose files are where the old setting put them fail; change it when no job is queued, for example during a planned restart.
 
 ### Outsourcing
@@ -282,6 +290,17 @@ A report is sent for every error the API or a worker logs, and for every job tha
 
 The reports are sent from the server to the website, so they also work when the server is reachable only through the tunnel. They cannot tell the website that the server is down: a stopped server sends nothing. The website's status monitor of `/ready` covers that.
 
+### Home cluster
+
+A device of a [home cluster](cluster.md) sets these in its `node.env`, which `python scripts/server.py join` writes; the hub's own services are the node `hub`. Everything else a node takes from the hub, except what depends on the device itself, as below.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `NODE_NAME` | `hub` | This device's name in the cluster: 1 to 31 lowercase letters, digits, and hyphens. Its Redis user is `node-<name>`. |
+| `NODE_EGRESS` | `auto` | How video sites see this device, which decides whose rate limits it shares. `auto` learns the public address, once every 10 minutes, from Cloudflare's trace page, which learns nothing else; devices behind one router then share one, as the sites see them. A name of your own, such as `office`, groups devices by hand. Only matters once nodes are invited. |
+
+A node never takes `WORKER_THREADS`, `WORKER_ENFORCE_CPU`, `WORKER_GPU_RESERVE_GIB`, `WORKER_CPU_RESERVE_GIB`, `WORKER_BATCH_SIZE`, or `WORKER_MAX_CONCURRENCY` from the hub: they depend on the device. Set them in its `node.env`, like any other setting the device should have its own value of.
+
 ### Container wiring
 
 Set by `docker-compose.yml`. Change them only when running the services outside Docker.
@@ -290,7 +309,7 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 | --- | --- | --- | --- |
 | `REDIS_URL` | `redis://localhost:6379/0` | `redis://app@redis:6379/0` | Redis connection URL, with the Redis user the services sign in as. |
 | `REDIS_PASSWORD_FILE` | empty | `/run/redis/password` | The file with that user's password, from `secrets/redis/app`. Empty for a Redis without users, such as one for local development. See [Redis users](architecture.md#-redis-users). |
-| `DEPLOYMENT` | `local` | `compose` | Where the services run: `local` outside containers, `compose`, or `kubernetes` (set in `deploy/kubernetes/base/wiring.yaml`). Checks of one deployment apply only to it: Compose's profiles and the bind address only with Compose, and on Kubernetes the features it needs, and the tunnel, as `CLOUDFLARE_TUNNEL_DEPLOYED` says. |
+| `DEPLOYMENT` | `local` | `compose` | Where the services run: `local` outside containers, `compose`, `node` (a device of a [home cluster](cluster.md), set in `docker-compose.node.yml`), or `kubernetes` (set in `deploy/kubernetes/base/wiring.yaml`). Checks of one deployment apply only to it: Compose's profiles and the bind address only with Compose, and on Kubernetes the features it needs, and the tunnel, as `CLOUDFLARE_TUNNEL_DEPLOYED` says. A `node` never reaches the billing database: the hub settles its jobs. |
 | `CLOUDFLARE_TUNNEL_DEPLOYED` | unset | unset | Whether the deployment itself runs `cloudflared`: `true` in `deploy/kubernetes/base/wiring.yaml`, `false` on the test cluster that `scripts/kube.py local up` starts. Unset, as with Compose, `COMPOSE_PROFILES` says. |
 | `REDIS_CA_FILE` | empty | unset | For a `rediss://` `REDIS_URL` whose certificate is signed by the provider's own CA: that CA's certificate file. Empty trusts the public CAs. See [Managed Redis and PostgreSQL](architecture.md#managed-redis-and-postgresql). |
 | `DATA_DIR` | `/data` | `/data` | Shared directory for job files; with `JOB_STORAGE=s3`, for scratch files only. |
@@ -303,6 +322,8 @@ Set by `docker-compose.yml`. Change them only when running the services outside 
 `BILLING_DATA_GROUP` is read by Docker Compose: the numeric host group that may manage the files in `billing-data`. `scripts/server.py` sets it to the group of the user running it, so it normally stays unset in `.env`. See [Running as a non-root user](setup.md#-running-as-a-non-root-user).
 
 `API_BIND_ADDRESS` in `.env` is read by Docker Compose, not by the server: the network address the API's port `8000` is published on. The default is `0.0.0.0`, which allows direct HTTP access from the local network. Set `127.0.0.1` when an HTTPS tunnel or reverse proxy on this machine is the only intended access path; use HTTPS through a tunnel or reverse proxy for public access. See [Password protection](setup.md#-password-protection).
+
+`HUB_ADDRESS`, `HUB_REGISTRY`, `COMPOSE_FILE`, and `COMPOSE_PATH_SEPARATOR` in `.env` make this machine a [home cluster's hub](cluster.md); `python scripts/admin.py nodes hub` writes them. `HUB_ADDRESS` is the machine's Tailscale address, the only one `docker-compose.hub.yml` publishes Redis, and the optional bucket, on. `COMPOSE_FILE=docker-compose.yml:docker-compose.hub.yml`, with `COMPOSE_PATH_SEPARATOR=:` so the line is the same on every OS, makes Docker Compose read that file too. `HUB_REGISTRY` is the hub's Tailscale name, under which `python scripts/server.py push-images` pushes the nodes' image. On a node, `node.env` has `HUB_ADDRESS` too: the address it reaches the hub at.
 
 `WORKER_GPU_BUILD` in `.env` is read by Docker Compose when it builds the worker image: `current` (default) or `legacy`. The default installs PyTorch's CUDA 13 build, which no longer supports older NVIDIA GPUs such as the GTX 10 series (Pascal, for example the GTX 1050 Ti); on them the worker fails with "no kernel image is available". `legacy` installs the same PyTorch version built for CUDA 12.6, which still supports them, on a CUDA 12.6 base image, so it also runs with older drivers. The build fails if that PyTorch lacks Pascal support. `python scripts/server.py start --legacy-gpu` (also `restart` and `restore`) builds `legacy` for that run only; set it in `.env` to keep it. Rebuild after changing it: `docker compose up -d --build worker`.
 
@@ -327,6 +348,10 @@ Put each secret in `./secrets` as a file named after the setting. Compose mounts
 | `runpod_read_api_key` | Optional. A RunPod key with read-only access to the account. Restricted keys cannot read endpoint settings, so `OUTSOURCE_MAX_CONCURRENCY=auto` and the endpoint settings check of `check --online` use this one. Without it, `auto` allows 4 remote jobs. |
 | `storage_access_key` | Access key ID of the storage token. |
 | `storage_secret_key` | Secret access key of the storage token. |
+| `job_storage_access_key`, `job_storage_secret_key` | Optional. The keys of the job files' own bucket, `JOB_STORAGE_BUCKET`, such as one on a [home cluster's hub](cluster.md), which `python scripts/admin.py nodes hub --storage` creates. Both or neither. |
+| `redis/nodes/<name>` | The Redis password of each node of a [home cluster](cluster.md), which `python scripts/admin.py nodes invite` creates and `revoke` removes. Only the `redis` service sees them. |
+| `storage/s3.json` | The keys of the hub's own bucket: the hub's, and one pair per node, which `nodes invite` and `revoke` write. Only the `storage` service reads it. |
+| `node/` | On a node only: what its invite gave it, its Redis password (`redis_password`) and the keys its tasks need. `python scripts/server.py join` writes it; the node's worker sees nothing else. |
 | `offsite_backup_access_key` | Optional. Access key ID for the off-site backup bucket. See [Off-site copies](#off-site-copies). |
 | `offsite_backup_secret_key` | Optional. Secret access key for the off-site backup bucket. |
 | `server_password` | Optional. When present, every request except `/health` and `/ready` needs this password, as the `X-Server-Password` header or HTTP Basic auth with any user name. At least 12 characters; the API refuses to start otherwise. See [Password protection](setup.md#-password-protection). |

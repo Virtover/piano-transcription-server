@@ -23,7 +23,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app import announcements
-from app.admin import announce, audit, jobs, limits, report, status, users, web
+from app.admin import announce, audit, jobs, limits, nodes, report, status, users, web
 from app.admin.common import AdminError, default_actor
 
 # Errors that mean a service is not reachable, not a fault of the command.
@@ -159,6 +159,27 @@ def parser() -> argparse.ArgumentParser:
     command = announce_actions.add_parser("end", parents=[changes, asks], help="stop showing an announcement; it is kept, ended")
     command.add_argument("id")
     command.set_defaults(run=announce.run_end)
+
+    node_commands = commands.add_parser("nodes", parents=[reads], help="a home cluster's devices; switch them and their tasks")
+    node_commands.set_defaults(run=nodes.run_list)
+    node_actions = node_commands.add_subparsers(dest="action")
+    for state, text in (("on", "let a device take work again"), ("off", "stop a device taking work; its running jobs finish")):
+        command = node_actions.add_parser(state, parents=[changes], help=text)
+        command.add_argument("node", help="the device's name, or hub")
+        command.set_defaults(run=nodes.run_switch, state=state)
+    for action, text in (("allow", "let a device run these tasks"), ("deny", "stop a device running these tasks")):
+        command = node_actions.add_parser(action, parents=[changes], help=text)
+        command.add_argument("node", help="the device's name, or hub")
+        command.add_argument("tasks", nargs="+", help=f"{', '.join(nodes.cluster.TASKS)}, or all")
+        command.set_defaults(run=nodes.run_allow)
+    # Run by scripts/admin.py nodes invite and revoke, which also write the files.
+    command = node_actions.add_parser("register", parents=[changes], help=argparse.SUPPRESS)
+    command.add_argument("node")
+    command.add_argument("tasks", nargs="+")
+    command.set_defaults(run=nodes.run_register)
+    command = node_actions.add_parser("forget", parents=[changes], help=argparse.SUPPRESS)
+    command.add_argument("node")
+    command.set_defaults(run=nodes.run_forget)
 
     command = commands.add_parser("audit", parents=[reads], help="recent admin actions")
     command.add_argument("--limit", type=int, default=30, help="most actions to list (default: 30)")

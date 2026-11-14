@@ -50,9 +50,11 @@ def publish_heartbeat(
     average_job_seconds: float | None,
     worker: str | None = None,
     arrangement: bool = False,
+    transcription: bool = True,
 ) -> None:
     """Called periodically by each GPU worker. Expires if the worker stops.
-    arrangement: whether it consumes the arrangement queue."""
+    arrangement and transcription: whether it consumes the arrangement
+    queue, and the local one, which a cluster switch can turn off."""
     worker = worker or worker_id()
     now = time.time()
     with redis.pipeline() as pipe:
@@ -62,6 +64,7 @@ def publish_heartbeat(
                 "capacity": capacity,
                 "average_job_seconds": average_job_seconds or "",
                 "arrangement": "1" if arrangement else "0",
+                "transcription": "1" if transcription else "0",
                 "updated_at": now,
             },
         )
@@ -111,17 +114,19 @@ def local_workers(redis: Redis) -> list[dict]:
             "capacity": capacity,
             "average_job_seconds": average,
             "arrangement": heartbeat.get("arrangement") == "1",
+            # Missing from workers of before cluster switches: they transcribe.
+            "transcription": heartbeat.get("transcription", "1") == "1",
             "updated_at": updated_at,
         })
     return alive
 
 
 def local_capacity(redis: Redis, arrangement: bool = False) -> tuple[int, float]:
-    """(job capacity, average job seconds) of all local workers together, or
-    with arrangement of those that arrange. Capacity is 0 without a
-    heartbeat. The average weighs each worker by its capacity, because it
-    runs that share of the jobs."""
-    workers = [worker for worker in local_workers(redis) if worker["arrangement"] or not arrangement]
+    """(job capacity, average job seconds) of the local workers that
+    transcribe, together, or with arrangement of those that arrange.
+    Capacity is 0 without a heartbeat. The average weighs each worker by its
+    capacity, because it runs that share of the jobs."""
+    workers = [worker for worker in local_workers(redis) if worker["arrangement" if arrangement else "transcription"]]
     capacity = sum(worker["capacity"] for worker in workers)
     timed = [worker for worker in workers if worker["average_job_seconds"] and worker["capacity"] > 0]
     weight = sum(worker["capacity"] for worker in timed)

@@ -1,0 +1,14 @@
+# The Redis user of each node of a home cluster: node-<name>, one line per
+# file in secrets/redis/nodes, which `python scripts/admin.py nodes invite`
+# creates and `nodes revoke` removes. redis/start.sh replaces {name} with the
+# node's name and {hash} with the SHA-256 hash of its password. See
+# docs/cluster.md.
+#
+# A node runs jobs, so it reads and writes jobs, their leases, the queues,
+# the workers' heartbeats and routing counts, and video sites' state. Of the
+# cluster's keys it reads what the hub publishes and the other services'
+# status, and writes only its own status and address, and the jobs it asks
+# the hub to settle or record. It cannot read or change the limits, the
+# maintenance notice, the admin web page's keys, or any switch, its own
+# included, and runs no dangerous command. Nodes never reach PostgreSQL.
+user node-{name} on #{hash} resetchannels %RW~transcription:* %RW~transcription-lease:* %RW~dramatiq:* %RW~workers:local* %RW~jobs:active:* %RW~jobs:running:* %RW~outsource:* %RW~video_sites:* %R~cluster:hub %R~cluster:images %R~cluster:nodes %R~cluster:node:*:status:* %R~cluster:node:{name}:config %RW~cluster:node:{name}:status:* %RW~cluster:egress:{name} %RW~cluster:settle %RW~cluster:record %RW~cluster:check:* -@all +@read +@write +@transaction +@scripting +@connection -@dangerous -function -script|flush -script|kill +ping +client|setinfo +keys

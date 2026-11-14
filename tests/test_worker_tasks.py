@@ -217,7 +217,8 @@ def test_restart_fails_interrupted_jobs_and_keeps_queued_ones(worker, monkeypatc
     monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments: sent.append((job_id, backend, arguments)))
     queue_job(billing, "queued", cost=3, source_url="https://example.com/a", backend="local")
     queue_job(billing, "processing")
-    tasks.redis.hset(tasks.job_key("processing"), "status", "processing")
+    # Its last attempt: an earlier one would be queued again.
+    tasks.redis.hset(tasks.job_key("processing"), mapping={"status": "processing", "attempt": settings.jobs.max_attempts})
     done_result = Path(settings.service.data_dir) / "jobs" / "done" / "transcription.mid"
     done_result.parent.mkdir(parents=True)
     done_result.write_bytes(b"MThd-data")
@@ -432,10 +433,51 @@ def test_restart_of_only_the_api_keeps_running_jobs(worker, monkeypatch):
     assert tasks.redis.smembers(tasks.routing.ACTIVE_KEYS["remote"]) == {"job"}
 
 
-def test_job_whose_worker_stopped_fails_when_its_lease_expires(worker):
+def test_job_whose_worker_stopped_is_queued_again_keeping_its_reservation(worker, monkeypatch):
+    settings, billing = worker
+    sent = []
+    monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments: sent.append((job_id, backend, arguments)))
+    queue_job(billing, backend="local", source_url="https://example.com/a")
+    assert tasks.claim_job("job", "first")
+    tasks.redis.sadd(tasks.routing.ACTIVE_KEYS["local"], "job")
+    tasks.redis.delete(tasks.lease_key("job"))
+
+    assert tasks.fail_abandoned_jobs() == 1
+
+    assert job()["status"] == "queued"
+    assert job()["interruptions"] == "1"
+    # The lost worker's token no longer owns the job.
+    assert job()["attempt_token"] == tasks.ABANDONED_TOKEN
+    assert tasks.superseded("job", "first")
+    assert sent == [("job", "local", ("https://example.com/a",))]
+    assert billing.reserved_job_ids() == ["job"]
+    assert tasks.redis.sismember(tasks.routing.ACTIVE_KEYS["local"], "job")
+
+    # The second attempt runs, and its claim counts it.
+    assert tasks.claim_job("job", "second")
+    assert job()["attempt"] == "2"
+    assert not tasks.superseded("job", "second")
+
+
+def test_an_upload_whose_file_is_gone_is_not_queued_again(worker, monkeypatch):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: pytest.fail("queued again"))
+    queue_job(billing, backend="local")
+    tasks.redis.hset(tasks.job_key("job"), "source", "upload")
+    assert tasks.claim_job("job")
+    tasks.redis.delete(tasks.lease_key("job"))
+
+    assert tasks.fail_abandoned_jobs() == 1
+
+    assert job()["status"] == "failed"
+    assert billing.reserved_job_ids() == []
+
+
+def test_job_whose_worker_stopped_fails_after_its_last_attempt(worker):
     settings, billing = worker
     queue_job(billing, backend="local")
     assert tasks.claim_job("job")
+    tasks.redis.hset(tasks.job_key("job"), "attempt", settings.jobs.max_attempts)
     tasks.redis.sadd(tasks.routing.ACTIVE_KEYS["local"], "job")
     job_files = Path(settings.service.data_dir) / "jobs" / "job"
     job_files.mkdir(parents=True)

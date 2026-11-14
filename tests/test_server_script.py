@@ -154,10 +154,20 @@ def test_outsource_option_is_no_longer_needed(capsys):
     assert stack.up_call is not None
 
 
-@pytest.mark.parametrize("arguments", [[], ["restart"], ["stop"], ["stop", "5m", "--outsource"], ["start", "5m"]])
+@pytest.mark.parametrize("arguments", [[], ["stop", "5m", "--outsource"], ["start", "5m"]])
 def test_invalid_command_lines(arguments):
     with pytest.raises(SystemExit):
         server.parse_arguments(arguments)
+
+
+@pytest.mark.parametrize("action", ["restart", "stop"])
+def test_the_hub_needs_the_time_until_a_restart_or_shutdown(action, capsys):
+    # Optional for the parser, which a cluster node shares: it stops at once.
+    code, stack, _ = run([action])
+
+    assert code == 2
+    assert "give the time until the" in capsys.readouterr().out
+    assert stack.up_call is None
 
 
 def test_profiles_reach_restart_commands():

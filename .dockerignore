@@ -4,6 +4,7 @@
 .env.*
 !.env.example
 server.env
+node.env
 secrets/
 billing-data/
 deploy/kubernetes/settings.env

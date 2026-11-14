@@ -7,11 +7,11 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
 
-from app import job_limits, job_storage, maintenance, video_info
+from app import job_limits, job_storage, maintenance, video_check, video_info
 from app.job_storage import StorageUnavailable, delete_job_files
 from app.maintenance import NoticeResponse
 from app.config import settings
@@ -427,14 +427,16 @@ def submit_link(
     """Check a video link and queue it, for a job whose place is held, with
     fields such as its mode."""
     video = check_video(source_url)
-    # The worker downloads with this info instead of asking the site again.
-    folder = job_storage.storage().workspace(job_id)
-    try:
-        keep_job_file(job_id, video_info.save_video_info(folder, video.info, video.checked_at))
-    finally:
-        # Freed before the job is queued, so it cannot remove what a worker
-        # on this machine fetched.
-        job_storage.storage().release(folder)
+    # The worker downloads with this info instead of asking the site again;
+    # not with a node's answer, which holds only the length and metadata.
+    if not video.info.get(video_check.DELEGATED_MARK):
+        folder = job_storage.storage().workspace(job_id)
+        try:
+            keep_job_file(job_id, video_info.save_video_info(folder, video.info, video.checked_at))
+        finally:
+            # Freed before the job is queued, so it cannot remove what a
+            # worker on this machine fetched.
+            job_storage.storage().release(folder)
     fields = {**(fields or {}), "source_url": source_url}
     # Clients see the title while the job waits; the download updates it.
     metadata = video_info.video_metadata(video.info, source_url)
@@ -652,9 +654,20 @@ def get_midi(
 
     key = job_storage.s3_key(path)
     if key is not None:
-        # A signed link to the bucket: the file does not pass through the API.
         try:
             bucket = job_storage.s3()
+            if settings.limits.result_download == "api":
+                # The API sends the file, as with job files on one machine:
+                # the bucket need not be reachable from the internet.
+                body = bucket.read_result(key)
+                if body is None:
+                    raise HTTPException(status_code=404, detail="MIDI result is no longer available")
+                return Response(
+                    body,
+                    media_type="audio/midi",
+                    headers={"Content-Disposition": f'attachment; filename="{result_filename(job)}"'},
+                )
+            # A signed link to the bucket: the file does not pass through the API.
             if not bucket.result_exists(key):
                 raise HTTPException(status_code=404, detail="MIDI result is no longer available")
             return RedirectResponse(bucket.result_link(key, result_filename(job)), status_code=307)

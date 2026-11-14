@@ -1,0 +1,58 @@
+# The hub of a home cluster (docs/cluster.md): what the nodes reach, on
+# this machine's tailnet address alone, HUB_ADDRESS in .env, never on every
+# network interface. Docker Compose adds this file to docker-compose.yml
+# when .env lists both in COMPOSE_FILE, which `python scripts/admin.py nodes
+# hub` writes.
+#
+# PostgreSQL stays unpublished: nodes never reach the billing database.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 20m
+    max-file: "5"
+
+services:
+  # The nodes sign in as node-<name>, each with its own password and rules
+  # (redis/node.acl); the default user is refused.
+  redis:
+    ports:
+      - "${HUB_ADDRESS:?HUB_ADDRESS, this machine's tailnet address, is not set in .env}:6379:6379"
+
+  # Optional: a bucket on the hub for job files (COMPOSE_PROFILES=storage),
+  # instead of one at a provider. Each node gets keys of its own, in
+  # secrets/storage/s3.json, which `nodes invite` and `nodes revoke` write.
+  storage:
+    image: chrislusf/seaweedfs:4.50
+    profiles: [storage]
+    command: [server, -dir=/data, -s3, -s3.port=8333, -s3.config=/etc/seaweedfs/s3.json, -volume.max=0]
+    ports:
+      - "${HUB_ADDRESS:?HUB_ADDRESS, this machine's tailnet address, is not set in .env}:8333:8333"
+    volumes:
+      - storage_data:/data
+      - ./secrets/storage/s3.json:/etc/seaweedfs/s3.json:ro
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    logging: *logging
+
+  # Optional: the images nodes pull instead of building their own
+  # (COMPOSE_PROFILES=registry). Only on this machine: `tailscale serve`
+  # gives it to the tailnet over HTTPS, with Tailscale's certificate, so no
+  # device needs an insecure-registry setting. Nodes pull by digest, so an
+  # image pushed by anyone else is never run.
+  registry:
+    image: registry:2.8.3
+    profiles: [registry]
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - registry_data:/var/lib/registry
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  storage_data:
+  registry_data:

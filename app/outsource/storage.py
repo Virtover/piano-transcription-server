@@ -31,17 +31,27 @@ def storage_configured(config=None) -> bool:
 
 
 def s3_client(config=None) -> Any:
-    """A client for the bucket of outsourcing and job storage."""
+    """A client for the bucket of outsourcing, and of job storage unless it
+    has a bucket of its own (app.job_storage.bucket_settings)."""
+    config = config or settings
+    return client_for(
+        config.storage.endpoint,
+        config.storage.region,
+        config.secrets.storage_access_key.get_secret_value(),
+        config.secrets.storage_secret_key.get_secret_value(),
+    )
+
+
+def client_for(endpoint: str, region: str, access_key: str, secret_key: str) -> Any:
     import boto3
     from botocore.config import Config
 
-    config = config or settings
     return boto3.client(
         "s3",
-        endpoint_url=config.storage.endpoint,
-        region_name=config.storage.region,
-        aws_access_key_id=config.secrets.storage_access_key.get_secret_value(),
-        aws_secret_access_key=config.secrets.storage_secret_key.get_secret_value(),
+        endpoint_url=endpoint,
+        region_name=region,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
         # Path-style URLs keep presigned URLs on the endpoint host, which
         # is the only host the remote handler downloads from.
         config=Config(signature_version="s3v4", s3={"addressing_style": "path"}, retries={"max_attempts": 3}),

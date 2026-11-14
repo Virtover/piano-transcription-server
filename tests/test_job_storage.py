@@ -64,6 +64,12 @@ class FakeS3:
         self.signed.append(Params)
         return f"https://storage.example/{Params['Bucket']}/{Params['Key']}?expires={ExpiresIn}"
 
+    def get_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise ClientError({"Error": {"Code": "NoSuchKey", "Message": "Not Found"}}, "GetObject")
+        body = self.objects[Key]["body"]
+        return {"ContentLength": len(body), "Body": types.SimpleNamespace(read=lambda size=-1: body[:size])}
+
 
 @pytest.fixture
 def bucket(api_context):
@@ -269,6 +275,33 @@ def test_the_signed_link_names_the_download_by_the_jobs_mode(api_context, bucket
     assert params["ResponseContentType"] == "audio/midi"
 
 
+def test_with_api_downloads_the_api_sends_the_file_itself(api_context, bucket):
+    client, settings, _ = api_context
+    settings.limits.result_download = "api"
+    store(bucket, "job", "transcription.mid", b"MThd-bytes")
+    tasks.redis.hset(
+        tasks.job_key("job"),
+        mapping={"status": "completed", "result": f"s3:{PREFIX}job/transcription.mid", "mode": "arrangement"},
+    )
+
+    response = client.get("/api/transcriptions/job/midi", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert response.content == b"MThd-bytes"
+    assert response.headers["content-type"] == "audio/midi"
+    assert response.headers["content-disposition"] == 'attachment; filename="arrangement.mid"'
+    assert response.headers["cache-control"] == "no-store"
+    assert bucket.signed == []
+
+
+def test_with_api_downloads_a_result_missing_from_the_bucket_is_gone(api_context, bucket):
+    client, settings, _ = api_context
+    settings.limits.result_download = "api"
+    tasks.redis.hset(tasks.job_key("job"), mapping={"status": "completed", "result": f"s3:{PREFIX}job/transcription.mid"})
+
+    assert client.get("/api/transcriptions/job/midi").status_code == 404
+
+
 def test_a_result_missing_from_the_bucket_is_gone(api_context, bucket):
     client, _, _ = api_context
     tasks.redis.hset(tasks.job_key("job"), mapping={"status": "completed", "result": f"s3:{PREFIX}job/transcription.mid"})
@@ -354,6 +387,88 @@ def test_s3_job_storage_needs_the_bucket_and_its_keys(default_settings):
 
     assert "STORAGE_ENDPOINT is required when STORAGE_BUCKET is set" in problems
     assert any("STORAGE_BUCKET needs the secret file" in problem for problem in problems)
+
+
+def test_job_files_can_have_a_bucket_of_their_own(default_settings, tmp_path):
+    from pydantic import SecretStr
+
+    from app import job_storage
+
+    default_settings.jobs.storage = "s3"
+    default_settings.storage.bucket = "runpod-audio"
+    default_settings.storage.endpoint = "https://r2.example.com"
+    default_settings.secrets.storage_access_key = SecretStr("key")
+    default_settings.secrets.storage_secret_key = SecretStr("secret")
+    default_settings.jobs.storage_bucket = "home-jobs"
+    default_settings.jobs.storage_endpoint = "http://100.64.0.1:8333"
+    problems = validate_settings(default_settings, "worker")
+    assert any("give it its own keys" in problem for problem in problems)
+
+    default_settings.secrets.job_storage_access_key = SecretStr("job-key")
+    problems = validate_settings(default_settings, "worker")
+    assert any("go together" in problem for problem in problems)
+
+    default_settings.secrets.job_storage_secret_key = SecretStr("job-secret")
+    assert not any("JOB_STORAGE" in problem for problem in validate_settings(default_settings, "worker"))
+    values = job_storage.bucket_settings(default_settings)
+    assert (values["bucket"], values["endpoint"], values["access_key"]) == ("home-jobs", "http://100.64.0.1:8333", "job-key")
+
+
+def test_job_bucket_falls_back_to_the_storage_bucket(default_settings):
+    from pydantic import SecretStr
+
+    from app import job_storage
+
+    default_settings.storage.bucket = "shared"
+    default_settings.storage.endpoint = "https://r2.example.com"
+    default_settings.secrets.storage_access_key = SecretStr("key")
+    default_settings.secrets.storage_secret_key = SecretStr("secret")
+    values = job_storage.bucket_settings(default_settings)
+    assert (values["bucket"], values["endpoint"], values["secret_key"]) == ("shared", "https://r2.example.com", "secret")
+    assert job_storage.bucket_configured(default_settings)
+
+
+def test_api_download_sends_the_file_and_refuses_oversized_objects():
+    from app.job_storage import MAX_RESULT_BYTES, S3JobStorage, StorageUnavailable
+
+    class Body:
+        def __init__(self, data):
+            self.data = data
+
+        def read(self, size):
+            return self.data[:size]
+
+    class Client:
+        def __init__(self, objects):
+            self.objects = objects
+
+        def get_object(self, Bucket, Key):
+            if Key not in self.objects:
+                error = Exception("missing")
+                error.response = {"Error": {"Code": "NoSuchKey"}}
+                raise error
+            data = self.objects[Key]
+            return {"ContentLength": len(data), "Body": Body(data)}
+
+    storage = S3JobStorage(Client({"jobs/a/transcription.mid": b"MThd", "big": b"x" * (MAX_RESULT_BYTES + 1)}), "b")
+    assert storage.read_result("jobs/a/transcription.mid") == b"MThd"
+    assert storage.read_result("jobs/gone/transcription.mid") is None
+    with pytest.raises(StorageUnavailable):
+        storage.read_result("big")
+
+
+def test_result_links_are_signed_for_the_public_address():
+    from app.job_storage import S3JobStorage
+
+    class Client:
+        def __init__(self, host):
+            self.host = host
+
+        def generate_presigned_url(self, operation, Params, ExpiresIn):
+            return f"{self.host}/{Params['Key']}"
+
+    storage = S3JobStorage(Client("http://100.64.0.1:8333"), "b", Client("https://files.example.com"))
+    assert storage.result_link("jobs/a/transcription.mid").startswith("https://files.example.com/")
 
 
 def test_local_job_storage_needs_no_bucket(default_settings):

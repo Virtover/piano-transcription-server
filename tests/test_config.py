@@ -482,12 +482,14 @@ def test_compose_gives_every_service_with_settings_both_files():
 
 
 def test_compose_variables_are_used_and_documented():
-    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    compose = "".join((ROOT / name).read_text(encoding="utf-8") for name in ("docker-compose.yml", "docker-compose.hub.yml"))
     documentation = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
+    # Read by Docker Compose itself, and by the hub's scripts.
+    not_interpolated = {"COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR", "HUB_REGISTRY"}
 
     for name in config.COMPOSE_VARIABLES:
-        assert "${" + name in compose
-        assert f"`{name}`" in documentation
+        assert name in not_interpolated or "${" + name in compose, name
+        assert f"`{name}`" in documentation, name
 
 
 def test_env_example_has_no_inline_comments_or_wiring():

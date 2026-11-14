@@ -1,0 +1,6 @@
+# Added to docker-compose.node.yml by scripts/server.py on a node with an
+# NVIDIA GPU (NODE_PROCESSOR=gpu in node.env, the default). Without it the
+# worker runs on the CPU.
+services:
+  worker:
+    gpus: all

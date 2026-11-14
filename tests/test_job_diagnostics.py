@@ -113,13 +113,25 @@ def test_cancelled_job_is_recorded(worker):
 def test_restart_failure_is_recorded(worker):
     client, settings, _ = worker
     job_id = submit(client)
-    tasks.redis.hset(tasks.job_key(job_id), "status", "processing")
+    # Its last attempt; an earlier one is queued again, as below.
+    tasks.redis.hset(tasks.job_key(job_id), mapping={"status": "processing", "attempt": settings.jobs.max_attempts})
 
     tasks.recover_active_jobs("Transcription interrupted because the server restarted")
 
     record = diagnostics(settings, job_id)
     assert record["status"] == "failed"
     assert record["error"] == "Transcription interrupted because the server restarted"
+
+
+def test_a_job_queued_again_after_a_restart_is_recorded(worker, monkeypatch):
+    client, settings, _ = worker
+    job_id = submit(client)
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: None)
+    tasks.redis.hset(tasks.job_key(job_id), "status", "processing")
+
+    tasks.recover_active_jobs("Transcription interrupted because the server restarted")
+
+    assert diagnostics(settings, job_id)["status"] == "queued"
 
 
 def test_recording_errors_do_not_fail_the_job(worker, monkeypatch):

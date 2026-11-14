@@ -32,6 +32,9 @@ S3_REFERENCE = "s3:"
 RESULT_FILE_NAME = "transcription.mid"
 # A signed result link is used at once, by the app that asked for it.
 RESULT_LINK_SECONDS = 300
+# The most the API sends of a result with RESULT_DOWNLOAD=api: far more
+# than any MIDI transcription, so a replaced object cannot fill its memory.
+MAX_RESULT_BYTES = 16 * 1024 * 1024
 # Saved with each object, so the video info keeps the time it was checked,
 # which decides whether its signed audio links are still fresh.
 MTIME_METADATA = "mtime"
@@ -119,21 +122,59 @@ class LocalJobStorage:
             yield from (path.name for path in folder.iterdir() if path.is_dir())
 
 
+def bucket_settings(config=None) -> dict[str, Any]:
+    """The bucket job files are kept in: JOB_STORAGE_BUCKET with its own keys
+    where set, such as a bucket on a cluster's hub, otherwise the STORAGE_
+    bucket that outsourcing uses. Each unset JOB_STORAGE_ value is the
+    STORAGE_ one."""
+    config = config or settings
+    jobs, storage, secrets = config.jobs, config.storage, config.secrets
+    own_keys = secrets.job_storage_access_key is not None or secrets.job_storage_secret_key is not None
+    access = secrets.job_storage_access_key if own_keys else secrets.storage_access_key
+    secret = secrets.job_storage_secret_key if own_keys else secrets.storage_secret_key
+    return {
+        "endpoint": jobs.storage_endpoint or storage.endpoint,
+        "bucket": jobs.storage_bucket or storage.bucket,
+        "region": jobs.storage_region or storage.region,
+        "public_endpoint": jobs.storage_public_endpoint,
+        "access_key": access.get_secret_value() if access else None,
+        "secret_key": secret.get_secret_value() if secret else None,
+    }
+
+
+def bucket_configured(config=None) -> bool:
+    values = bucket_settings(config)
+    return all(values[name] for name in ("endpoint", "bucket", "access_key", "secret_key"))
+
+
+def bucket_client(config=None, endpoint: str | None = None) -> Any:
+    """A client for the job files' bucket; endpoint replaces its address, as
+    for signing links that browsers open elsewhere."""
+    from app.outsource.storage import client_for
+
+    values = bucket_settings(config)
+    return client_for(endpoint or values["endpoint"], values["region"], values["access_key"], values["secret_key"])
+
+
 class S3JobStorage:
     """Kept files in the bucket under jobs/<job_id>/; the folder is scratch."""
 
-    def __init__(self, client: Any, bucket: str):
+    def __init__(self, client: Any, bucket: str, link_client: Any = None):
         self.client = client
         self.bucket = bucket
+        # Signs result links: the client itself, or one for the public address.
+        self.link_client = link_client or client
 
     @classmethod
     def from_settings(cls, config=None) -> "S3JobStorage":
-        from app.outsource.storage import s3_client, storage_configured
-
         config = config or settings
-        if not storage_configured(config):
-            raise StorageUnavailable("JOB_STORAGE=s3 needs the outsourcing storage settings and secrets")
-        return cls(s3_client(config), config.storage.bucket)
+        if not bucket_configured(config):
+            raise StorageUnavailable(
+                "JOB_STORAGE=s3 needs a bucket: STORAGE_ or JOB_STORAGE_ endpoint and bucket, with their keys"
+            )
+        values = bucket_settings(config)
+        public = values["public_endpoint"]
+        return cls(bucket_client(config), values["bucket"], bucket_client(config, public) if public else None)
 
     @staticmethod
     def key(job_id: str, name: str) -> str:
@@ -243,7 +284,7 @@ class S3JobStorage:
         """A signed link to a result, downloaded as filename: one of the
         server's fixed names, never one a client chose."""
         try:
-            return self.client.generate_presigned_url(
+            return self.link_client.generate_presigned_url(
                 "get_object",
                 Params={
                     "Bucket": self.bucket,
@@ -255,6 +296,28 @@ class S3JobStorage:
             )
         except Exception as error:
             raise StorageUnavailable(f"Could not sign the result link ({type(error).__name__})") from error
+
+    def read_result(self, key: str) -> bytes | None:
+        """A result's bytes, for RESULT_DOWNLOAD=api, or None if it is gone.
+        Results are MIDI files of a few KB; a larger object is refused."""
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=key)
+        except Exception as error:
+            code = getattr(error, "response", {}).get("Error", {}).get("Code")
+            if code in ("NoSuchKey", "404", "NotFound"):
+                return None
+            raise StorageUnavailable(f"Could not read the result ({type(error).__name__})") from error
+        try:
+            if int(response.get("ContentLength") or 0) > MAX_RESULT_BYTES:
+                raise StorageUnavailable("The stored result is larger than any MIDI result")
+            body = response["Body"].read(MAX_RESULT_BYTES + 1)
+        except StorageUnavailable:
+            raise
+        except Exception as error:
+            raise StorageUnavailable(f"Could not read the result ({type(error).__name__})") from error
+        if len(body) > MAX_RESULT_BYTES:
+            raise StorageUnavailable("The stored result is larger than any MIDI result")
+        return body
 
 
 _storage: JobStorage | None = None

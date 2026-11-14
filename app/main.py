@@ -32,8 +32,9 @@ from app.worker.tasks import (
     fail_abandoned_jobs,
     reconcile_billing,
     recover_active_jobs,
+    settle_node_jobs,
 )
-from app import backups
+from app import backups, cluster
 from app.backups import run_backup
 from app.billing import Billing
 from app.leader import Leadership
@@ -109,6 +110,29 @@ def watch_abandoned_jobs(leader: Leadership | None = None) -> None:
             reconcile_billing(min_age=RECONCILE_AFTER)
         except Exception:
             logger.exception("Could not settle the billing of ended jobs")
+
+
+NODE_REQUESTS_INTERVAL = 2.0
+
+
+def serve_cluster_nodes(leader: Leadership | None = None) -> None:
+    """For a home cluster (app/cluster.py): publish what nodes need, the
+    protocol and the settings, and settle the billing and record the
+    diagnostics of the jobs nodes ended, which they only name. Without
+    invited nodes it only publishes, which costs one write a while."""
+    published = 0.0
+    while True:
+        wait_for_lead(leader)
+        redis = transcription_routes.redis
+        try:
+            if time.monotonic() - published >= cluster.HUB_PUBLISH_INTERVAL:
+                cluster.publish_hub(redis)
+                published = time.monotonic()
+            if cluster.has_nodes(redis):
+                settle_node_jobs()
+        except Exception:
+            logger.exception("Could not serve the cluster's nodes")
+        time.sleep(NODE_REQUESTS_INTERVAL)
 
 
 def recover_after_takeover() -> None:
@@ -283,6 +307,7 @@ def sync_billing_catalog() -> None:
     threading.Thread(target=backup_billing_database, args=(leadership,), daemon=True).start()
     threading.Thread(target=monitor_backup_health, args=(leadership,), daemon=True).start()
     threading.Thread(target=watch_abandoned_jobs, args=(leadership,), daemon=True).start()
+    threading.Thread(target=serve_cluster_nodes, args=(leadership,), daemon=True).start()
     if settings.jobs.storage == "s3":
         threading.Thread(target=clean_stored_jobs, args=(leadership,), daemon=True).start()
     if voided_purchases_enabled():

@@ -13,11 +13,11 @@ from dramatiq.brokers.redis import RedisBroker
 from redis import Redis
 from redis.exceptions import WatchError
 
-from app import error_report, job_limits
+from app import cluster, error_report, job_limits
 from app.job_storage import WORK_FOLDER, delete_job_files, job_dir, s3, s3_key, storage, workspace_job_id
 from app.config import settings
 from app.billing import Billing, cancelled_cost
-from app.errors import GENERIC_MESSAGE, detail, error_code, public_message
+from app.errors import GENERIC_MESSAGE, SourceTemporarilyUnavailable, detail, error_code, public_message
 from app.outsource import routing
 from app.transcription.audio import check_midi
 from app.errors import UserFacingError
@@ -44,6 +44,17 @@ WORKER_STOPPED = "Transcription interrupted because its worker stopped"
 # The error_code of a job failed by a restart or a stopped worker.
 INTERRUPTED = "transcription_interrupted"
 INVALID_RESULT = "result_unavailable"
+# Link checks a node runs for the API while the hub's address is refused.
+CHECK_QUEUE = "checks"
+# A device hands a job it should not start to another, at most this often,
+# this far apart; then it runs the job itself.
+MAX_PASSES = 30
+PASS_DELAY_MS = 2000
+# Moves of one job to another device's address after a video site refused one.
+MAX_ADDRESS_MOVES = 3
+# The attempt token of a job queued again after its worker vanished: no
+# attempt holds it, so a worker that comes back stops without writing.
+ABANDONED_TOKEN = "abandoned"
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +76,8 @@ redis = Redis.from_url(
     decode_responses=True,
     **settings.service.redis_options(),
 )
-billing = Billing()
+# A node never reaches the billing database: the hub settles what it ends.
+billing = cluster.HubBilling(redis) if cluster.is_node() else Billing()
 
 
 def job_ttl() -> int:
@@ -104,23 +116,45 @@ def record_job(job_id: str) -> None:
         logger.exception("Could not record diagnostics for job %s", job_id)
 
 
-def is_job_cancelled(job_id: str) -> bool:
-    return redis.hget(job_key(job_id), "status") != "processing"
+def is_job_cancelled(job_id: str, token: str | None = None) -> bool:
+    """Whether the attempt should stop: the job is no longer processing, or,
+    given this attempt's token, another attempt owns it now."""
+    status, current = redis.hmget(job_key(job_id), "status", "attempt_token")
+    return status != "processing" or (token is not None and current not in (None, token))
+
+
+def superseded(job_id: str, token: str) -> bool:
+    """Whether another attempt owns the job: this one's worker lost it, as
+    a device that was cut off while the job was queued again elsewhere.
+    Such an attempt writes nothing, settles nothing, and deletes nothing."""
+    current = redis.hget(job_key(job_id), "attempt_token")
+    return current is not None and current != token
 
 
 def claim_job(job_id: str, lease_token: str = "claimed") -> bool:
+    """Take a queued job for this attempt: processing, with its lease and
+    token, its attempt counted, and this device added to those that ran it."""
     key = job_key(job_id)
 
     while True:
         try:
             with redis.pipeline() as pipe:
                 pipe.watch(key)
-                if pipe.hget(key, "status") != "queued":
+                status, nodes = pipe.hmget(key, "status", "nodes")
+                if status != "queued":
                     return False
+                node = cluster.node_name()
+                ran_on = [name for name in (nodes or "").split(",") if name]
                 pipe.multi()
                 # Progress is kept: a job moved between backends continues
                 # from what it showed.
-                pipe.hset(key, "status", "processing")
+                pipe.hset(key, mapping={
+                    "status": "processing",
+                    "attempt_token": lease_token,
+                    "node": node,
+                    "nodes": ",".join([*ran_on, node] if node not in ran_on else ran_on),
+                })
+                pipe.hincrby(key, "attempt", 1)
                 # Set together, so no one sees the job processing without a lease.
                 pipe.set(lease_key(job_id), lease_token, ex=LEASE_TTL)
                 pipe.execute()
@@ -131,7 +165,8 @@ def claim_job(job_id: str, lease_token: str = "claimed") -> bool:
 
 class JobLease:
     """Renews a claimed job's lease until stopped, then removes it. The token
-    tells this worker's lease from that of a worker the job moved to."""
+    tells this worker's lease from that of a worker the job moved to. Once
+    another attempt owns the job, renewing stops."""
 
     def __init__(self, job_id: str):
         self.job_id = job_id
@@ -154,8 +189,15 @@ class JobLease:
         key = lease_key(self.job_id)
         try:
             with redis.pipeline() as pipe:
+                # Not the job's key: progress changes it all the time, and
+                # renewals must not fail for that.
                 pipe.watch(key)
                 if pipe.get(key) not in {self.token, None}:
+                    return
+                current = pipe.hget(job_key(self.job_id), "attempt_token")
+                if renew and current is not None and current != self.token:
+                    # The job was queued again while this worker was away.
+                    self._stop.set()
                     return
                 pipe.multi()
                 if renew:
@@ -170,16 +212,19 @@ class JobLease:
             logger.exception("Could not update the lease of job %s", self.job_id)
 
 
-def complete_job(job_id: str, result: Path, reference: str | None = None) -> bool:
+def complete_job(job_id: str, result: Path, reference: str | None = None, token: str | None = None) -> bool:
     """Mark the job completed with its MIDI file, checked at result, and
-    stored where reference says (by default, at result itself)."""
+    stored where reference says (by default, at result itself). With the
+    attempt's token, only while that attempt owns the job."""
     key = job_key(job_id)
 
     while True:
         try:
             with redis.pipeline() as pipe:
                 pipe.watch(key)
-                status = pipe.hget(key, "status")
+                status, current = pipe.hmget(key, "status", "attempt_token")
+                if token is not None and current not in (None, token):
+                    return False
                 if status == "cancelled":
                     raise TranscriptionCancelled()
                 if status != "processing":
@@ -310,27 +355,53 @@ def reconcile_billing(min_age: float = 0) -> None:
     for job_id in billing.reserved_job_ids():
         job = redis.hgetall(job_key(job_id))
 
-        if not job:
-            billing.release(job_id)
+        if job and ended_recently(job_id, min_age):
             continue
-        if ended_recently(job_id, min_age):
-            continue
+        settle_ended_job(job_id, job, billing)
 
-        status = job.get("status")
-        if status == "completed":
-            billing.settle_success(job_id)
-        elif status == "failed":
-            billing.release(job_id)
-        elif status == "cancelled":
-            try:
-                full_cost = int(job.get("full_cost", 0))
-                progress = float(job.get("progress", 0))
-            except (TypeError, ValueError):
-                continue
-            billing.settle_cancellation(
-                job_id,
-                cancelled_cost(full_cost, progress),
-            )
+
+def settle_ended_job(job_id: str, job: dict[str, str], ledger=None) -> bool:
+    """Settle a job's reservation by the state it ended in: charged when
+    completed, released when failed or gone, the cancellation price when
+    cancelled. Returns False, settling nothing, for a job that has not
+    ended. Every billing call is idempotent per job."""
+    ledger = ledger or billing
+    if not job:
+        ledger.release(job_id)
+        return True
+    status = job.get("status")
+    if status == "completed":
+        ledger.settle_success(job_id)
+    elif status == "failed":
+        ledger.release(job_id)
+    elif status == "cancelled":
+        try:
+            full_cost = int(job.get("full_cost", 0))
+            progress = float(job.get("progress", 0))
+        except (TypeError, ValueError):
+            return True
+        ledger.settle_cancellation(job_id, cancelled_cost(full_cost, progress))
+    else:
+        return False
+    return True
+
+
+def settle_node_jobs() -> int:
+    """Run by the leading API: settle and record the jobs nodes ended, which
+    they only name (app.cluster.HubBilling)."""
+    hub_billing = Billing()
+
+    def settle(job_id: str, job: dict[str, str]) -> bool:
+        if job and not job.get("user_id"):
+            return job.get("status") in {"completed", "failed", "cancelled"}
+        return settle_ended_job(job_id, job, hub_billing)
+
+    def record(job_id: str) -> None:
+        job = redis.hgetall(job_key(job_id))
+        if job:
+            hub_billing.record_job(job_id, job)
+
+    return cluster.process_node_requests(redis, settle, record)
 
 
 def job_backend(job: dict[str, str]) -> routing.Backend:
@@ -345,10 +416,32 @@ def arrangement_style(job: dict[str, str]) -> str | None:
     return job.get("style") if job.get("style") in STYLES else DEFAULT_STYLE
 
 
+def attempts_made(job: dict[str, str]) -> int:
+    try:
+        return max(int(job.get("attempt") or 1), 1)
+    except ValueError:
+        return 1
+
+
+def inputs_kept(job_id: str, job: dict[str, str]) -> bool:
+    """Whether another attempt has what it needs: an upload's file is still
+    kept. A link is read again."""
+    if job.get("source") != "upload":
+        return True
+    try:
+        return UPLOAD_FILE_NAME in (storage().names(job_id) or [])
+    except Exception:
+        logger.exception("Could not look for the kept files of job %s", job_id)
+        return False
+
+
 def fail_abandoned_job(job_id: str, reason: str) -> bool:
-    """Fail and refund a processing job whose lease has expired: its worker
-    stopped mid-job. Returns False if the job is not processing, or a worker
-    still holds it."""
+    """A processing job whose lease has expired lost its worker, as to a
+    crash or a device that lost power or its network. Queued again, keeping
+    its reservation, until JOB_MAX_ATTEMPTS attempts were made; then failed
+    and refunded. The attempt token is cleared, so the lost worker, should
+    it come back, stops without writing anything. Returns False if the job
+    is not processing, or a worker still holds it."""
     key = job_key(job_id)
     while True:
         try:
@@ -357,20 +450,44 @@ def fail_abandoned_job(job_id: str, reason: str) -> bool:
                 job = pipe.hgetall(key)
                 if job.get("status") != "processing" or pipe.exists(lease_key(job_id)):
                     return False
+                retry = attempts_made(job) < settings.jobs.max_attempts and inputs_kept(job_id, job)
                 pipe.multi()
-                pipe.hset(
-                    key,
-                    mapping={
-                        "status": "failed",
-                        "error": reason,
-                        "error_code": INTERRUPTED,
-                    },
-                )
-                pipe.expire(key, job_ttl())
+                if retry:
+                    pipe.hset(key, mapping={
+                        "status": "queued",
+                        "attempt_token": ABANDONED_TOKEN,
+                        "requeue_reason": reason,
+                        "queued_at": str(time.time()),
+                    })
+                    pipe.hincrby(key, "interruptions", 1)
+                else:
+                    pipe.hset(
+                        key,
+                        mapping={
+                            "status": "failed",
+                            "error": reason,
+                            "error_code": INTERRUPTED,
+                            "attempt_token": ABANDONED_TOKEN,
+                        },
+                    )
+                    pipe.expire(key, job_ttl())
                 pipe.execute()
                 break
         except WatchError:
             continue
+    if retry:
+        logger.warning("Job %s lost its worker (%s); queued again, attempt %d of %d",
+                       job_id, reason, attempts_made(job) + 1, settings.jobs.max_attempts)
+        record_job(job_id)
+        backend = job_backend(job)
+        routing.mark_active(redis, backend, job_id)
+        try:
+            send_job(job_id, backend, *job_arguments(job))
+            return True
+        except Exception:
+            logger.exception("Could not queue job %s again", job_id)
+            fail_unqueued_job(job_id, job, backend, reason)
+            return True
     logger.warning("Job %s failed: %s", job_id, reason)
     record_job(job_id)
     if job.get("user_id"):
@@ -486,6 +603,7 @@ class JobContext:
         progress_floor: float = 0.0,
         max_seconds: float | None = None,
         arrangement_style: str | None = None,
+        token: str | None = None,
     ):
         self.job_id = job_id
         self.output_dir = output_dir
@@ -494,9 +612,11 @@ class JobContext:
         self.max_seconds = max_seconds
         # Set for an arrangement job, which runs AMT-APC instead of Transkun.
         self.arrangement_style = arrangement_style
+        # This attempt's token: it stops once another attempt owns the job.
+        self.token = token
 
     def is_cancelled(self) -> bool:
-        return is_job_cancelled(self.job_id)
+        return is_job_cancelled(self.job_id, self.token)
 
     def progress(self, value: float) -> None:
         if self.is_cancelled():
@@ -543,6 +663,8 @@ def run_job(
     Every billing call is idempotent per job, so a job is charged at most
     once whichever path it takes.
     """
+    if pass_job(job_id, backend):
+        return
     output_dir = storage().workspace(job_id)
     requeued = False
     claimed = False
@@ -565,15 +687,20 @@ def run_job(
             max_seconds = float(stored["duration"]) if stored.get("duration") else None
         except ValueError:
             max_seconds = None
-        context = JobContext(job_id, output_dir, floor, max_seconds, arrangement_style(stored))
+        context = JobContext(job_id, output_dir, floor, max_seconds, arrangement_style(stored), lease.token)
 
         midi_path = transcribe(context)
 
-        if is_job_cancelled(job_id):
+        if is_job_cancelled(job_id, lease.token):
             raise TranscriptionCancelled()
 
+        if superseded(job_id, lease.token):
+            raise TranscriptionCancelled()
         reference = storage().save_result(job_id, midi_path)
-        if not complete_job(job_id, midi_path, reference):
+        if not complete_job(job_id, midi_path, reference, lease.token):
+            if superseded(job_id, lease.token):
+                # Another attempt owns the job; it writes its own result.
+                requeued = True
             return
         record_job(job_id)
         billing.settle_success(job_id)
@@ -582,8 +709,16 @@ def run_job(
             local_job_duration.add(time.monotonic() - started)
 
     except TranscriptionCancelled:
+        if claimed and superseded(job_id, lease.token):
+            logger.warning("Job %s is run by another attempt now; this one stops without writing", job_id)
+            requeued = True
+            return
         finish_cancelled(job_id, output_dir)
     except Exception as e:
+        if claimed and superseded(job_id, lease.token):
+            logger.warning("Job %s is run by another attempt now; this one stops without writing", job_id)
+            requeued = True
+            return
         target = retry_backend(job_id, backend, e)
         if target and requeue_job(job_id, backend, target, str(e)):
             requeued = True
@@ -593,26 +728,28 @@ def run_job(
             # Cancelled while failing: keep it cancelled.
             finish_cancelled(job_id, output_dir)
             return
-        if job.get("user_id"):
-            billing.release(job_id)
+        failed = {
+            "status": "failed",
+            "error": public_message(e),
+            "error_code": error_code(e),
+            "error_detail": detail(e),
+        }
+        if not fail_attempt(job_id, lease.token if claimed else None, failed):
+            # Cancelled or taken over meanwhile; whoever did settles it.
+            requeued = claimed and superseded(job_id, lease.token)
+            if redis.hget(job_key(job_id), "status") == "cancelled":
+                finish_cancelled(job_id, output_dir)
+            return
         logger.warning("Job %s failed", job_id, exc_info=e)
         if public_message(e) == GENERIC_MESSAGE:
             # No known cause such as a private video: probably a bug or a broken setup.
             error_report.report_exception(e, {"Job": job_id, "Backend": backend})
-        update_job(
-            job_id,
-            status="failed",
-            error=public_message(e),
-            error_code=error_code(e),
-            error_detail=detail(e),
-        )
+        # After the job is marked failed: a crash between the two leaves a
+        # reservation that the reconciliation releases, never a free retry.
+        if job.get("user_id"):
+            billing.release(job_id)
         record_job(job_id)
         storage().discard_inputs(job_id, output_dir)
-
-        redis.expire(
-            job_key(job_id),
-            job_ttl(),
-        )
     finally:
         if claimed:
             lease.stop()
@@ -622,6 +759,27 @@ def run_job(
         # and must not remove the running job from the routing count.
         if not requeued and (claimed or redis.hget(job_key(job_id), "status") != "processing"):
             routing.mark_finished(redis, backend, job_id)
+
+
+def fail_attempt(job_id: str, token: str | None, values: dict[str, str]) -> bool:
+    """Mark a processing job failed with values, and give it its expiry, in
+    one step, only while this attempt (token) owns it. False if it is no
+    longer processing or another attempt owns it."""
+    key = job_key(job_id)
+    while True:
+        try:
+            with redis.pipeline() as pipe:
+                pipe.watch(key)
+                status, current = pipe.hmget(key, "status", "attempt_token")
+                if status != "processing" or (token is not None and current not in (None, token)):
+                    return False
+                pipe.multi()
+                pipe.hset(key, mapping=values)
+                pipe.expire(key, job_ttl())
+                pipe.execute()
+                return True
+        except WatchError:
+            continue
 
 
 def finish_cancelled(job_id: str, output_dir: Path) -> None:
@@ -654,6 +812,10 @@ def retry_backend(job_id: str, backend: routing.Backend, error: Exception) -> ro
     from app.outsource.provider import RemoteFailed
     from app.transcription.batching import GpuOutOfMemory
 
+    if isinstance(error, SourceTemporarilyUnavailable) and another_address_can_run(job_id, backend):
+        # A video site refused this device's address: the same backend on a
+        # device that reaches the site from another one.
+        return backend
     if backend == "remote":
         if isinstance(error, RemoteFailed) and settings.outsource.fallback_local:
             if redis.hget(job_key(job_id), "mode") == ARRANGEMENT:
@@ -684,7 +846,7 @@ def requeue_job(job_id: str, source: routing.Backend, target: routing.Backend, r
                 pipe.watch(key)
                 job = pipe.hgetall(key)
                 if job.get("status") != "processing":
-                    if target == "remote":
+                    if target == "remote" and source != "remote":
                         routing.mark_finished(redis, "remote", job_id)
                     return False
                 pipe.multi()
@@ -693,11 +855,15 @@ def requeue_job(job_id: str, source: routing.Backend, target: routing.Backend, r
                     mapping={
                         "status": "queued",
                         "backend": target,
-                        "outsourced": "1",
                         "requeue_reason": reason,
                         "queued_at": str(time.time()),
                     },
                 )
+                if source == target:
+                    # To another device's address: counted, never outsourced.
+                    pipe.hincrby(key, "address_moves", 1)
+                else:
+                    pipe.hset(key, "outsourced", "1")
                 pipe.execute()
                 break
         except WatchError:
@@ -714,6 +880,90 @@ def requeue_job(job_id: str, source: routing.Backend, target: routing.Backend, r
         record_job(job_id)
         routing.move(redis, job_id, target, source)
         return False
+    return True
+
+
+def job_task(job: dict[str, str], backend: routing.Backend) -> str:
+    """The cluster task a job needs from a device (app.cluster.TASKS)."""
+    if backend == "remote":
+        return "dispatch"
+    return "arrange" if job.get("mode") == ARRANGEMENT else "transcribe"
+
+
+def job_site(job: dict[str, str]) -> str | None:
+    """The video site a link job reads, or None for an upload."""
+    from app import video_sites
+
+    url = job.get("source_url")
+    if job.get("source") == "upload" or not url:
+        return None
+    return video_sites.site_of(url)
+
+
+def free_addresses(site: str, task: str) -> list[str]:
+    """Addresses, other than this device's, of devices that run task now
+    and that site does not refuse."""
+    from app import video_sites
+
+    own = cluster.egress(redis)
+    return [
+        address for address in cluster.live_egresses(redis, task)
+        if address != own and video_sites.refusal(site, address) is None
+    ]
+
+
+def another_address_can_run(job_id: str, backend: routing.Backend) -> bool:
+    """Whether a link job that a video site refused here can move to a
+    device the site does not refuse, MAX_ADDRESS_MOVES times at most."""
+    if not cluster.has_nodes(redis):
+        return False
+    job = redis.hgetall(job_key(job_id))
+    site = job_site(job)
+    if site is None or int(job.get("address_moves") or 0) >= MAX_ADDRESS_MOVES:
+        return False
+    return bool(free_addresses(site, job_task(job, backend)))
+
+
+def pass_reason(job: dict[str, str], backend: routing.Backend) -> str | None:
+    """Why this device should leave a queued job to another, if it should:
+    the job's video site refuses this device's address but not another
+    device's, or the job was interrupted here and another device runs such
+    jobs. Never without invited nodes."""
+    from app import video_sites
+
+    if not cluster.has_nodes(redis):
+        return None
+    task = job_task(job, backend)
+    site = job_site(job)
+    if site is not None and video_sites.refusal(site) is not None and free_addresses(site, task):
+        return f"{site} refuses this device's address"
+    node = cluster.node_name()
+    ran_on = [name for name in (job.get("nodes") or "").split(",") if name]
+    if job.get("interruptions") and node in ran_on:
+        others = [name for name, tasks in cluster.running_tasks(redis).items() if task in tasks and name not in ran_on]
+        if others:
+            return "it was interrupted on this device"
+    return None
+
+
+def pass_job(job_id: str, backend: routing.Backend) -> bool:
+    """Hand a queued job to another device before claiming it, if
+    pass_reason says to; at most MAX_PASSES times, then it runs here. The
+    message goes back to the same queue, a moment later."""
+    try:
+        job = redis.hgetall(job_key(job_id))
+        if job.get("status") != "queued":
+            return False
+        reason = pass_reason(job, backend)
+        if reason is None or int(job.get("passes") or 0) >= MAX_PASSES:
+            return False
+        redis.hincrby(job_key(job_id), "passes", 1)
+        send_job(job_id, backend, *job_arguments(job), delay=PASS_DELAY_MS)
+    except Exception:
+        # Running it here is always possible.
+        logger.exception("Could not hand job %s to another device", job_id)
+        return False
+    logger.info("Job %s left to another device: %s", job_id, reason)
     return True
 
 
@@ -811,6 +1061,15 @@ def transcribe_remote_job(
     run_job(job_id, "remote", transcribe)
 
 
+@dramatiq.actor(queue_name=CHECK_QUEUE, max_retries=0, time_limit=120 * 1000)
+def check_video_link(request: str, safe_url: str):
+    """Run on a node that checks links: read a video's length for the API,
+    whose own address the video site refuses (app.video_check)."""
+    from app import video_check
+
+    video_check.answer(redis, request, safe_url)
+
+
 def consumes(worker, queue: str) -> bool:
     """Whether a Dramatiq worker consumes queue: every queue without --queues."""
     queues = worker.consumer_whitelist
@@ -819,7 +1078,8 @@ def consumes(worker, queue: str) -> bool:
 
 class LocalWorkerHeartbeat(dramatiq.Middleware):
     """Publishes the worker's capacity and average job duration while it
-    consumes the local queue, so the API can estimate the local wait."""
+    consumes a local queue, so the API can estimate the local wait. A worker
+    a cluster switch keeps to arrangements says it takes no transcriptions."""
 
     interval = 15
 
@@ -827,16 +1087,18 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
         self._stop: threading.Event | None = None
 
     def after_worker_boot(self, broker, worker):
-        if not consumes(worker, LOCAL_QUEUE):
+        transcribes = consumes(worker, LOCAL_QUEUE)
+        arranges = consumes(worker, ARRANGEMENT_QUEUE) and settings.worker.arrangement
+        if not (transcribes or arranges):
             return
         capacity = worker.worker_threads
-        arranges = consumes(worker, ARRANGEMENT_QUEUE) and settings.worker.arrangement
         stop = self._stop = threading.Event()
 
         def beat():
             while not stop.is_set():
                 try:
-                    routing.publish_heartbeat(redis, capacity, local_job_duration.value, arrangement=arranges)
+                    routing.publish_heartbeat(redis, capacity, local_job_duration.value, arrangement=arranges,
+                                              transcription=transcribes)
                 except Exception:
                     logger.exception("Could not publish the worker heartbeat")
                 stop.wait(self.interval)
@@ -858,17 +1120,18 @@ class LocalModelPreload(dramatiq.Middleware):
     waits for the same load instead of starting its own."""
 
     def after_worker_boot(self, broker, worker):
-        if not consumes(worker, LOCAL_QUEUE):
-            return
-
+        transcribes = consumes(worker, LOCAL_QUEUE)
         arranges = consumes(worker, ARRANGEMENT_QUEUE) and settings.worker.arrangement
+        if not (transcribes or arranges):
+            return
 
         def preload():
             started = time.monotonic()
             try:
                 from app.transcription.piano_transcription import preload
 
-                preload()
+                if transcribes:
+                    preload()
                 if arranges:
                     from app.transcription.arrangement import preload as preload_arrangement
 

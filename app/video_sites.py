@@ -15,8 +15,14 @@ and every worker share it:
 * Requests that read a link start at least VIDEO_SITE_INTERVAL apart, and
   at most VIDEO_SITE_MAX_DOWNLOADS downloads from a site run at once.
 
+In a home cluster (app/cluster.py), all of this is kept per site and per
+public address: a site that refuses one device's address does not stop the
+devices that reach it from another. Without invited nodes the address is
+"" and the keys are as on one machine.
+
 `limits links off` remains the switch for every site. Failed jobs are never
-retried on their own."""
+retried on their own; in a cluster they move to a device the site does not
+refuse (app.worker.tasks)."""
 
 import json
 import logging
@@ -156,8 +162,18 @@ def not_answering_message(site: str) -> str:
     return f"{site} is not answering at the moment; try again later, or upload the file instead"
 
 
-def _key(site: str, name: str) -> str:
-    return f"{PREFIX}{site}:{name}"
+def scope(site: str, address: str | None = None) -> str:
+    """What a site's keys are kept under: the site, and in a cluster the
+    label of the address it is reached from (this device's by default)."""
+    if address is None:
+        from app import cluster
+
+        address = cluster.egress(redis)
+    return f"{site}@{address}" if address else site
+
+
+def _key(site: str, name: str, address: str | None = None) -> str:
+    return f"{PREFIX}{scope(site, address)}:{name}"
 
 
 def failure(site: str, error: subprocess.CalledProcessError | subprocess.TimeoutExpired) -> SourceError:
@@ -239,11 +255,12 @@ def open_breaker(site: str, kind: str, reason: str) -> int:
     return cooldown
 
 
-def refusal(site: str) -> SourceTemporarilyUnavailable | None:
-    """The error for a link to site while its breaker is open."""
+def refusal(site: str, address: str | None = None) -> SourceTemporarilyUnavailable | None:
+    """The error for a link to site while its breaker is open, for this
+    device's address or the one given."""
     with redis.pipeline() as pipe:
-        pipe.get(_key(site, BLOCKED))
-        pipe.ttl(_key(site, BLOCKED))
+        pipe.get(_key(site, BLOCKED, address))
+        pipe.ttl(_key(site, BLOCKED, address))
         value, ttl = pipe.execute()
     if value is None:
         return None
@@ -353,27 +370,37 @@ class DownloadSlot(LeasedSlot):
             _pause(deadline, cancelled)
 
 
-def sites() -> list[str]:
-    """The sites anything is kept for."""
+def scopes() -> list[str]:
+    """Everything kept, as `site` or, in a cluster, `site@address`."""
     return sorted({key[len(PREFIX):].rsplit(":", 1)[0] for key in redis.scan_iter(match=PREFIX + "*")})
 
 
-def state(site: str) -> dict:
-    """A site's breaker, for administrators. expires_in is in seconds."""
+def sites() -> list[str]:
+    """The sites anything is kept for."""
+    return sorted({item.split("@", 1)[0] for item in scopes()})
+
+
+def state(item: str) -> dict:
+    """A site's breaker, for administrators: item is a site, or a site and
+    the address it is reached from, as scopes() lists them. expires_in is
+    in seconds."""
+    site, _, address = item.partition("@")
     with redis.pipeline() as pipe:
-        pipe.get(_key(site, BLOCKED))
-        pipe.ttl(_key(site, BLOCKED))
-        pipe.exists(_key(site, RECOVERING))
-        pipe.get(_key(site, STRIKES[LIMITED]))
-        pipe.get(_key(site, STRIKES[TIMED_OUT]))
-        pipe.hgetall(_key(site, INCIDENTS))
-        pipe.zcount(_key(site, DOWNLOADS), time.time(), "+inf")
+        pipe.get(_key(site, BLOCKED, address))
+        pipe.ttl(_key(site, BLOCKED, address))
+        pipe.exists(_key(site, RECOVERING, address))
+        pipe.get(_key(site, STRIKES[LIMITED], address))
+        pipe.get(_key(site, STRIKES[TIMED_OUT], address))
+        pipe.hgetall(_key(site, INCIDENTS, address))
+        pipe.zcount(_key(site, DOWNLOADS, address), time.time(), "+inf")
         blocked, ttl, recovering, strikes, timeout_strikes, incidents, downloads = pipe.execute()
     refused = None
     if blocked is not None:
         refused = {**json.loads(blocked), "expires_in": ttl if ttl > 0 else None}
     return {
         "site": site,
+        # The address label in a cluster (app.cluster.egress), else None.
+        "address": address or None,
         "refused": refused,
         "recovering": bool(recovering) and refused is None,
         "incidents_in_a_row": int(strikes or 0),
@@ -386,15 +413,21 @@ def state(site: str) -> dict:
 
 
 def states() -> list[dict]:
-    return [state(site) for site in sites()]
+    return [state(item) for item in scopes()]
 
 
 def reset(site: str | None = None) -> list[str]:
-    """Close the breaker of site, or of every site, now, and forget the
-    incidents in a row. Returns the sites that were refused or recovering."""
+    """Close the breaker of site, or of every site, now, from every address,
+    and forget the incidents in a row. Returns the sites that were refused
+    or recovering."""
     changed = []
-    for name in [site] if site else sites():
-        if redis.exists(_key(name, BLOCKED), _key(name, RECOVERING)):
+    items = [item for item in scopes() if site is None or item.split("@", 1)[0] == site]
+    if site and site not in items:
+        items.append(site)
+    for item in items:
+        name, _, address = item.partition("@")
+        if redis.exists(_key(name, BLOCKED, address), _key(name, RECOVERING, address)) and name not in changed:
             changed.append(name)
-        redis.delete(*(_key(name, part) for part in (BLOCKED, RECOVERING, PROBE, TIMEOUTS_SEEN, *STRIKES.values())))
+        redis.delete(*(_key(name, part, address)
+                       for part in (BLOCKED, RECOVERING, PROBE, TIMEOUTS_SEEN, *STRIKES.values())))
     return changed

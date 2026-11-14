@@ -1,0 +1,862 @@
+"""A home cluster (app/cluster.py): what nodes and the hub share in Redis,
+attempts that cannot overwrite each other, jobs that move between devices,
+billing that only the hub writes, and rate limits per public address."""
+
+import json
+import signal
+import sys
+import types
+from pathlib import Path
+
+import fakeredis
+import pytest
+
+from app import cluster, video_check, video_sites
+from app.errors import SourceTemporarilyUnavailable, SourceVideoUnavailable
+from app.transcription.cancellation import TranscriptionCancelled
+from app.worker import supervisor, tasks
+
+
+@pytest.fixture(autouse=True)
+def fresh_caches():
+    cluster.forget_egress_cache()
+    yield
+    cluster.forget_egress_cache()
+
+
+@pytest.fixture
+def worker(api_context):
+    _, settings, billing = api_context
+    settings.billing.provider = "google_play"
+    settings.billing.products = {"starter": 10}
+    billing.credit_purchase("user", "starter", "token", "order")
+    return settings, billing
+
+
+def queue_job(billing, job_id="job", cost=4, **values):
+    billing.reserve("user", job_id, cost)
+    tasks.redis.hset(
+        tasks.job_key(job_id),
+        mapping={"status": "queued", "progress": "0.0", "user_id": "user", "full_cost": str(cost), **values},
+    )
+
+
+def job(job_id="job"):
+    return tasks.redis.hgetall(tasks.job_key(job_id))
+
+
+def install_pipeline(monkeypatch, transcribe_source):
+    module = types.ModuleType("app.transcription.pipeline")
+    module.transcribe_source = transcribe_source
+    monkeypatch.setitem(sys.modules, "app.transcription.pipeline", module)
+
+
+def lose_worker(job_id="job"):
+    """The hub sees the lease expire, as when a device lost its network,
+    queues the job again, and another device claims it."""
+    tasks.redis.delete(tasks.lease_key(job_id))
+    assert tasks.fail_abandoned_job(job_id, tasks.WORKER_STOPPED)
+    assert tasks.claim_job(job_id, "other-device")
+
+
+def with_nodes(redis, *names):
+    for name in names:
+        cluster.register(redis, name, cluster.TASKS)
+    cluster.forget_egress_cache()
+
+
+def publish(redis, node, running, egress, service="worker"):
+    cluster.publish_status(redis, node, service, {"running": running, "egress": egress, "state": "running"})
+
+
+# --- An attempt that lost its job writes nothing ------------------------------------------
+
+def test_a_worker_cut_off_while_its_job_moved_writes_no_result_and_settles_nothing(worker, monkeypatch):
+    settings, billing = worker
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: None)
+    queue_job(billing, source_url="https://example.com/v")
+
+    def transcribe_source(output_dir, **kwargs):
+        lose_worker()
+        midi = output_dir / "transcription.mid"
+        midi.write_bytes(b"MThd")
+        return midi
+
+    install_pipeline(monkeypatch, transcribe_source)
+    tasks.transcribe_job.fn("job", "https://example.com/v")
+
+    # The other device's attempt owns the job: still processing, no result.
+    assert job()["status"] == "processing"
+    assert job()["attempt_token"] == "other-device"
+    assert "result" not in job()
+    assert billing.reserved_job_ids() == ["job"]
+    assert tasks.redis.sismember(tasks.routing.ACTIVE_KEYS["local"], "job")
+
+
+def test_a_worker_cut_off_does_not_fail_the_job_its_successor_runs(worker, monkeypatch):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: None)
+    queue_job(billing, source_url="https://example.com/v")
+    job_files = Path(tasks.settings.service.data_dir) / "jobs" / "job"
+
+    def transcribe_source(output_dir, **kwargs):
+        lose_worker()
+        job_files.mkdir(parents=True, exist_ok=True)
+        (job_files / "upload.input").write_bytes(b"kept")
+        raise RuntimeError("the connection broke")
+
+    install_pipeline(monkeypatch, transcribe_source)
+    tasks.transcribe_job.fn("job", "https://example.com/v")
+
+    assert job()["status"] == "processing"
+    assert billing.reserved_job_ids() == ["job"]
+    assert (job_files / "upload.input").exists()
+
+
+def test_a_worker_cut_off_treats_the_takeover_as_no_cancellation(worker, monkeypatch):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: None)
+    queue_job(billing, source_url="https://example.com/v")
+
+    def transcribe_source(output_dir, cancellation_callback, **kwargs):
+        lose_worker()
+        assert cancellation_callback()
+        raise TranscriptionCancelled()
+
+    install_pipeline(monkeypatch, transcribe_source)
+    tasks.transcribe_job.fn("job", "https://example.com/v")
+
+    # Not settled at the cancellation price, not marked cancelled.
+    assert job()["status"] == "processing"
+    assert billing.reserved_job_ids() == ["job"]
+    assert billing.get_balance("user") == 6
+
+
+def test_complete_job_refuses_an_attempt_that_no_longer_owns_the_job(worker, tmp_path):
+    _, billing = worker
+    queue_job(billing)
+    assert tasks.claim_job("job", "second")
+    midi = tmp_path / "transcription.mid"
+    midi.write_bytes(b"MThd")
+
+    assert not tasks.complete_job("job", midi, token="first")
+    assert job()["status"] == "processing"
+    assert tasks.complete_job("job", midi, token="second")
+
+
+def test_the_lease_of_a_superseded_attempt_stops_renewing(worker):
+    _, billing = worker
+    queue_job(billing)
+    lease = tasks.JobLease("job")
+    assert tasks.claim_job("job", lease.token)
+    tasks.redis.hset(tasks.job_key("job"), "attempt_token", tasks.ABANDONED_TOKEN)
+    tasks.redis.delete(tasks.lease_key("job"))
+
+    lease._update(renew=True)
+
+    assert lease._stop.is_set()
+    assert not tasks.redis.exists(tasks.lease_key("job"))
+
+
+def test_a_job_lost_on_every_attempt_fails_once_and_is_refunded_once(worker, monkeypatch):
+    settings, billing = worker
+    sent = []
+    monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments, **options: sent.append(job_id))
+    queue_job(billing, source_url="https://example.com/v")
+    for attempt in range(settings.jobs.max_attempts):
+        assert tasks.claim_job("job", f"attempt-{attempt}")
+        tasks.redis.delete(tasks.lease_key("job"))
+        assert tasks.fail_abandoned_jobs() == 1
+
+    assert job()["status"] == "failed"
+    assert job()["error_code"] == tasks.INTERRUPTED
+    assert len(sent) == settings.jobs.max_attempts - 1
+    assert billing.reserved_job_ids() == []
+    assert billing.get_balance("user") == 10
+    # Nothing is left to settle twice.
+    tasks.reconcile_billing()
+    assert billing.get_balance("user") == 10
+
+
+def test_one_attempt_fails_at_the_first_interruption(worker, monkeypatch):
+    settings, billing = worker
+    settings.jobs.max_attempts = 1
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: pytest.fail("queued again"))
+    queue_job(billing, source_url="https://example.com/v")
+    assert tasks.claim_job("job")
+    tasks.redis.delete(tasks.lease_key("job"))
+
+    assert tasks.fail_abandoned_jobs() == 1
+    assert job()["status"] == "failed"
+
+
+def test_the_devices_that_ran_a_job_are_kept(worker, monkeypatch, default_settings):
+    _, billing = worker
+    queue_job(billing)
+    default_settings.node.name = "laptop"
+    assert tasks.claim_job("job", "a")
+    tasks.redis.hset(tasks.job_key("job"), "status", "queued")
+    default_settings.node.name = "desktop"
+    assert tasks.claim_job("job", "b")
+
+    assert job()["nodes"] == "laptop,desktop"
+    assert job()["node"] == "desktop"
+    assert job()["attempt"] == "2"
+
+
+# --- Billing that only the hub writes ------------------------------------------------------------
+
+def test_a_node_only_names_the_jobs_it_ended():
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    hub_billing = cluster.HubBilling(redis)
+
+    hub_billing.settle_success("a")
+    hub_billing.settle_cancellation("b", 99999)
+    hub_billing.release("c")
+    hub_billing.record_job("a", {"status": "completed"})
+
+    assert sorted(redis.zrange(cluster.SETTLE_KEY, 0, -1)) == ["a", "b", "c"]
+    assert redis.zrange(cluster.RECORD_KEY, 0, -1) == ["a"]
+
+
+def test_the_hub_settles_node_jobs_by_their_state_not_by_what_the_node_said(worker, monkeypatch):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "Billing", lambda: billing)
+    node = cluster.HubBilling(tasks.redis)
+    queue_job(billing, "done", cost=3)
+    queue_job(billing, "broken", cost=2)
+    queue_job(billing, "cancelled", cost=4)
+    queue_job(billing, "running", cost=1)
+    tasks.redis.hset(tasks.job_key("done"), "status", "completed")
+    tasks.redis.hset(tasks.job_key("broken"), "status", "failed")
+    tasks.redis.hset(tasks.job_key("cancelled"), mapping={"status": "cancelled", "progress": "0.5"})
+    tasks.redis.hset(tasks.job_key("running"), "status", "processing")
+    # A node that claims a huge cancellation price is ignored: the hub
+    # works the price out from the job.
+    node.settle_cancellation("cancelled", 1000)
+    for job_id in ("done", "broken", "running"):
+        node.settle_success(job_id)
+
+    tasks.settle_node_jobs()
+
+    assert billing.reserved_job_ids() == ["running"]
+    assert billing.get_balance("user") == 10 - 3 - tasks.cancelled_cost(4, 0.5) - 1
+    # The running job is looked at again later, not dropped.
+    assert tasks.redis.zscore(cluster.SETTLE_KEY, "running") is not None
+
+    tasks.redis.hset(tasks.job_key("running"), "status", "completed")
+    cluster.process_node_requests(tasks.redis, lambda job_id, stored: tasks.settle_ended_job(job_id, stored, billing),
+                                  lambda job_id: None, now=10**10)
+    assert billing.reserved_job_ids() == []
+    assert tasks.redis.zcard(cluster.SETTLE_KEY) == 0
+
+
+def test_the_hub_releases_a_job_a_node_named_that_no_longer_exists(worker, monkeypatch):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "Billing", lambda: billing)
+    billing.reserve("user", "gone", 3)
+    cluster.HubBilling(tasks.redis).release("gone")
+
+    tasks.settle_node_jobs()
+
+    assert billing.reserved_job_ids() == []
+    assert billing.get_balance("user") == 10
+
+
+def test_the_hub_records_node_jobs(worker, monkeypatch):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "Billing", lambda: billing)
+    recorded = []
+    monkeypatch.setattr(billing, "record_job", lambda job_id, stored: recorded.append((job_id, stored["status"])))
+    queue_job(billing)
+    cluster.HubBilling(tasks.redis).record_job("job", {})
+
+    tasks.settle_node_jobs()
+
+    assert recorded == [("job", "queued")]
+    assert tasks.redis.zcard(cluster.RECORD_KEY) == 0
+
+
+def test_a_node_worker_never_builds_a_billing_database(monkeypatch):
+    monkeypatch.setattr(cluster.settings.service, "deployment", "node")
+    assert cluster.is_node()
+    assert isinstance(cluster.HubBilling(fakeredis.FakeRedis()), cluster.HubBilling)
+
+
+# --- Jobs that move to another device ------------------------------------------------------------
+
+def test_a_device_whose_address_a_site_refuses_leaves_the_job_to_another(worker, monkeypatch, default_settings):
+    _, billing = worker
+    sent = []
+    monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments, **options: sent.append(options))
+    with_nodes(tasks.redis, "laptop")
+    default_settings.node.egress = "home"
+    queue_job(billing, source="url", source_url="https://www.youtube.com/watch?v=1")
+    video_sites.open_breaker("youtube.com", video_sites.LIMITED, "rate limited")
+    publish(tasks.redis, "laptop", ["transcribe"], cluster.egress_label("label:office"))
+
+    assert tasks.pass_job("job", "local")
+
+    assert sent == [{"delay": tasks.PASS_DELAY_MS}]
+    assert job()["passes"] == "1"
+    assert job()["status"] == "queued"
+
+
+def test_a_device_runs_the_job_itself_when_no_other_address_is_free(worker, monkeypatch, default_settings):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: pytest.fail("passed"))
+    with_nodes(tasks.redis, "laptop")
+    default_settings.node.egress = "home"
+    queue_job(billing, source="url", source_url="https://www.youtube.com/watch?v=1")
+    video_sites.open_breaker("youtube.com", video_sites.LIMITED, "rate limited")
+    # The other device is behind the same address, which the site refuses too.
+    publish(tasks.redis, "laptop", ["transcribe"], cluster.egress(tasks.redis))
+
+    assert not tasks.pass_job("job", "local")
+
+
+def test_a_job_is_handed_on_at_most_max_passes_times(worker, monkeypatch, default_settings):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: pytest.fail("passed"))
+    with_nodes(tasks.redis, "laptop")
+    default_settings.node.egress = "home"
+    queue_job(billing, source="url", source_url="https://www.youtube.com/watch?v=1", passes=str(tasks.MAX_PASSES))
+    video_sites.open_breaker("youtube.com", video_sites.LIMITED, "rate limited")
+    publish(tasks.redis, "laptop", ["transcribe"], cluster.egress_label("label:office"))
+
+    assert not tasks.pass_job("job", "local")
+
+
+def test_without_nodes_nothing_is_handed_on(worker, monkeypatch):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: pytest.fail("passed"))
+    queue_job(billing, source="url", source_url="https://www.youtube.com/watch?v=1", interruptions="1", nodes="hub")
+    video_sites.open_breaker("youtube.com", video_sites.LIMITED, "rate limited")
+
+    assert not tasks.pass_job("job", "local")
+
+
+def test_a_job_interrupted_here_prefers_another_device(worker, monkeypatch, default_settings):
+    _, billing = worker
+    sent = []
+    monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments, **options: sent.append(job_id))
+    with_nodes(tasks.redis, "laptop")
+    queue_job(billing, source="upload", interruptions="1", nodes="hub")
+    publish(tasks.redis, "laptop", ["transcribe"], "")
+
+    assert tasks.pass_job("job", "local")
+    assert sent == ["job"]
+
+    # An arrangement needs a device that arranges.
+    tasks.redis.hset(tasks.job_key("job"), "mode", tasks.ARRANGEMENT)
+    assert not tasks.pass_job("job", "local")
+
+
+def test_a_rate_limited_job_moves_to_a_device_with_another_address(worker, monkeypatch, default_settings):
+    _, billing = worker
+    sent = []
+    monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments, **options: sent.append(backend))
+    with_nodes(tasks.redis, "laptop")
+    default_settings.node.egress = "home"
+    queue_job(billing, source="url", source_url="https://www.youtube.com/watch?v=1")
+    publish(tasks.redis, "laptop", ["transcribe"], cluster.egress_label("label:office"))
+
+    def transcribe_source(**kwargs):
+        raise video_sites.failure("youtube.com", __import__("subprocess").CalledProcessError(
+            1, ["yt-dlp"], stderr="ERROR: HTTP Error 429: Too Many Requests"))
+
+    install_pipeline(monkeypatch, transcribe_source)
+    tasks.transcribe_job.fn("job", "https://www.youtube.com/watch?v=1")
+
+    assert job()["status"] == "queued"
+    assert job()["address_moves"] == "1"
+    assert "outsourced" not in job()
+    assert sent == ["local"]
+    assert billing.reserved_job_ids() == ["job"]
+
+
+def test_a_rate_limited_job_fails_when_every_address_is_refused(worker, monkeypatch, default_settings):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: pytest.fail("moved"))
+    with_nodes(tasks.redis, "laptop")
+    default_settings.node.egress = "home"
+    queue_job(billing, source="url", source_url="https://www.youtube.com/watch?v=1")
+    office = cluster.egress_label("label:office")
+    publish(tasks.redis, "laptop", ["transcribe"], office)
+    video_sites.redis.set(video_sites._key("youtube.com", video_sites.BLOCKED, office),
+                          json.dumps({"kind": video_sites.LIMITED, "reason": "429"}), ex=600)
+
+    def transcribe_source(**kwargs):
+        raise SourceTemporarilyUnavailable("Links to youtube.com cannot be read", 60)
+
+    install_pipeline(monkeypatch, transcribe_source)
+    tasks.transcribe_job.fn("job", "https://www.youtube.com/watch?v=1")
+
+    assert job()["status"] == "failed"
+    assert billing.reserved_job_ids() == []
+
+
+# --- Rate limits per public address --------------------------------------------------------------
+
+def test_without_nodes_the_keys_are_those_of_one_machine(default_settings):
+    redis = video_sites.redis
+    video_sites.open_breaker("youtube.com", video_sites.LIMITED, "429")
+
+    assert redis.exists("video_sites:youtube.com:blocked")
+    assert [state["address"] for state in video_sites.states()] == [None]
+
+
+def test_each_address_has_its_own_breaker(default_settings):
+    redis = video_sites.redis
+    with_nodes(redis, "laptop")
+    default_settings.node.egress = "home"
+    home = cluster.egress(redis)
+    office = cluster.egress_label("label:office")
+
+    video_sites.open_breaker("youtube.com", video_sites.LIMITED, "429")
+
+    assert video_sites.refusal("youtube.com") is not None
+    assert video_sites.refusal("youtube.com", home) is not None
+    assert video_sites.refusal("youtube.com", office) is None
+    assert {(state["site"], state["address"]) for state in video_sites.states()} >= {("youtube.com", home)}
+
+
+def test_reset_closes_a_site_for_every_address(default_settings):
+    redis = video_sites.redis
+    with_nodes(redis, "laptop")
+    office = cluster.egress_label("label:office")
+    redis.set(video_sites._key("youtube.com", video_sites.BLOCKED, office), json.dumps({"kind": "limited", "reason": "x"}))
+    redis.set(video_sites._key("youtube.com", video_sites.BLOCKED, ""), json.dumps({"kind": "limited", "reason": "x"}))
+    redis.set(video_sites._key("vimeo.com", video_sites.BLOCKED, office), json.dumps({"kind": "limited", "reason": "x"}))
+
+    assert video_sites.reset("youtube.com") == ["youtube.com"]
+
+    assert video_sites.refusal("youtube.com", office) is None
+    assert video_sites.refusal("youtube.com", "") is None
+    assert video_sites.refusal("vimeo.com", office) is not None
+
+
+def test_the_public_address_is_learned_once_and_shared(default_settings, monkeypatch):
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    with_nodes(redis, "laptop")
+    calls = []
+    monkeypatch.setattr(cluster, "detect_public_address", lambda: calls.append(1) or "203.0.113.7")
+
+    first = cluster.egress(redis)
+    cluster.forget_egress_cache()
+    second = cluster.egress(redis)
+
+    assert first == second == cluster.egress_label("203.0.113.7")
+    assert calls == [1]
+    assert redis.get(cluster.egress_key("hub")) == "203.0.113.7"
+    # The label does not show the address in key names.
+    assert "203.0.113.7" not in first
+
+
+def test_an_unknown_address_counts_as_the_devices_own(default_settings, monkeypatch):
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    with_nodes(redis, "laptop")
+    monkeypatch.setattr(cluster, "detect_public_address", lambda: None)
+
+    assert cluster.egress(redis) == cluster.egress_label("node:hub")
+
+
+def test_the_trace_page_answer_is_read_for_its_address_alone(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *arguments):
+            return False
+
+        def read(self, size):
+            return b"fl=1\nh=www.cloudflare.com\nip=198.51.100.4\nts=1\n"
+
+    monkeypatch.setattr(cluster.urllib.request, "urlopen", lambda url, timeout: Response())
+    assert cluster.detect_public_address() == "198.51.100.4"
+
+
+# --- Link checks by a node ----------------------------------------------------------------------
+
+def test_a_nodes_answer_keeps_only_the_length_and_metadata():
+    info = video_check.parse_answer(json.dumps({"info": {
+        "duration": 95.5, "title": "x" * 5000, "uploader": "Chopin", "view_count": 7,
+        "formats": [{"url": "http://169.254.169.254/latest"}], "webpage_url": "https://youtu.be/1",
+        "like_count": True,
+    }}))
+
+    assert info["duration"] == 95.5
+    assert len(info["title"]) == video_check.TEXT_LIMIT
+    assert "formats" not in info and "like_count" not in info
+    assert info["uploader"] == "Chopin"
+
+
+@pytest.mark.parametrize("answer", [
+    "not json", "[]", json.dumps({"info": {"duration": 0}}), json.dumps({"info": {"duration": "90"}}),
+    json.dumps({"info": {"duration": float("inf")}}.__repr__()), json.dumps({}),
+])
+def test_a_broken_answer_is_no_info(answer):
+    with pytest.raises(video_check.SourceError):
+        video_check.parse_answer(answer)
+
+
+def test_a_nodes_refusal_becomes_the_same_error():
+    with pytest.raises(SourceVideoUnavailable) as error:
+        video_check.parse_answer(json.dumps({"error": {"kind": "SourceVideoUnavailable", "message": "Private video",
+                                                      "retry_after": None}}))
+    assert str(error.value) == "Private video"
+    with pytest.raises(SourceTemporarilyUnavailable) as error:
+        video_check.parse_answer(json.dumps({"error": {"kind": "SourceTemporarilyUnavailable", "message": "later",
+                                                      "retry_after": 10**9}}))
+    assert error.value.retry_after is None
+    # An unknown kind is a plain failure, not some other class.
+    with pytest.raises(video_check.SourceError) as error:
+        video_check.parse_answer(json.dumps({"error": {"kind": "SystemExit", "message": "x"}}))
+    assert type(error.value) is video_check.SourceError
+
+
+def test_the_api_refuses_a_link_only_when_no_node_can_check_it(default_settings):
+    redis = video_sites.redis
+    with_nodes(redis, "laptop")
+    default_settings.node.egress = "home"
+    video_sites.open_breaker("youtube.com", video_sites.LIMITED, "429")
+
+    assert video_check.refusal_everywhere(redis, "youtube.com") is not None
+
+    publish(redis, "laptop", ["check", "transcribe"], cluster.egress_label("label:office"))
+    assert video_check.refusal_everywhere(redis, "youtube.com") is None
+    assert video_check.should_delegate(redis, "https://www.youtube.com/watch?v=1")
+
+
+def test_a_delegated_check_is_answered_through_redis(default_settings, monkeypatch):
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(video_check, "read_video_info",
+                        lambda client, url, take_slot=True: {"duration": 61, "title": "Etude", "formats": ["x"]})
+
+    def send(request, url):
+        assert url == "https://youtu.be/1"
+        video_check.answer(redis, request, url)
+
+    info = video_check.delegate(redis, "https://youtu.be/1", send)
+
+    assert info == {"duration": 61.0, "title": "Etude"}
+    assert not list(redis.scan_iter(match=cluster.CHECK_REPLY_PREFIX + "*"))
+
+
+def test_a_link_checked_by_a_node_saves_no_info_for_the_download(api_context, monkeypatch):
+    client, settings, _ = api_context
+    from app.api.routes import billing as billing_routes
+    from app.api.routes import transcriptions as transcription_routes
+
+    monkeypatch.setattr(video_check, "should_delegate", lambda redis, url: True)
+    monkeypatch.setattr(video_check, "delegate", lambda redis, url, send: {"duration": 60.0, "title": "Etude"})
+    monkeypatch.setattr(transcription_routes, "check_video", billing_routes.check_video)
+
+    response = client.post("/api/transcriptions", json={"source_url": "https://www.youtube.com/watch?v=abc"})
+
+    assert response.status_code in (200, 201, 202), response.text
+    job_id = response.json()["job_id"]
+    assert tasks.redis.hget(tasks.job_key(job_id), "title") == "Etude"
+    assert not (Path(settings.service.data_dir) / "jobs" / job_id / "video.info.json").exists()
+
+
+# --- Settings the hub publishes -----------------------------------------------------------------
+
+def test_a_node_takes_the_hubs_settings_but_keeps_its_own(default_settings):
+    environment = {"WORKER_ARRANGEMENT": "false", "NODE_NAME": "laptop"}
+    hub = {"RESULT_RETENTION": "1d", "WORKER_ARRANGEMENT": "true", "MAX_ACTIVE_JOBS": "100"}
+
+    applied = cluster.apply_hub_settings(environment, hub)
+
+    assert applied["RESULT_RETENTION"] == "1d"
+    assert applied["WORKER_ARRANGEMENT"] == "false"
+    assert applied[cluster.SYNCED_NAMES_VARIABLE] == "MAX_ACTIVE_JOBS,RESULT_RETENTION"
+
+    # A setting removed on the hub goes; the node's own stays.
+    again = cluster.apply_hub_settings(applied, {"RESULT_RETENTION": "2d"})
+    assert "MAX_ACTIVE_JOBS" not in again
+    assert again["RESULT_RETENTION"] == "2d"
+    assert again["WORKER_ARRANGEMENT"] == "false"
+
+
+def test_wiring_the_database_and_device_settings_are_never_taken_from_the_hub():
+    names = cluster.synced_names()
+
+    assert "RESULT_RETENTION" in names and "JOB_STORAGE_BUCKET" in names
+    for name in ("REDIS_URL", "DATA_DIR", "DEPLOYMENT", "DATABASE_URL", "DATABASE_BACKUPS", "NODE_NAME",
+                 "NODE_EGRESS", "WORKER_THREADS", "WORKER_ENFORCE_CPU", "WORKER_MAX_CONCURRENCY", "COMPOSE_PROFILES"):
+        assert name not in names, name
+    applied = cluster.apply_hub_settings({}, {"REDIS_URL": "redis://evil:6379/0", "DATA_DIR": "/"})
+    assert "REDIS_URL" not in applied and "DATA_DIR" not in applied
+
+
+def test_the_hub_publishes_no_secret(monkeypatch):
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    monkeypatch.setenv("RESULT_RETENTION", "1d")
+    monkeypatch.setenv("REDIS_PASSWORD_FILE", "/run/redis/password")
+    monkeypatch.setenv("storage_secret_key", "s3cr3t")
+
+    cluster.publish_hub(redis)
+
+    info = cluster.hub_info(redis)
+    assert info["protocol"] == cluster.PROTOCOL
+    assert info["settings"]["RESULT_RETENTION"] == "1d"
+    assert "s3cr3t" not in json.dumps(info)
+    assert "REDIS_PASSWORD_FILE" not in info["settings"]
+
+
+# --- Switches and status ---------------------------------------------------------------------------
+
+def test_switches_allow_what_a_device_offers():
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    offered = ["transcribe", "arrange", "check"]
+
+    assert cluster.allowed_tasks(redis, "hub", offered) == offered
+    cluster.register(redis, "laptop", ["transcribe", "dispatch"])
+    assert cluster.allowed_tasks(redis, "laptop", offered) == ["transcribe"]
+    cluster.set_enabled(redis, "laptop", False)
+    assert cluster.allowed_tasks(redis, "laptop", offered) == []
+    cluster.set_enabled(redis, "laptop", True)
+    cluster.set_tasks(redis, "laptop", ["arrange"])
+    assert cluster.allowed_tasks(redis, "laptop", offered) == ["arrange"]
+
+
+def test_a_stored_task_list_from_a_newer_hub_ignores_unknown_tasks():
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.hset(cluster.config_key("laptop"), "tasks", "transcribe,teleport")
+
+    assert cluster.node_config(redis, "laptop")["tasks"] == ["transcribe"]
+
+
+@pytest.mark.parametrize("name", ["", "hub", "Laptop!", "-x", "a" * 32, "a:b", "a*"])
+def test_node_names_are_safe_in_redis_rules(name):
+    with pytest.raises(ValueError):
+        cluster.check_node_name(name)
+
+
+def test_forgetting_a_node_removes_its_keys():
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    cluster.register(redis, "laptop", ["transcribe"])
+    publish(redis, "laptop", ["transcribe"], "x")
+    redis.set(cluster.egress_key("laptop"), "203.0.113.7")
+
+    cluster.forget(redis, "laptop")
+
+    assert cluster.known_nodes(redis) == []
+    assert cluster.statuses(redis) == []
+    assert not redis.exists(cluster.config_key("laptop"), cluster.egress_key("laptop"))
+
+
+def test_live_addresses_by_task():
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    publish(redis, "laptop", ["transcribe", "check"], "a")
+    publish(redis, "desktop", ["transcribe"], "b")
+    publish(redis, "hub", ["dispatch"], "a", service="remote-worker")
+
+    assert cluster.live_egresses(redis, "transcribe") == {"a": ["laptop"], "b": ["desktop"]}
+    assert cluster.live_egresses(redis, "check") == {"a": ["laptop"]}
+    assert cluster.running_tasks(redis)["hub"] == {"dispatch"}
+
+
+def test_a_worker_kept_to_arrangements_does_not_count_for_transcriptions():
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    tasks.routing.publish_heartbeat(redis, 4, 30.0, worker="a", arrangement=True, transcription=False)
+    tasks.routing.publish_heartbeat(redis, 2, 30.0, worker="b", arrangement=False)
+
+    assert tasks.routing.local_capacity(redis)[0] == 2
+    assert tasks.routing.local_capacity(redis, arrangement=True)[0] == 4
+
+
+# --- The supervisor ----------------------------------------------------------------------------------
+
+class FakeProcess:
+    def __init__(self, command, env):
+        self.command = command
+        self.env = env
+        self.signals = []
+        self.code = None
+
+    def poll(self):
+        return self.code
+
+    def send_signal(self, signum):
+        self.signals.append(signum)
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def make_supervisor(monkeypatch, role="local", offered=("transcribe", "arrange"), node=False):
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    started = []
+
+    def popen(command, env):
+        process = FakeProcess(command, env)
+        started.append(process)
+        return process
+
+    plan = types.SimpleNamespace(threads=3, cpu_threads=None, summary="1 GPU(s)", arrangement=True, warnings=())
+    monkeypatch.setattr(supervisor.Supervisor, "capabilities", lambda self: list(offered))
+    monkeypatch.setattr(supervisor.shutil, "which", lambda name: "/usr/bin/dramatiq")
+    monkeypatch.setattr(supervisor, "DRAIN_FILE", Path(supervisor.__file__).parent / "no-such-drain-file")
+    monkeypatch.setattr(cluster, "egress", lambda client: "")
+    clock = Clock()
+    instance = supervisor.Supervisor(role, redis, popen=popen, clock=clock)
+    instance.local_plan = plan
+    instance.remote_plan = types.SimpleNamespace(threads=8, summary="remote")
+    return instance, redis, started, clock
+
+
+def queues(process):
+    return process.command[process.command.index("--queues") + 1:]
+
+
+def test_the_supervisor_runs_what_the_switches_allow(monkeypatch):
+    instance, redis, started, _ = make_supervisor(monkeypatch)
+
+    instance.step()
+
+    assert [queues(process) for process in started] == [["default", "arrangement"]]
+    assert started[0].env[supervisor.SERVICE_ENVIRONMENT] == "worker"
+    status = cluster.statuses(redis)[0]
+    assert status["running"] == ["transcribe", "arrange"]
+    assert status["node"] == "hub" and status["service"] == "worker"
+
+
+def test_switching_a_task_off_lets_the_running_jobs_finish_first(monkeypatch):
+    instance, redis, started, _ = make_supervisor(monkeypatch)
+    instance.step()
+    cluster.set_tasks(redis, "hub", ["transcribe"])
+
+    instance.step()
+
+    # SIGTERM: Dramatiq finishes its jobs; nothing is killed.
+    assert started[0].signals == [signal.SIGTERM]
+    assert len(started) == 1
+    started[0].code = 0
+    instance.step()
+    assert [queues(process) for process in started[1:]] == [["default"]]
+
+
+def test_switching_a_device_off_stops_all_its_work(monkeypatch):
+    instance, redis, started, _ = make_supervisor(monkeypatch)
+    instance.step()
+    cluster.set_enabled(redis, "hub", False)
+
+    instance.step()
+    started[0].code = 0
+    instance.step()
+
+    assert len(started) == 1
+    assert cluster.statuses(redis)[0]["state"] == "off"
+    assert cluster.statuses(redis)[0]["running"] == []
+
+
+def test_a_child_that_dies_is_started_again_later(monkeypatch):
+    instance, _, started, clock = make_supervisor(monkeypatch)
+    instance.step()
+    started[0].code = -9
+
+    instance.step()
+    assert len(started) == 1
+    clock.now += supervisor.RESTART_BACKOFF[0] + 1
+    instance.step()
+
+    assert len(started) == 2
+
+
+def test_while_redis_is_away_the_supervisor_keeps_what_ran(monkeypatch):
+    instance, redis, started, _ = make_supervisor(monkeypatch)
+    instance.step()
+    monkeypatch.setattr(cluster, "allowed_tasks", lambda *arguments: (_ for _ in ()).throw(ConnectionError("down")))
+
+    instance.step()
+
+    assert started[0].signals == []
+    assert "cannot reach Redis" in instance.state
+
+
+def test_a_drained_worker_takes_no_more_jobs(monkeypatch, tmp_path):
+    instance, redis, started, _ = make_supervisor(monkeypatch)
+    drain = tmp_path / "drain"
+    monkeypatch.setattr(supervisor, "DRAIN_FILE", drain)
+    instance.step()
+    drain.touch()
+
+    instance.step()
+
+    assert started[0].signals == [signal.SIGTERM]
+    assert cluster.statuses(redis)[0]["state"] == "drained"
+
+
+def test_a_node_of_another_protocol_waits_for_an_update(monkeypatch):
+    instance, redis, started, _ = make_supervisor(monkeypatch, role="node", offered=cluster.TASKS)
+    monkeypatch.setattr(cluster.settings.service, "deployment", "node")
+    redis.hset(cluster.HUB_KEY, mapping={"protocol": str(cluster.PROTOCOL + 1), "settings": "{}"})
+
+    instance.step()
+
+    assert started == []
+    assert "waiting for an update" in instance.state
+
+
+def test_a_node_starts_again_when_the_hubs_settings_change(monkeypatch):
+    instance, redis, started, _ = make_supervisor(monkeypatch, role="node", offered=cluster.TASKS)
+    monkeypatch.setattr(cluster.settings.service, "deployment", "node")
+    monkeypatch.setenv(cluster.SYNCED_HASH_VARIABLE, cluster.settings_hash({}))
+    redis.hset(cluster.HUB_KEY, mapping={"protocol": str(cluster.PROTOCOL), "settings": "{}"})
+    instance.step()
+    assert started
+
+    redis.hset(cluster.HUB_KEY, "settings", json.dumps({"RESULT_RETENTION": "1d"}))
+    instance.step()
+
+    assert instance.restart_for_settings
+    assert all(process.signals == [signal.SIGTERM] for process in started)
+
+
+def test_a_node_runs_checks_and_dispatch_in_children_of_their_own(monkeypatch):
+    instance, _, started, _ = make_supervisor(monkeypatch, role="node", offered=cluster.TASKS)
+
+    instance.step()
+
+    by_queue = {tuple(queues(process)): process for process in started}
+    assert set(by_queue) == {("default", "arrangement"), ("checks",), ("remote",)}
+    assert by_queue[("remote",)].env[supervisor.SERVICE_ENVIRONMENT] == "remote-worker"
+
+
+def test_a_node_takes_the_hubs_settings_by_starting_again(monkeypatch):
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.hset(cluster.HUB_KEY, mapping={"protocol": str(cluster.PROTOCOL),
+                                         "settings": json.dumps({"RESULT_RETENTION": "1d"})})
+    monkeypatch.delenv(cluster.SYNCED_HASH_VARIABLE, raising=False)
+    calls = []
+
+    supervisor.take_hub_settings(redis, ["node"], execve=lambda path, args, env: calls.append((args, env)))
+
+    [(args, env)] = calls
+    assert args[1:] == ["-m", "app.worker.launcher", "node"]
+    assert env["RESULT_RETENTION"] == "1d"
+    assert env[cluster.SYNCED_HASH_VARIABLE] == cluster.settings_hash({"RESULT_RETENTION": "1d"})
+
+    # Already running with them: nothing starts again.
+    monkeypatch.setenv(cluster.SYNCED_HASH_VARIABLE, cluster.settings_hash({"RESULT_RETENTION": "1d"}))
+    supervisor.take_hub_settings(redis, ["node"], execve=lambda *arguments: pytest.fail("started again"))
+
+
+def test_the_hub_does_not_check_links_for_itself(monkeypatch, default_settings):
+    from app.worker import launcher
+
+    monkeypatch.setattr(launcher, "cuda_job_capacities", lambda: None)
+    monkeypatch.setattr(supervisor, "ensure_valid", lambda role: None)
+    instance = supervisor.Supervisor.__new__(supervisor.Supervisor)
+    instance.role, instance.problem, instance.local_plan, instance.remote_plan = "node", "", None, None
+
+    assert "check" not in supervisor.Supervisor.capabilities(instance)
+    assert "dispatch" not in supervisor.Supervisor.capabilities(instance)
+    assert instance.problem.startswith("outsourcing is off")
