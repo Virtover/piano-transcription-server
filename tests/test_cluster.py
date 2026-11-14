@@ -636,6 +636,18 @@ def test_a_nodes_rules_name_no_other_node_and_no_control():
     assert all("{name}" in pattern for pattern in writable if pattern.startswith(("cluster:node:", "cluster:egress:")))
 
 
+def test_the_code_version_ignores_line_endings(tmp_path, monkeypatch):
+    def version(text: bytes) -> str:
+        (tmp_path / "app").mkdir(exist_ok=True)
+        (tmp_path / "app" / "cluster.py").write_bytes(text)
+        monkeypatch.setattr(cluster, "_code_version", None)
+        monkeypatch.setattr(cluster, "__file__", str(tmp_path / "app" / "cluster.py"))
+        return cluster.code_version()
+
+    assert version(b"a = 1\nb = 2\n") == version(b"a = 1\r\nb = 2\r\n")
+    assert version(b"a = 1\n") != version(b"a = 2\n")
+
+
 # --- Switches and status ---------------------------------------------------------------------------
 
 def test_switches_allow_what_a_device_offers():

@@ -270,14 +270,15 @@ _code_version: str | None = None
 
 def code_version() -> str:
     """A short hash of this copy of the server's code: the same on the hub
-    and a node built from the same version."""
+    and a node built from the same version, also when one was checked out
+    on Windows, with its line endings."""
     global _code_version
     if _code_version is None:
         digest = hashlib.sha256()
         root = Path(__file__).resolve().parent
-        for path in sorted(root.rglob("*.py")):
-            digest.update(str(path.relative_to(root)).replace("\\", "/").encode())
-            digest.update(path.read_bytes())
+        for path in sorted(root.rglob("*.py"), key=lambda item: item.relative_to(root).as_posix()):
+            digest.update(path.relative_to(root).as_posix().encode())
+            digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
         _code_version = digest.hexdigest()[:12]
     return _code_version
 
