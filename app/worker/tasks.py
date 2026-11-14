@@ -331,10 +331,7 @@ def cancel_job(job_id: str, charge: bool = True) -> str | None:
     record_job(job_id)
     if job.get("user_id"):
         if charge:
-            billing.settle_cancellation(
-                job_id,
-                cancelled_cost(int(job.get("full_cost", 0)), float(job.get("progress", 0))),
-            )
+            billing.settle_cancellation(job_id, cancellation_charge(job))
         else:
             billing.release(job_id)
     return status
@@ -377,12 +374,7 @@ def settle_ended_job(job_id: str, job: dict[str, str], ledger=None) -> bool:
     elif status == "failed":
         ledger.release(job_id)
     elif status == "cancelled":
-        try:
-            full_cost = int(job.get("full_cost", 0))
-            progress = float(job.get("progress", 0))
-        except (TypeError, ValueError):
-            return True
-        ledger.settle_cancellation(job_id, cancelled_cost(full_cost, progress))
+        ledger.settle_cancellation(job_id, cancellation_charge(job))
     else:
         return False
     return True
@@ -404,6 +396,26 @@ def settle_node_jobs() -> int:
             hub_billing.record_job(job_id, job)
 
     return cluster.process_node_requests(redis, settle, record)
+
+
+def retried_by_the_server(job: dict[str, str]) -> bool:
+    """Whether the server had to run the job again or move it: a device or
+    worker lost mid-job, a move to another device's address, to RunPod, or
+    back. Its progress is then partly from an attempt that was lost."""
+    return bool(job.get("requeue_reason") or job.get("interruptions") or job.get("address_moves")
+                or job.get("outsourced"))
+
+
+def cancellation_charge(job: dict[str, str]) -> int:
+    """What cancelling the job costs its user: a share of the work done, or
+    nothing for a job the server had to retry or move, so that no one pays
+    for progress an attempt lost before they gave up waiting."""
+    if retried_by_the_server(job):
+        return 0
+    try:
+        return cancelled_cost(int(job.get("full_cost", 0)), float(job.get("progress", 0)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def job_backend(job: dict[str, str]) -> routing.Backend:
@@ -888,9 +900,7 @@ def finish_cancelled(job_id: str, output_dir: Path) -> None:
         delete_job_files(job_id)
         return
     if job.get("user_id"):
-        charged = int(job.get("full_cost", 0))
-        progress = float(job.get("progress", 0))
-        billing.settle_cancellation(job_id, cancelled_cost(charged, progress))
+        billing.settle_cancellation(job_id, cancellation_charge(job))
     shutil.rmtree(output_dir, ignore_errors=True)
     delete_job_files(job_id)
     update_job(

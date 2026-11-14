@@ -945,3 +945,63 @@ def test_a_service_is_not_called_other_code_before_the_hub_published_its_own(api
 
     tasks.redis.hset(cluster.HUB_KEY, mapping={"protocol": str(cluster.PROTOCOL), "code": "def", "settings": "{}"})
     assert not nodes.overview()["devices"][0]["services"][0]["same_code"]
+
+
+# --- Cancelling a job the server had to retry -----------------------------------------------
+
+@pytest.mark.parametrize("retried", [{"interruptions": "1"}, {"requeue_reason": "worker stopped"},
+                                     {"address_moves": "1"}, {"outsourced": "1"}])
+def test_cancelling_a_job_the_server_retried_costs_nothing(worker, retried):
+    # It showed 77% on a device that was lost; cancelling while it waits for
+    # its next attempt must not charge for that lost progress.
+    _, billing = worker
+    queue_job(billing, cost=10, **{"progress": "0.77", **retried})
+
+    assert tasks.cancel_job("job") == "queued"
+
+    assert billing.reserved_job_ids() == []
+    assert billing.get_balance("user") == 10
+
+
+def test_cancelling_a_job_that_ran_on_its_first_attempt_costs_its_share(worker):
+    _, billing = worker
+    queue_job(billing, cost=10, progress="0.5")
+    tasks.redis.hset(tasks.job_key("job"), "status", "processing")
+
+    tasks.cancel_job("job")
+
+    assert billing.get_balance("user") == 10 - tasks.cancelled_cost(10, 0.5)
+
+
+def test_a_retried_job_cancelled_while_running_costs_nothing_also_at_the_worker(worker, monkeypatch):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: None)
+    queue_job(billing, cost=10, source_url="https://example.com/v")
+    assert tasks.claim_job("job", "first")
+    tasks.update_job("job", progress="0.8")
+    tasks.redis.delete(tasks.lease_key("job"))
+    assert tasks.fail_abandoned_jobs() == 1
+
+    def transcribe_source(output_dir, cancellation_callback, **kwargs):
+        tasks.redis.hset(tasks.job_key("job"), "status", "cancelled")
+        assert cancellation_callback()
+        raise TranscriptionCancelled()
+
+    install_pipeline(monkeypatch, transcribe_source)
+    tasks.transcribe_job.fn("job", "https://example.com/v")
+
+    assert job()["status"] == "cancelled"
+    assert billing.reserved_job_ids() == []
+    assert billing.get_balance("user") == 10
+
+
+def test_the_reconciliation_and_the_hub_charge_the_same(worker, monkeypatch):
+    _, billing = worker
+    monkeypatch.setattr(tasks, "Billing", lambda: billing)
+    queue_job(billing, "a", cost=4, progress="0.9", interruptions="1")
+    tasks.redis.hset(tasks.job_key("a"), "status", "cancelled")
+
+    cluster.HubBilling(tasks.redis).settle_cancellation("a", 4)
+    tasks.settle_node_jobs()
+
+    assert billing.get_balance("user") == 10

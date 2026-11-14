@@ -30,7 +30,6 @@ from app.admin.common import (
     when,
 )
 from app.auth import AuthenticatedUser
-from app.billing import cancelled_cost
 from app.outsource import routing
 from app.worker import tasks
 
@@ -137,7 +136,7 @@ def cancel_plan(job: str, refund: bool = False) -> dict:
         "billed": billed,
         "refund": refund,
         "full_cost": full_cost,
-        "charge": cancelled_cost(full_cost, progress) if billed and not refund else None,
+        "charge": tasks.cancellation_charge(fields) if billed and not refund else None,
     }
 
 

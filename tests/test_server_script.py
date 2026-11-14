@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import tempfile
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,8 @@ class FakeStack(server.ComposeStack):
 
     def __init__(self, clock, build_seconds=30, build_code=0, active_jobs=(), up_code=0, stop_code=0,
                  ready_after=0, aof_seconds=0):
+        # A folder of its own: never this repository's .env, which may be a hub's.
+        self.root = Path(tempfile.mkdtemp(prefix="fake-stack-"))
         self.clock = clock
         self.calls = []
         self.notice = None
