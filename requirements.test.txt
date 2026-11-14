@@ -6,3 +6,6 @@ fakeredis==2.39.0
 pyyaml==6.0.3
 # app/transcription/tempo.py rewrites MIDI files with it.
 mido==1.3.3
+# app/transcription/beat_decoder.py decodes beats and bars with it; the
+# version PyTorch brings into the worker image.
+numpy==2.2.6
