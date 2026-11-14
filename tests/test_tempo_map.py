@@ -302,6 +302,10 @@ def test_images_include_the_beat_tracker_weights(dockerfile):
     assert re.search(r"ARG BEAT_THIS_CHECKPOINT_SHA256=[0-9a-f]{64}", text)
     assert text.count(str(tempo.CHECKPOINT.as_posix())) >= 3
     assert "sha256sum -c -" in text
+    # A second source, at a fixed revision, for when the authors' server fails;
+    # the checksum is checked after either.
+    assert re.search(r"ARG BEAT_THIS_CHECKPOINT_MIRROR=https://huggingface\.co/[^/]+/[^/]+/resolve/[0-9a-f]{40}/", text)
+    assert 'for url in "$BEAT_THIS_CHECKPOINT_URL" "$BEAT_THIS_CHECKPOINT_MIRROR"' in text
 
 
 def test_beat_tracking_moves_to_cpu_when_the_gpu_is_full(tmp_path, monkeypatch):
