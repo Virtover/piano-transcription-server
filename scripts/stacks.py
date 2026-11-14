@@ -301,8 +301,10 @@ class NodeStack(ComposeStack):
         files = ["-f", "docker-compose.node.yml"] + (["-f", "docker-compose.node-gpu.yml"] if self.gpu else [])
         return ["docker", "compose", "-p", self.PROJECT, *files, "--env-file", self.ENV_FILE]
 
-    def up(self, command: str | None = None, build: bool = True) -> int:
-        return self.docker(self.compose() + ["up", "-d"] + (["--build"] if build else [])).returncode
+    def up(self, command: str | None = None, build: bool = True, recreate: bool = False) -> int:
+        # recreate: after join, whose new password a running worker read before.
+        return self.docker(self.compose() + ["up", "-d"] + (["--build"] if build else [])
+                           + (["--force-recreate"] if recreate else [])).returncode
 
     def pull(self) -> int:
         return self.docker(self.compose() + ["pull", "worker"]).returncode

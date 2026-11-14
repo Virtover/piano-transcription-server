@@ -654,6 +654,10 @@ def get_midi(
 
     key = job_storage.s3_key(path)
     if key is not None:
+        # Only the job's own result: a worker, which may write jobs, cannot
+        # point a user at another object of the bucket.
+        if key != job_storage.S3JobStorage.key(job_id, job_storage.RESULT_FILE_NAME):
+            raise HTTPException(status_code=500, detail="Invalid result path")
         try:
             bucket = job_storage.s3()
             if settings.limits.result_download == "api":
@@ -675,7 +679,8 @@ def get_midi(
             raise HTTPException(status_code=503, detail=STORAGE_UNAVAILABLE) from error
 
     result_path = Path(path)
-    data_root = Path(settings.service.data_dir).resolve()
+    # The job's own folder, not anywhere under the data volume.
+    data_root = job_storage.job_dir(job_id).resolve()
 
     try:
         result_path.resolve().relative_to(data_root)

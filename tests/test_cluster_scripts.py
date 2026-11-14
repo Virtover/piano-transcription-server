@@ -558,8 +558,8 @@ class FakeNodeStack(server.NodeStack):
         self.calls = []
         self.is_running = is_running
 
-    def up(self, command=None, build=True):
-        self.calls.append(("up", build))
+    def up(self, command=None, build=True, recreate=False):
+        self.calls.append(("up", build, recreate) if recreate else ("up", build))
         return 0
 
     def pull(self):
@@ -725,13 +725,11 @@ def test_needs_delay_asks_for_a_time(capsys):
 def test_join_routes_to_join_and_starts_the_node(tmp_path, offline, monkeypatch):
     invitation = make_invite(tmp_path)
     stack = FakeNodeStack(tmp_path)
-    # join builds its own stack and clock to start the node, not the one main was given.
-    monkeypatch.setattr(server, "node_stack", lambda root: stack)
-    monkeypatch.setattr(server, "Clock", FakeClock)
     assert server.main(["join", str(invitation), "--cpu"], stack, FakeClock()) == 0
     assert nodes.env_values(tmp_path / "node.env")["NODE_PROCESSOR"] == "cpu"
     assert not invitation.exists()
-    assert ("up", True) in stack.calls
+    # Always a new container: a running one read the old password.
+    assert ("up", True, True) in stack.calls
 
 
 def test_join_no_start_only_writes_files(tmp_path, offline):

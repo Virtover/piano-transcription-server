@@ -294,6 +294,31 @@ def test_with_api_downloads_the_api_sends_the_file_itself(api_context, bucket):
     assert bucket.signed == []
 
 
+@pytest.mark.parametrize("result_download", ["api", "link"])
+def test_a_job_cannot_name_another_object_as_its_result(api_context, bucket, result_download):
+    # A worker may write jobs; it cannot point a user at another file.
+    client, settings, _ = api_context
+    settings.limits.result_download = result_download
+    store(bucket, "other", "transcription.mid", b"MThd-someone-elses")
+    tasks.redis.hset(tasks.job_key("job"), mapping={"status": "completed", "result": f"s3:{PREFIX}other/transcription.mid"})
+
+    response = client.get("/api/transcriptions/job/midi", follow_redirects=False)
+
+    assert response.status_code == 500
+    assert b"someone" not in response.content
+    assert bucket.signed == []
+
+
+def test_a_local_result_must_be_in_the_jobs_own_folder(api_context):
+    client, settings, _ = api_context
+    other = Path(settings.service.data_dir) / "jobs" / "other" / "transcription.mid"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"MThd-someone-elses")
+    tasks.redis.hset(tasks.job_key("job"), mapping={"status": "completed", "result": str(other)})
+
+    assert client.get("/api/transcriptions/job/midi").status_code == 500
+
+
 def test_with_api_downloads_a_result_missing_from_the_bucket_is_gone(api_context, bucket):
     client, settings, _ = api_context
     settings.limits.result_download = "api"

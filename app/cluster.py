@@ -74,8 +74,11 @@ EGRESS_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 
 # Settings a node never takes from the hub: its own wiring, the database it
 # does not use, and what depends on the device itself, which its node.env
-# sets if needed.
-NOT_SYNCED_GROUPS = ("service", "database", "node")
+# sets if needed. Nor what only the API uses: sign-in, billing, the tunnel,
+# the admin page with its administrators' addresses, the off-site backups.
+# Nodes see only what their workers need.
+NOT_SYNCED_GROUPS = ("service", "database", "node", "auth", "billing", "google_play", "tunnel", "admin_web",
+                     "offsite")
 DEVICE_SETTINGS = {
     "WORKER_THREADS", "WORKER_ENFORCE_CPU", "WORKER_GPU_RESERVE_GIB", "WORKER_CPU_RESERVE_GIB",
     "WORKER_BATCH_SIZE", "WORKER_MAX_CONCURRENCY",

@@ -600,8 +600,15 @@ def test_wiring_the_database_and_device_settings_are_never_taken_from_the_hub():
 
     assert "RESULT_RETENTION" in names and "JOB_STORAGE_BUCKET" in names
     for name in ("REDIS_URL", "DATA_DIR", "DEPLOYMENT", "DATABASE_URL", "DATABASE_BACKUPS", "NODE_NAME",
-                 "NODE_EGRESS", "WORKER_THREADS", "WORKER_ENFORCE_CPU", "WORKER_MAX_CONCURRENCY", "COMPOSE_PROFILES"):
+                 "NODE_EGRESS", "WORKER_THREADS", "WORKER_ENFORCE_CPU", "WORKER_MAX_CONCURRENCY", "COMPOSE_PROFILES",
+                 # Only the API's: never shown to a node.
+                 "ADMIN_WEB_EMAILS", "CLOUDFLARE_ACCESS_AUD", "GOOGLE_OAUTH_CLIENT_IDS", "BILLING_PRODUCTS",
+                 "GOOGLE_PLAY_PACKAGE_NAME", "OFFSITE_BACKUP_RECIPIENT", "CLOUDFLARE_TUNNEL_HOSTNAME"):
         assert name not in names, name
+    # What a worker needs.
+    for name in ("WORKER_ARRANGEMENT", "JOB_STORAGE", "STORAGE_BUCKET", "OUTSOURCE_PROVIDER", "ERROR_REPORT_URL",
+                 "VIDEO_SITE_INTERVAL", "WORKER_BUSY_UTILIZATION", "JOB_MAX_ATTEMPTS"):
+        assert name in names, name
     applied = cluster.apply_hub_settings({}, {"REDIS_URL": "redis://evil:6379/0", "DATA_DIR": "/"})
     assert "REDIS_URL" not in applied and "DATA_DIR" not in applied
 

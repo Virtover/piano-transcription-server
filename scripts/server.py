@@ -747,7 +747,7 @@ def node_image(stack: "NodeStack") -> bool:
     return True
 
 
-def node_start(args, stack: "NodeStack", clock: Clock) -> int:
+def node_start(args, stack: "NodeStack", clock: Clock, recreate: bool = False) -> int:
     if not (stack.root / NODES.NODE_SECRETS / "redis_password").is_file():
         say("secrets/node/redis_password is missing: invite this device again on the hub and join with the new invite")
         return 1
@@ -759,7 +759,7 @@ def node_start(args, stack: "NodeStack", clock: Clock) -> int:
         say("could not pull the hub's image; is Tailscale up, and `tailscale serve` running on the hub?")
         return 1
     say("starting this device's worker" + ("" if pulled else ", building it if it changed"))
-    code = stack.up(build=not pulled)
+    code = stack.up(build=not pulled, recreate=True) if recreate else stack.up(build=not pulled)
     if code != 0:
         say(f"docker failed with exit code {code}")
         return code
@@ -809,7 +809,8 @@ def join(args, root: Path, stack: "NodeStack | None" = None, clock: Clock | None
         return 1
     if args.no_start:
         return 0
-    return node_start(args, stack if isinstance(stack, NodeStack) else node_stack(root), clock or Clock())
+    # Always a new container: one already running read the old password.
+    return node_start(args, stack if isinstance(stack, NodeStack) else node_stack(root), clock or Clock(), recreate=True)
 
 
 def node_main(args, stack: "NodeStack", clock: Clock) -> int:
