@@ -1090,3 +1090,18 @@ def test_a_node_reads_whether_it_has_the_cloud_keys_from_its_secrets(monkeypatch
     (tmp_path / "storage_secret_key").write_text("b")
     supervisor.take_hub_settings(redis, ["node"], execve=lambda path, args, env: calls.append(env))
     assert calls[-1]["STORAGE_BUCKET"] == "runpod-audio"
+
+
+def test_a_node_invited_without_dispatch_does_not_offer_it_or_complain(monkeypatch, tmp_path, default_settings):
+    from app.worker import launcher
+
+    monkeypatch.setattr(cluster.settings.service, "deployment", "node")
+    monkeypatch.setattr(launcher, "cuda_job_capacities", lambda: None)
+    monkeypatch.setattr(supervisor, "ensure_valid", lambda role: pytest.fail("RunPod checked"))
+    default_settings.outsource.provider = "runpod"
+    default_settings.secrets_dir = str(tmp_path)
+    instance = supervisor.Supervisor.__new__(supervisor.Supervisor)
+    instance.role, instance.problem, instance.local_plan, instance.remote_plan = "node", "", None, None
+    monkeypatch.setattr(supervisor, "OFFERED", {"node": ("dispatch",)})
+    assert supervisor.Supervisor.capabilities(instance) == []
+    assert instance.problem == ""

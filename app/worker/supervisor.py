@@ -152,6 +152,9 @@ class Supervisor:
         if "check" in offered and not cluster.is_node():
             # The hub checks links itself, from its own address.
             offered.remove("check")
+        if "dispatch" in offered and cluster.is_node() and not (Path(settings.secrets_dir) / "runpod_api_key").is_file():
+            # Invited without dispatch: the invite gave it no RunPod key.
+            offered.remove("dispatch")
         if "dispatch" in offered:
             if settings.outsource.provider == "none":
                 offered.remove("dispatch")
