@@ -562,6 +562,8 @@ function updateCounts(state) {
   const limits = document.getElementById("count-limits");
   limits.textContent = active ? String(active) : "";
   limits.className = `count ${controls.paused !== null || controls.links_off !== null ? "alert-count" : ""}`;
+  // The folded menu shows that a section needs attention.
+  document.getElementById("menu-dot").hidden = !document.querySelector(".adm-nav .count.alert-count:not(:empty)");
 }
 
 async function loadStatus() {
@@ -1042,17 +1044,18 @@ async function nodesView() {
         canSwitch ? qbtn(device.enabled ? "Switch off" : "Switch on", device.enabled ? "c-red" : "c-green",
           () => change("nodes.switch", { node: device.node, on: !device.enabled },
             { title: `${device.enabled ? "Switch off" : "Switch on"} ${device.node}`, after: () => open("nodes") })) : null),
-      table([
-        { label: "Task", key: "title" },
+      // A line per task: what it is, its state, and its switch.
+      el("ul", { class: "task-list" }, rows.map((row) => {
         // The hub checks links itself; nodes check them for it while a site refuses its address.
-        { label: "State", render: (row) => (device.node === "hub" && row.task === "check" ? badge("always on", "good")
-          : row.running ? badge("running", "good") : !row.allowed ? badge("off", "warn")
-          : !row.offered ? badge("not on this device", "warn") : badge("idle")) },
-        { label: "", render: (row) => (!canChange("nodes.task") || (device.node === "hub" && row.task === "check") ? null
+        const own = device.node === "hub" && row.task === "check";
+        const state = own ? badge("always on", "good") : row.running ? badge("running", "good")
+          : !row.allowed ? badge("off", "warn") : !row.offered ? badge("not on this device", "warn") : badge("idle");
+        const button = own || !canChange("nodes.task") ? null
           : qbtn(row.allowed ? "Turn off" : "Turn on", row.allowed ? "c-grey" : "c-green",
             () => change("nodes.task", { node: device.node, task: row.task, allowed: !row.allowed },
-              { title: `Turn ${row.title.toLowerCase()} ${row.allowed ? "off" : "on"} on ${device.node}`, after: () => open("nodes") }))) },
-      ], rows, { empty: "This device has not reported what it can do", emptyIcon: "limits" }),
+              { title: `Turn ${row.title.toLowerCase()} ${row.allowed ? "off" : "on"} on ${device.node}`, after: () => open("nodes") }));
+        return el("li", {}, el("span", { class: "task-name", text: row.title }), state, button || el("span"));
+      })),
       problems.length ? alertBox("warn",
         problems.map((service) => service.problem || `${service.service} runs other code than the hub; update it`).join(" · ")) : null);
     card.classList.add("node-card");
@@ -1832,13 +1835,18 @@ function lowerConfirm(planned, reason) {
 
 const VIEWS = { overview, jobs, users, billing, limits: limitsView, nodes: nodesView, announcements: announcementsView, audit: auditView, access: accessView };
 
+// On phones the sections fold into a menu under the header.
+function showMenu(on) {
+  document.querySelector(".adm-side").classList.toggle("menu-open", on);
+  document.getElementById("menu").setAttribute("aria-expanded", String(on));
+}
+
 function setCurrent(view) {
   for (const button of document.querySelectorAll(".adm-nav button")) {
     if (button.dataset.view === view) {
       button.setAttribute("aria-current", "page");
-      // On phones the sections are one scrolling row: keep the current one in sight.
-      const nav = button.parentElement;
-      if (nav.scrollWidth > nav.clientWidth) nav.scrollLeft = button.offsetLeft - (nav.clientWidth - button.offsetWidth) / 2;
+      // On phones the menu button names the section shown.
+      document.getElementById("menu-label").textContent = button.textContent.replace(/\d+/g, "").trim();
     } else {
       button.removeAttribute("aria-current");
     }
@@ -1846,6 +1854,7 @@ function setCurrent(view) {
 }
 
 function open(view) {
+  showMenu(false);
   currentView = view;
   setCurrent(view);
   // Only the section's name: never an account or a job, which stay out of the history.
@@ -1880,6 +1889,7 @@ async function start() {
   const nav = document.getElementById("nav");
   if (me.effective === "disabled") {
     nav.hidden = true;
+    document.getElementById("menu").hidden = true;
     clearInterval(refreshTimer);
     fill(main, head("Disabled", "This page's access was lowered"),
       (me.lowerings || []).map((row) => alertBox("error", `Lowered to ${row.mode} by ${row.actor} at ${when(row.at)}: ${row.reason || "no reason"}`)),
@@ -1888,6 +1898,7 @@ async function start() {
     return;
   }
   nav.hidden = false;
+  document.getElementById("menu").hidden = false;
   try {
     await loadStatus();
   } catch {
@@ -1897,6 +1908,9 @@ async function start() {
   open(currentView && VIEWS[currentView] ? currentView : Object.hasOwn(VIEWS, asked) ? asked : "overview");
 }
 
+document.getElementById("menu").addEventListener("click", () =>
+  showMenu(!document.querySelector(".adm-side").classList.contains("menu-open")));
+document.addEventListener("keydown", (event) => { if (event.key === "Escape") showMenu(false); });
 document.getElementById("nav").addEventListener("click", (event) => {
   const view = event.target.closest("button")?.dataset.view;
   if (view) open(view);
