@@ -2,7 +2,8 @@
 
 The hub's side, run by scripts/admin.py:
 
-    python scripts/admin.py nodes hub 100.101.102.103 [--registry hub.example.ts.net]
+    python scripts/admin.py nodes hub [--registry hub.example.ts.net]      # finds its Tailscale address
+    python scripts/admin.py nodes hub --lan 192.168.1.20                    # a test without Tailscale
     python scripts/admin.py nodes invite laptop --tasks transcribe,arrange
     python scripts/admin.py nodes revoke laptop
 
@@ -136,14 +137,71 @@ def write_s3_config(root: Path, config: dict) -> None:
     write_secret(root / S3_CONFIG, json.dumps(config, indent=2))
 
 
-def setup_hub(root: Path, server, address: str, registry: str | None) -> list[str]:
-    """Make this machine a hub: .env publishes Redis and the hub's bucket on
-    the tailnet address, and the bucket gets the hub's keys. server is
-    scripts/server.py, whose EnvFile edits .env and server.env in place."""
-    address = check_address(address)
+# The hub's ports nodes reach: Redis and its bucket.
+HUB_PORTS = (REDIS_PORT, STORAGE_PORT)
+
+
+def run_quietly(command: list[str]) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return subprocess.CompletedProcess(command, 127, "", str(error))
+
+
+def tailscale_address(run=run_quietly) -> str | None:
+    """This machine's Tailscale IPv4 address, or None without Tailscale."""
+    if shutil.which("tailscale") is None:
+        return None
+    result = run(["tailscale", "ip", "-4"])
+    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    return lines[0] if result.returncode == 0 and lines else None
+
+
+def serve_command(port: int) -> list[str]:
+    return ["tailscale", "serve", "--bg", f"--tcp={port}", f"tcp://localhost:{port}"]
+
+
+def serve_on_tailnet(run=run_quietly) -> list[str]:
+    """Have Tailscale serve the hub's ports, which Docker publishes on this
+    machine alone, to the tailnet and only to it. It keeps doing so after a
+    reboot. Returns what failed, with the command to run by hand."""
+    problems = []
+    for port in HUB_PORTS:
+        result = run(serve_command(port))
+        if result.returncode != 0:
+            reason = (result.stderr or result.stdout or "").strip().splitlines()
+            problems.append(f"Tailscale could not serve port {port} ({reason[-1] if reason else 'no answer'}); "
+                            f"run: {' '.join(serve_command(port))}")
+    return problems
+
+
+def setup_hub(root: Path, server, address: str | None = None, registry: str | None = None, lan: bool = False,
+              run=run_quietly) -> list[str]:
+    """Make this machine a hub. With Tailscale (the default), Docker publishes
+    Redis and the hub's bucket on this machine alone, and Tailscale serves
+    them to the tailnet; nodes reach them on this machine's Tailscale address.
+    With lan, they are published on that address of the local network
+    instead, without Tailscale's encryption, as for a test. The bucket gets
+    the hub's keys. server is scripts/server.py, whose EnvFile edits .env."""
     messages = []
+    if lan:
+        if not address:
+            raise ClusterError("--lan needs this machine's address on the local network")
+        address = check_address(address)
+    else:
+        found = tailscale_address(run)
+        if found is None:
+            raise ClusterError("Tailscale is not running here, or not signed in: install it from tailscale.com and "
+                               "sign in (tailscale up), then run this again")
+        if address and check_address(address) != found:
+            raise ClusterError(f"{address} is not this machine's Tailscale address, which is {found}")
+        address = found
     compose = server.EnvFile(root / ".env")
     compose.set("HUB_ADDRESS", address)
+    if lan:
+        compose.set("HUB_BIND_ADDRESS", address)
+    else:
+        compose.unset("HUB_BIND_ADDRESS")
     compose.set("COMPOSE_FILE", HUB_FILES)
     # The same separator on every OS, so the line is portable.
     compose.set("COMPOSE_PATH_SEPARATOR", ":")
@@ -171,7 +229,15 @@ def setup_hub(root: Path, server, address: str, registry: str | None) -> list[st
         messages.append(f"job files go to the hub's own bucket on {address}:{STORAGE_PORT} (JOB_STORAGE=local); "
                         "results are sent by the API, so the bucket stays private")
     compose.save()
-    messages.append(f"Redis and the bucket are published on {address} only, for the nodes; PostgreSQL stays private")
+    if lan:
+        messages.append(f"Redis and the bucket are published on {address}, on the local network, protected by "
+                        "passwords but not encrypted: use Tailscale for real use. PostgreSQL stays private")
+    else:
+        problems = serve_on_tailnet(run)
+        messages.extend(problems)
+        if not problems:
+            messages.append(f"Tailscale serves Redis and the bucket on {address}, to your tailnet only; Docker publishes "
+                            "them on this machine alone. PostgreSQL stays private")
     messages.append("apply it with: python scripts/server.py restart 1m")
     return messages
 

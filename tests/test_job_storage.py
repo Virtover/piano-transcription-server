@@ -611,3 +611,31 @@ def test_an_unreachable_job_storage_is_named_apart_from_storage(default_settings
     # Beside check_storage's own result, the two are told apart.
     assert (result.name, result.status) == ("Job storage", "fail")
     assert "STORAGE_ENDPOINT" in result.hint
+
+
+def test_a_job_queued_before_the_hub_bucket_moves_its_files_there_at_startup(api_context, hub_bucket, monkeypatch):
+    # Queued while job files were in the data volume's folders; nodes reach
+    # only the bucket.
+    _, settings, _ = api_context
+    folder = Path(settings.service.data_dir) / "jobs" / "old"
+    folder.mkdir(parents=True)
+    (folder / tasks.UPLOAD_FILE_NAME).write_bytes(b"audio")
+    tasks.redis.hset(tasks.job_key("old"), mapping={"status": "queued", "source": "upload", "backend": "local"})
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: None)
+
+    tasks.recover_active_jobs("restarted")
+
+    assert hub_bucket.objects[f"{PREFIX}old/{tasks.UPLOAD_FILE_NAME}"]["body"] == b"audio"
+    assert not folder.exists()
+
+
+def test_a_worker_on_the_hub_still_finds_files_left_in_the_folders(hub_bucket, api_context, tmp_path):
+    _, settings, _ = api_context
+    folder = Path(settings.service.data_dir) / "jobs" / "old"
+    folder.mkdir(parents=True)
+    (folder / tasks.UPLOAD_FILE_NAME).write_bytes(b"audio")
+    workspace = tmp_path / "work"
+
+    job_storage.storage().fetch_inputs("old", workspace)
+
+    assert (workspace / tasks.UPLOAD_FILE_NAME).read_bytes() == b"audio"

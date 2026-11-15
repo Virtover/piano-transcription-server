@@ -607,7 +607,27 @@ def check_completed_result(job_id: str, job: dict[str, str]) -> bool:
 ARRANGEMENT_OFF = "Piano arrangements were turned off on this server"
 
 
+def move_files_to_the_bucket(job_id: str) -> None:
+    """A job queued while its files were kept in the data volume's folders,
+    as before this machine became a cluster's hub or JOB_STORAGE changed:
+    its files go to the bucket job files are in now, so any device can run
+    it. Run by the API at startup, which has both. Never raises."""
+    folder = job_dir(job_id)
+    if not uses_bucket() or not folder.is_dir():
+        return
+    try:
+        for path in sorted(folder.iterdir()):
+            if path.is_file():
+                storage().save(job_id, path)
+        shutil.rmtree(folder, ignore_errors=True)
+        logger.info("Moved the files of queued job %s to the bucket", job_id)
+    except Exception:
+        # Left where they are: the hub's own workers still find them there.
+        logger.exception("Could not move the files of queued job %s to the bucket", job_id)
+
+
 def requeue_after_restart(job_id: str, job: dict[str, str], reason: str) -> None:
+    move_files_to_the_bucket(job_id)
     backend = job_backend(job)
     if backend == "remote" and not routing.outsourcing_enabled():
         # Outsourcing was turned off while the server was down.

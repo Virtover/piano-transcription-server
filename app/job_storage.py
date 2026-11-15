@@ -212,6 +212,13 @@ class S3JobStorage:
 
     def fetch_inputs(self, job_id: str, folder: Path) -> None:
         folder.mkdir(parents=True, exist_ok=True)
+        # Files a job kept in the data volume's folders before job files went
+        # to a bucket: on this machine, a worker takes them from there.
+        local = job_dir(job_id)
+        if local.is_dir():
+            for path in local.iterdir():
+                if path.is_file() and not (folder / path.name).exists():
+                    shutil.copy2(path, folder / path.name)
         try:
             for key in self._keys(self.key(job_id, "")):
                 name = key.rsplit("/", 1)[-1]

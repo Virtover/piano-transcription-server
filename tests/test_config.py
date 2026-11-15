@@ -485,7 +485,7 @@ def test_compose_variables_are_used_and_documented():
     compose = "".join((ROOT / name).read_text(encoding="utf-8") for name in ("docker-compose.yml", "docker-compose.hub.yml"))
     documentation = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
     # Read by Docker Compose itself, and by the hub's scripts.
-    not_interpolated = {"COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR", "HUB_REGISTRY"}
+    not_interpolated = {"COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR", "HUB_REGISTRY", "HUB_ADDRESS"}
 
     for name in config.COMPOSE_VARIABLES:
         assert name in not_interpolated or "${" + name in compose, name

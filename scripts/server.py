@@ -113,7 +113,7 @@ def remaining_text(seconds: float) -> str:
 # test fails if docker-compose.yml reads a variable missing here.
 COMPOSE_ONLY_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD",
                           "COMPOSE_PROFILES", "ADMIN_WEB_MODE",
-                          "HUB_ADDRESS", "HUB_REGISTRY", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR"}
+                          "HUB_ADDRESS", "HUB_BIND_ADDRESS", "HUB_REGISTRY", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR"}
 COMPOSE_ENV, SERVER_ENV = ".env", "server.env"
 ADDED_HEADER = "# --- Added by scripts/setup.py or scripts/server.py"
 # A line that python-dotenv and Docker Compose read as a setting: also with
@@ -680,6 +680,11 @@ def serve_hub(stack: Stack) -> None:
     values = hub_values(stack)
     if not values.get("HUB_ADDRESS"):
         return
+    # Tailscale keeps serving the ports after a reboot; set again in case it
+    # was reset. Not for a hub published on the local network.
+    if not values.get("HUB_BIND_ADDRESS") and stack is not None and isinstance(stack, ComposeStack):
+        for problem in NODES.serve_on_tailnet():
+            say(problem)
     # The hub's bucket for job files, with JOB_STORAGE=local.
     if NODES.env_values(stack.root / SERVER_ENV).get("JOB_STORAGE", "local") == "local":
         result = stack.exec("api", "python", "-m", "app.cluster", "create-bucket")

@@ -229,7 +229,6 @@ class Missing:
 # --- A home cluster's checks, on the host --------------------------------------------------
 
 NODES = SERVER_SCRIPT.NODES
-DOCKER_AFTER_TAILSCALE = Path("/etc/systemd/system/docker.service.d/tailscale.conf")
 
 
 def run_quietly(command: list[str]) -> subprocess.CompletedProcess:
@@ -287,10 +286,19 @@ def cluster_checks(root: Path, features: dict | None, run=run_quietly, platform:
     checks.append(ClusterCheck(
         bool(address) and "docker-compose.hub.yml" in values.get("COMPOSE_FILE", ""),
         f"this machine is the hub, on {address}" if address else "this machine is the hub",
-        "Run: python scripts/setup.py cluster, or python scripts/admin.py nodes hub <its Tailscale address>"))
-    if address and addresses and address not in addresses:
+        "Run: python scripts/setup.py cluster, or python scripts/admin.py nodes hub"))
+    lan = values.get("HUB_BIND_ADDRESS")
+    if address and lan:
+        checks.append(ClusterCheck(False, f"published on the local network ({lan}), without Tailscale's encryption",
+                                   "Fine for a test; for real use: python scripts/admin.py nodes hub", optional=True))
+    elif address and addresses and address not in addresses:
         checks.append(ClusterCheck(False, f"HUB_ADDRESS {address} is this machine's Tailscale address",
-                                   f"Its address is {addresses[0]}: run python scripts/admin.py nodes hub {addresses[0]}"))
+                                   "Run: python scripts/admin.py nodes hub"))
+    elif address and addresses:
+        served = run(["tailscale", "serve", "status"])
+        missing = [port for port in NODES.HUB_PORTS if f":{port}" not in (served.stdout or "")]
+        checks.append(ClusterCheck(not missing, "Tailscale serves Redis and the bucket to the tailnet",
+                                   f"Run: python scripts/admin.py nodes hub (ports {', '.join(map(str, missing))} are not served)"))
     if address:
         cloud = NODES.env_values(root / "server.env").get("JOB_STORAGE") == "s3"
         checks.append(ClusterCheck(
@@ -299,15 +307,12 @@ def cluster_checks(root: Path, features: dict | None, run=run_quietly, platform:
     invited = NODES.invited(root)
     checks.append(ClusterCheck(bool(invited), f"devices invited: {', '.join(invited)}" if invited else "devices invited",
                                "On this machine: python scripts/admin.py nodes invite <name>", optional=not address))
-    if platform.startswith("linux") and address:
-        checks.append(ClusterCheck(DOCKER_AFTER_TAILSCALE.is_file(), "Docker starts after Tailscale, after a power cut",
-                                   "See step 4 of \"Setting up the hub\" in docs/cluster.md"))
     if platform == "win32" and address:
         checks.append(ClusterCheck(False, "Docker Desktop starts with Windows, and Windows signs in by itself",
                                    "A Windows hub serves only once Docker Desktop runs; a Linux hub is the better hub",
                                    optional=True))
     checks.append(ClusterCheck(bool(values.get("HUB_REGISTRY")), "a registry for the nodes' image",
-                               "Optional: python scripts/admin.py nodes hub <address> --registry <its Tailscale name>",
+                               "Optional: python scripts/admin.py nodes hub --registry <its Tailscale name>",
                                optional=True))
     return checks
 
@@ -486,7 +491,7 @@ class Setup:
         say("")
         if not values.get("HUB_ADDRESS") and addresses and self.console.yes(
                 f"Make this machine the hub, on its Tailscale address {addresses[0]}?", default=False):
-            arguments = ["nodes", "hub", addresses[0]]
+            arguments = ["nodes", "hub"]
             result = self.run([sys.executable, str(self.root / "scripts" / "admin.py"), *arguments])
             for line in (result.stdout or "").splitlines():
                 say(f"  {line}")

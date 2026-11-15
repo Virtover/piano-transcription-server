@@ -554,7 +554,7 @@ def test_the_cluster_offers_to_make_this_machine_the_hub(server, monkeypatch):
     assert setup.cluster() == 0
 
     [hub] = [command for command in ran if "nodes" in command]
-    assert hub[-3:] == ["nodes", "hub", "100.101.102.103"]
+    assert hub[-2:] == ["nodes", "hub"]
     assert "Tailscale, signed in: 100.101.102.103" in script.text
 
 
@@ -569,9 +569,8 @@ def test_a_hub_whose_address_is_not_tailscales_is_told(server, monkeypatch):
     by_text = {check.text: check for check in checks}
     assert by_text["this machine is the hub, on 100.1.1.1"].ok
     assert not by_text["HUB_ADDRESS 100.1.1.1 is this machine's Tailscale address"].ok
-    assert "nodes hub 100.101.102.103" in by_text["HUB_ADDRESS 100.1.1.1 is this machine's Tailscale address"].fix
+    assert "nodes hub" in by_text["HUB_ADDRESS 100.1.1.1 is this machine's Tailscale address"].fix
     assert not by_text["devices invited"].ok
-    assert not by_text["Docker starts after Tailscale, after a power cut"].ok or setup_script.DOCKER_AFTER_TAILSCALE.is_file()
 
 
 def test_on_a_node_setup_shows_the_nodes_side_and_creates_no_hub_files(tmp_path, monkeypatch):

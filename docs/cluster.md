@@ -31,32 +31,28 @@ For a cluster of cloud machines instead, see [Kubernetes](kubernetes.md).
 
 `python scripts/setup.py cluster` checks all of this on the machine it runs on, the hub or a node, says what is missing and how to fix it, and offers to make a machine with Tailscale the hub. `python scripts/setup.py status` shows the same in short.
 
-The hub should be the most reliable machine, always on. **Linux is the better hub:** Docker starts at boot, and the published addresses work as described. On Windows, Docker Desktop starts only when a user signs in; set it to start with Windows and sign in automatically, and keep the machine from sleeping.
+The hub should be the most reliable machine, always on. **Linux is the better hub:** Docker starts at boot. On Windows, Docker Desktop starts only when a user signs in: set it to start with Windows, sign in automatically, and keep the machine from sleeping.
 
 ## 🚀 Setting up the hub
 
-1. **Tailscale.** Install it and sign in. Its address is `tailscale ip -4`, such as `100.101.102.103`.
-2. **Make this machine the hub**, with its own bucket for job files:
+1. **Install Tailscale** from [tailscale.com](https://tailscale.com/download) and sign in.
+2. **Make this machine the hub:**
 
    ```shell
-   python scripts/admin.py nodes hub 100.101.102.103
+   python scripts/admin.py nodes hub
    ```
 
-   This publishes Redis and the hub's bucket (SeaweedFS) on that address only (`docker-compose.hub.yml`), never on the local network, and keeps PostgreSQL private. It gives the bucket the hub's keys; each node gets keys of its own when invited. Job files move to that bucket with `JOB_STORAGE=local`, so change nothing else.
-
-3. **Apply it**, while no job is queued: jobs queued with files in the data volume's folders cannot move to the bucket.
+3. **Apply it.** Running jobs finish first, and queued ones continue after the restart:
 
    ```shell
    python scripts/server.py restart 1m
    ```
 
-4. **On Linux, start Docker after Tailscale**, so Redis's address exists when Docker publishes it after a power cut:
+That is all. `nodes hub` finds this machine's Tailscale address, and has Docker publish Redis and the hub's bucket on this machine alone, which Tailscale then serves to your tailnet and nothing else: not your local network, not the internet. Tailscale keeps doing so after a reboot, whichever starts first, and every start of the hub checks it. PostgreSQL stays private. Job files go to the hub's own bucket (`JOB_STORAGE=local`, the default), and each node gets keys of its own when invited; the files of jobs queued before move there by themselves. Run it again after an update; it changes nothing that is right.
 
-   ```shell
-   sudo mkdir -p /etc/systemd/system/docker.service.d
-   printf '[Unit]\nAfter=tailscaled.service\nWants=tailscaled.service\n' | sudo tee /etc/systemd/system/docker.service.d/tailscale.conf
-   sudo systemctl daemon-reload
-   ```
+`python scripts/setup.py cluster` checks all of this and says what is missing.
+
+For a test without Tailscale, `python scripts/admin.py nodes hub --lan <this machine's local address>` publishes on the local network instead, protected by passwords but not encrypted.
 
 ### Results and the bucket
 
@@ -113,7 +109,7 @@ A switch set on the hub lasts until changed, also across reboots. A device stopp
 Each device builds its worker image itself by default, about 8 GB and a while. Instead, the hub can build once and the devices pull:
 
 ```shell
-python scripts/admin.py nodes hub 100.101.102.103 --registry hub.example.ts.net
+python scripts/admin.py nodes hub --registry hub.example.ts.net
 python scripts/server.py restart 1m
 tailscale serve --bg --https=443 http://127.0.0.1:5000
 python scripts/server.py push-images --legacy

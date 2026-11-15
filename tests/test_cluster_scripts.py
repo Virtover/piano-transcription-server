@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,7 +48,7 @@ def write(path: Path, text: str):
 def hub(root, registry=None, server_env=""):
     write(root / ".env", "")
     write(root / "server.env", server_env)
-    return nodes.setup_hub(root, server, ADDRESS, registry)
+    return nodes.setup_hub(root, server, ADDRESS, registry, lan=True)
 
 
 def s3(root):
@@ -75,7 +76,7 @@ def test_setup_hub_writes_the_compose_settings(tmp_path):
 
 def test_setup_hub_rejects_an_address_that_is_not_an_ip(tmp_path):
     with pytest.raises(ClusterError):
-        nodes.setup_hub(tmp_path, server, "hub.example.com", None)
+        nodes.setup_hub(tmp_path, server, "hub.example.com", None, lan=True)
 
 
 def test_setup_hub_always_creates_the_hub_keys_and_identity(tmp_path):
@@ -102,7 +103,7 @@ def test_setup_hub_does_not_touch_server_env(tmp_path):
 def test_setup_hub_twice_keeps_the_same_keys_and_one_hub_identity(tmp_path):
     hub(tmp_path)
     first = [(tmp_path / f"secrets/{name}").read_text() for name in nodes.HUB_KEYS]
-    nodes.setup_hub(tmp_path, server, ADDRESS, None)
+    nodes.setup_hub(tmp_path, server, ADDRESS, None, lan=True)
     assert [(tmp_path / f"secrets/{name}").read_text() for name in nodes.HUB_KEYS] == first
     assert [item["name"] for item in s3(tmp_path)["identities"]].count("hub") == 1
     assert identity(tmp_path, "hub")["credentials"][0]["accessKey"] == first[0]
@@ -128,7 +129,7 @@ def test_invite_needs_a_hub(tmp_path):
         nodes.invite(tmp_path, "laptop", ["transcribe"])
 
 
-def test_invite_is_refused_before_setup_hub(tmp_path):
+def test_invite_is_refused_before_setup_hub(tmp_path, lan=True):
     write(tmp_path / ".env", f"HUB_ADDRESS={ADDRESS}\n")
     write(tmp_path / "server.env", "")
     with pytest.raises(ClusterError, match="not a hub"):
@@ -859,7 +860,7 @@ class AdminStack(admin.STACKS.ComposeStack):
 def admin_hub(root, *arguments):
     write(root / ".env", "")
     write(root / "server.env", "")
-    admin.NODES.setup_hub(root, server, ADDRESS, None)
+    admin.NODES.setup_hub(root, server, ADDRESS, None, lan=True)
 
 
 def test_admin_invite_reloads_redis_and_registers_the_node(tmp_path):
@@ -936,7 +937,7 @@ def test_admin_revoke_survives_a_failed_redis_kill(tmp_path):
 def test_admin_hub_command_sets_up_the_hub(tmp_path):
     write(tmp_path / ".env", "")
     write(tmp_path / "server.env", "")
-    assert admin.main(["nodes", "hub", ADDRESS], AdminStack(tmp_path)) == 0
+    assert admin.main(["nodes", "hub", ADDRESS, "--lan"], AdminStack(tmp_path)) == 0
     assert nodes.env_values(tmp_path / ".env")["HUB_ADDRESS"] == ADDRESS
 
 
@@ -973,3 +974,75 @@ def test_an_invite_with_the_old_job_storage_names_is_refused(tmp_path):
     path = write(tmp_path / "laptop.json", json.dumps(invitation))
     with pytest.raises(ClusterError, match="job_storage_access_key"):
         nodes.read_invite(path)
+
+
+
+# --- A hub through Tailscale ------------------------------------------------------------------
+
+class FakeTailscale:
+    def __init__(self, address="100.88.2.112", serve_code=0):
+        self.address = address
+        self.serve_code = serve_code
+        self.commands = []
+
+    def __call__(self, command):
+        self.commands.append(command)
+        if command[:3] == ["tailscale", "ip", "-4"]:
+            return subprocess.CompletedProcess(command, 0 if self.address else 1, f"{self.address or ''}\n", "")
+        return subprocess.CompletedProcess(command, self.serve_code, "", "" if self.serve_code == 0 else "access denied")
+
+
+def test_a_hub_finds_its_tailscale_address_and_serves_its_ports_on_the_tailnet(tmp_path, monkeypatch):
+    monkeypatch.setattr(nodes.shutil, "which", lambda name: "/usr/bin/tailscale")
+    write(tmp_path / ".env", "")
+    write(tmp_path / "server.env", "")
+    tailscale = FakeTailscale()
+
+    messages = nodes.setup_hub(tmp_path, server, run=tailscale)
+
+    values = nodes.env_values(tmp_path / ".env")
+    assert values["HUB_ADDRESS"] == "100.88.2.112"
+    # Docker publishes on this machine alone; Tailscale serves the tailnet.
+    assert "HUB_BIND_ADDRESS" not in values
+    assert ["tailscale", "serve", "--bg", "--tcp=6379", "tcp://localhost:6379"] in tailscale.commands
+    assert ["tailscale", "serve", "--bg", "--tcp=8333", "tcp://localhost:8333"] in tailscale.commands
+    assert any("to your tailnet only" in message for message in messages)
+
+
+def test_a_hub_without_tailscale_says_how_to_get_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(nodes.shutil, "which", lambda name: None)
+    write(tmp_path / ".env", "")
+    with pytest.raises(ClusterError, match="install it from tailscale.com"):
+        nodes.setup_hub(tmp_path, server, run=FakeTailscale())
+
+
+def test_a_hub_given_another_address_than_tailscales_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(nodes.shutil, "which", lambda name: "/usr/bin/tailscale")
+    write(tmp_path / ".env", "")
+    with pytest.raises(ClusterError, match="100.88.2.112"):
+        nodes.setup_hub(tmp_path, server, "100.1.1.1", run=FakeTailscale())
+
+
+def test_a_failed_serve_is_reported_with_the_command_to_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(nodes.shutil, "which", lambda name: "/usr/bin/tailscale")
+    write(tmp_path / ".env", "")
+    write(tmp_path / "server.env", "")
+
+    messages = nodes.setup_hub(tmp_path, server, run=FakeTailscale(serve_code=1))
+
+    assert any("tailscale serve --bg --tcp=6379 tcp://localhost:6379" in message for message in messages)
+
+
+def test_a_lan_hub_publishes_on_that_address_and_unsets_it_again_for_tailscale(tmp_path, monkeypatch):
+    write(tmp_path / ".env", "")
+    write(tmp_path / "server.env", "")
+    tailscale = FakeTailscale()
+
+    nodes.setup_hub(tmp_path, server, "192.168.0.141", lan=True, run=tailscale)
+    assert nodes.env_values(tmp_path / ".env")["HUB_BIND_ADDRESS"] == "192.168.0.141"
+    assert tailscale.commands == []
+
+    monkeypatch.setattr(nodes.shutil, "which", lambda name: "/usr/bin/tailscale")
+    nodes.setup_hub(tmp_path, server, run=tailscale)
+    values = nodes.env_values(tmp_path / ".env")
+    assert values["HUB_ADDRESS"] == "100.88.2.112" and "HUB_BIND_ADDRESS" not in values

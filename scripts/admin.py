@@ -14,7 +14,7 @@ question refuses instead of waiting. See docs/administration.md.
 A home cluster's hub (docs/cluster.md) has three commands of its own, run
 here on the host, because they write files in secrets/:
 
-    python scripts/admin.py nodes hub 100.101.102.103 [--registry hub.example.ts.net]
+    python scripts/admin.py nodes hub [--registry hub.example.ts.net]
     python scripts/admin.py nodes invite laptop [--tasks transcribe,arrange] [--again]
     python scripts/admin.py nodes revoke laptop
 
@@ -70,7 +70,9 @@ def node_command(arguments: list[str], stack) -> int:
     parser = argparse.ArgumentParser(prog=f"{COMMAND} nodes")
     commands = parser.add_subparsers(dest="action", required=True)
     hub = commands.add_parser("hub", help="make this machine a home cluster's hub")
-    hub.add_argument("address", help="this machine's Tailscale address, from `tailscale ip -4`")
+    hub.add_argument("address", nargs="?", help="this machine's address; found from Tailscale when left out")
+    hub.add_argument("--lan", action="store_true",
+                     help="publish on this local network address instead of through Tailscale, as for a test")
     hub.add_argument("--registry", metavar="NAME", help="this machine's Tailscale name, for a registry of nodes' images")
     invite = commands.add_parser("invite", help="write an invite file for a new node")
     invite.add_argument("node", help="the device's name, such as laptop")
@@ -87,7 +89,7 @@ def node_command(arguments: list[str], stack) -> int:
     try:
         if args.action == "hub":
             server = load_script("server")
-            for message in NODES.setup_hub(root, server, args.address, args.registry):
+            for message in NODES.setup_hub(root, server, args.address, args.registry, lan=args.lan):
                 say(message)
             return 0
         if args.action == "invite":

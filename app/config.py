@@ -42,7 +42,7 @@ MIN_SERVER_PASSWORD_LENGTH = 12
 # Read from .env by Docker Compose itself (docker-compose.yml), not by the server.
 COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD",
                      # A home cluster's hub (docker-compose.hub.yml, docs/cluster.md).
-                     "HUB_ADDRESS", "HUB_REGISTRY", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR"}
+                     "HUB_ADDRESS", "HUB_BIND_ADDRESS", "HUB_REGISTRY", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR"}
 # The two files: .env holds what Docker Compose reads, server.env the
 # server's settings, the same on every deployment. COMPOSE_PROFILES and
 # ADMIN_WEB_MODE are both: Compose starts services by the one and picks the

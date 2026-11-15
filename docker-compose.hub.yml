@@ -1,14 +1,17 @@
-# The hub of a home cluster (docs/cluster.md): what the nodes reach, on
-# this machine's tailnet address alone, HUB_ADDRESS in .env, never on every
-# network interface. Docker Compose adds this file to docker-compose.yml
-# when .env lists both in COMPOSE_FILE, which `python scripts/admin.py nodes
-# hub` writes.
+# The hub of a home cluster (docs/cluster.md): what the nodes reach. Docker
+# publishes it on this machine alone (127.0.0.1), an address that exists at
+# every boot, and Tailscale serves those ports to the tailnet, and only to it
+# (`tailscale serve`, which `python scripts/admin.py nodes hub` sets up and
+# every start of the hub checks). Without Tailscale, as for a test,
+# HUB_BIND_ADDRESS in .env publishes them on a LAN address instead. Docker
+# Compose adds this file to docker-compose.yml when .env lists both in
+# COMPOSE_FILE, which `nodes hub` writes.
 #
 # PostgreSQL stays unpublished: nodes never reach the billing database.
 #
 # With JOB_STORAGE=local, the hub keeps job files in its own bucket, the
 # storage service below, which its services reach inside Docker and the
-# nodes on the tailnet address.
+# nodes over the tailnet.
 
 x-hub-wiring: &hub-wiring
   CLUSTER_STORAGE_ENDPOINT: http://storage:8333
@@ -34,7 +37,7 @@ services:
   # (redis/node.acl); the default user is refused.
   redis:
     ports:
-      - "${HUB_ADDRESS:?HUB_ADDRESS, this machine's tailnet address, is not set in .env}:6379:6379"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:6379:6379"
 
   # The hub's bucket for job files, with JOB_STORAGE=local. The hub and
   # each node have keys of their own, in secrets/storage/s3.json, which
@@ -43,7 +46,7 @@ services:
     image: chrislusf/seaweedfs:4.50
     command: [server, -dir=/data, -s3, -s3.port=8333, -s3.config=/etc/seaweedfs/s3.json, -volume.max=0]
     ports:
-      - "${HUB_ADDRESS:?HUB_ADDRESS, this machine's tailnet address, is not set in .env}:8333:8333"
+      - "${HUB_BIND_ADDRESS:-127.0.0.1}:8333:8333"
     volumes:
       - storage_data:/data
       - ./secrets/storage/s3.json:/etc/seaweedfs/s3.json:ro
