@@ -199,6 +199,16 @@ kbd { font-family: var(--mono); font-size: 0.75rem; padding: 1px 6px; border: 1p
 @media (max-width: 760px) {
   .editor-panes { grid-template-columns: minmax(0, 1fr); }
   .editor-preview { border-left: 0; border-top: 1px solid var(--border-color); }
+  /* Full screen on a phone: text and preview share the height. */
+  .editor.full .editor-panes { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+  .editor.full .editor-area.pw-input { padding: 16px; }
+  .editor.full .editor-preview { padding: 16px; }
+  /* Shortcuts: each key above what it does. */
+  .editor-help dl { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .editor-help dd { margin-bottom: 6px; }
+  /* Language code and remove button on one line, the title below. */
+  .translation-head { grid-template-columns: minmax(0, 1fr) auto; }
+  .translation-head > :nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
 }
 .section-title small { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); font-weight: 400; }
 
@@ -276,6 +286,9 @@ kbd { font-family: var(--mono); font-size: 0.75rem; padding: 1px 6px; border: 1p
 .btn:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .card .btn-row { margin-top: 16px; }
+/* Devices: state and switch above the task table, a problem below it. */
+.node-card .btn-row { margin: 0 0 8px; }
+.node-card .alert { margin: 14px 0 0; }
 
 /* Quick action and filter buttons, colour-coded like the website's. */
 .qbtn {
@@ -510,7 +523,7 @@ pre.code { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mo
   dl.facts dd { margin-bottom: 8px; }
   .hbar { grid-template-columns: 5.5rem 1fr 2.5rem; }
   /* At 16px, phones do not zoom in when a field gets focus. */
-  .pw-input, .pw-select { font-size: 16px; }
+  .pw-input, .pw-select, .editor-area.pw-input { font-size: 16px; }
 }
 
 @media (max-width: 640px) {

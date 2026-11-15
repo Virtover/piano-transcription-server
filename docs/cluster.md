@@ -75,7 +75,7 @@ RunPod reads audio from the `STORAGE_` bucket, which must be reachable from the 
 
    This creates the node's Redis password and its own keys to the hub's bucket, and writes `secrets/invites/laptop.json`. The invite holds only what the node needs, never the hub's other secrets: the cloud bucket's keys only with `JOB_STORAGE=s3` or the `dispatch` task. Copy it to the device privately, for example with `tailscale file cp secrets/invites/laptop.json laptop:`; never by email or chat.
 
-2. **On the device:** install Tailscale and Docker, get this repository at the hub's version, and join with the invite. `join` writes `node.env` and `secrets/node/`, deletes the invite, and starts the worker:
+2. **On the device:** install Tailscale and Docker, get this repository at the hub's version, and join with the invite, from wherever you put it (the repository folder is simplest). `join` writes `node.env` and `secrets/node/`, deletes the invite, and starts the worker:
 
    ```shell
    python scripts/server.py join laptop.json

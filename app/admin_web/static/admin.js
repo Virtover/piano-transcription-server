@@ -1035,7 +1035,7 @@ async function nodesView() {
       task, title, allowed: allowed.includes(task), running: running.has(task), offered: offered.has(task),
     }));
     const problems = device.services.filter((service) => service.problem || (service.code && !service.same_code));
-    return iconCard("limits", color, device.node, device.address ? `public address ${device.address}` + (device.shares_address_with.length
+    const card = iconCard("limits", color, device.node, device.address ? `public address ${device.address}` + (device.shares_address_with.length
       ? `, shared with ${device.shares_address_with.join(", ")}: video sites limit them together` : "")
       : "public address not learned yet",
       el("div", { class: "btn-row" }, state,
@@ -1045,7 +1045,7 @@ async function nodesView() {
       table([
         { label: "Task", key: "title" },
         // The hub checks links itself; nodes check them for it while a site refuses its address.
-        { label: "State", render: (row) => (device.node === "hub" && row.task === "check" ? badge("the hub does this itself", "good")
+        { label: "State", render: (row) => (device.node === "hub" && row.task === "check" ? badge("always on", "good")
           : row.running ? badge("running", "good") : !row.allowed ? badge("off", "warn")
           : !row.offered ? badge("not on this device", "warn") : badge("idle")) },
         { label: "", render: (row) => (!canChange("nodes.task") || (device.node === "hub" && row.task === "check") ? null
@@ -1053,12 +1053,14 @@ async function nodesView() {
             () => change("nodes.task", { node: device.node, task: row.task, allowed: !row.allowed },
               { title: `Turn ${row.title.toLowerCase()} ${row.allowed ? "off" : "on"} on ${device.node}`, after: () => open("nodes") }))) },
       ], rows, { empty: "This device has not reported what it can do", emptyIcon: "limits" }),
-      problems.length ? el("p", { class: "secondary pw-hint",
-        text: problems.map((service) => service.problem || `${service.service} runs other code than the hub; update it`).join(" · ") }) : null);
+      problems.length ? alertBox("warn",
+        problems.map((service) => service.problem || `${service.service} runs other code than the hub; update it`).join(" · ")) : null);
+    card.classList.add("node-card");
+    return card;
   });
   fill(main,
     head("Devices", canSwitch ? subtitle : "Read-only here; switch devices on the server: python scripts/admin.py nodes"),
-    el("div", { class: "grid three" }, ...cards));
+    el("div", { class: "grid two" }, ...cards));
 }
 
 // --- Formatted text --------------------------------------------------------------------------------
