@@ -296,6 +296,8 @@ kbd { font-family: var(--mono); font-size: 0.75rem; padding: 1px 6px; border: 1p
 .task-list { list-style: none; margin: 0; padding: 0; }
 .task-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--border-color); }
 .task-list .task-name { font-size: 0.9rem; overflow-wrap: anywhere; }
+.node-card .opt { margin-top: 14px; }
+.node-card .opt-body p { font-size: 0.85rem; margin-bottom: 10px; }
 
 /* Quick action and filter buttons, colour-coded like the website's. */
 .qbtn {

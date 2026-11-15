@@ -1057,7 +1057,13 @@ async function nodesView() {
         return el("li", {}, el("span", { class: "task-name", text: row.title }), state, button || el("span"));
       })),
       problems.length ? alertBox("warn",
-        problems.map((service) => service.problem || `${service.service} runs other code than the hub; update it`).join(" · ")) : null);
+        problems.map((service) => service.problem || `${service.service} runs other code than the hub; update it`).join(" · ")) : null,
+      // Removing takes its password and keys, which only the hub's command line holds.
+      device.node === "hub" ? null : el("details", { class: "opt" },
+        el("summary", {}, el("span", { text: "Remove this device" })),
+        el("div", { class: "opt-body" },
+          el("p", { class: "secondary", text: "Run this on the hub. Its password and keys stop working at once, its running jobs continue on other devices, and it leaves this list. To only pause it, switch it off above." }),
+          el("pre", { class: "code", text: `python scripts/admin.py nodes revoke ${device.node}` }))));
     card.classList.add("node-card");
     return card;
   });

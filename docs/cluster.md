@@ -101,9 +101,9 @@ RunPod reads audio from the `STORAGE_` bucket, which must be reachable from the 
 | Keep the hub's own GPU for other work | the hub | `python scripts/admin.py nodes off hub` |
 | See every device | the hub | `python scripts/admin.py nodes`, or the admin page's **Devices** |
 | Update a device | the device | `python scripts/server.py update` |
-| Cut a device off at once | the hub | `python scripts/admin.py nodes revoke laptop` |
+| Remove a device, cutting it off at once | the hub | `python scripts/admin.py nodes revoke laptop`; then on the device, if you still have it, `python scripts/server.py stop` and delete `node.env` and `secrets/node/` |
 
-A switch set on the hub lasts until changed, also across reboots. A device stopped with `stop` stays stopped after a reboot; one that was running starts again by itself when Docker starts. The admin web page's **Devices** section has the same switches in read-write mode, with the reason in the audit log; inviting and revoking stay on the command line.
+A switch set on the hub lasts until changed, also across reboots. A device stopped with `stop` stays stopped after a reboot; one that was running starts again by itself when Docker starts. The admin web page's **Devices** section has the same switches in read-write mode, with the reason in the audit log; inviting and removing stay on the command line, because they write the hub's passwords and keys, which the page never reaches. Each device's card shows its remove command.
 
 **Updates:** update the hub first (`git pull`, then `python scripts/server.py restart 5m`), then each device (`git pull`, then `python scripts/server.py update`). A device of an older protocol version waits, taking no job, until it is updated; one of other code but the same protocol runs, and `nodes` says so.
 
