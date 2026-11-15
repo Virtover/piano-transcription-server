@@ -169,7 +169,12 @@ def serve_on_tailnet(run=run_quietly) -> list[str]:
     for port in HUB_PORTS:
         result = run(serve_command(port))
         if result.returncode != 0:
-            reason = (result.stderr or result.stdout or "").strip().splitlines()
+            text = result.stderr or result.stdout or ""
+            if "--operator" in text:
+                # Linux: tailscale serve needs root until this user may manage Tailscale.
+                return ["Tailscale needs your permission once, on this machine: sudo tailscale set --operator=$USER "
+                        "then run this again (python scripts/admin.py nodes hub)"]
+            reason = text.strip().splitlines()
             problems.append(f"Tailscale could not serve port {port} ({reason[-1] if reason else 'no answer'}); "
                             f"run: {' '.join(serve_command(port))}")
     return problems

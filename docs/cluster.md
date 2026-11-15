@@ -35,7 +35,12 @@ The hub should be the most reliable machine, always on. **Linux is the better hu
 
 ## 🚀 Setting up the hub
 
-1. **Install Tailscale** from [tailscale.com](https://tailscale.com/download) and sign in.
+1. **Install Tailscale** from [tailscale.com](https://tailscale.com/download) and sign in. On Linux, also let your user manage it, once:
+
+   ```bash
+   sudo tailscale set --operator=$USER
+   ```
+
 2. **Make this machine the hub:**
 
    ```shell

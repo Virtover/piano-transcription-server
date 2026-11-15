@@ -1046,3 +1046,20 @@ def test_a_lan_hub_publishes_on_that_address_and_unsets_it_again_for_tailscale(t
     nodes.setup_hub(tmp_path, server, run=tailscale)
     values = nodes.env_values(tmp_path / ".env")
     assert values["HUB_ADDRESS"] == "100.88.2.112" and "HUB_BIND_ADDRESS" not in values
+
+
+def test_a_hub_on_linux_is_told_the_one_permission_tailscale_needs(tmp_path, monkeypatch):
+    monkeypatch.setattr(nodes.shutil, "which", lambda name: "/usr/bin/tailscale")
+    write(tmp_path / ".env", "")
+    write(tmp_path / "server.env", "")
+
+    def tailscale(command):
+        if command[:2] == ["tailscale", "ip"]:
+            return subprocess.CompletedProcess(command, 0, "100.88.2.112" + chr(10), "")
+        return subprocess.CompletedProcess(command, 1, "", "Access denied: serve config denied. To not require root, "
+                                           "use 'sudo tailscale set --operator=$USER' once.")
+
+    messages = nodes.setup_hub(tmp_path, server, run=tailscale)
+
+    assert messages[0].startswith("job files") or any("sudo tailscale set --operator=$USER" in m for m in messages)
+    assert sum("--operator" in message for message in messages) == 1
