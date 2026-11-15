@@ -1061,5 +1061,5 @@ def test_a_hub_on_linux_is_told_the_one_permission_tailscale_needs(tmp_path, mon
 
     messages = nodes.setup_hub(tmp_path, server, run=tailscale)
 
-    assert messages[0].startswith("job files") or any("sudo tailscale set --operator=$USER" in m for m in messages)
+    assert any("sudo tailscale set --operator=$USER" in message for message in messages)
     assert sum("--operator" in message for message in messages) == 1
