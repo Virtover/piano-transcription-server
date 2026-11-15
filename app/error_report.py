@@ -248,6 +248,7 @@ class ReportHandler(logging.Handler):
         # When the current outage of Redis began, and when it was last seen.
         self.outage_started: float | None = None
         self.outage_seen = 0.0
+        self.outage_reported = False
 
     def emit(self, record: logging.LogRecord) -> None:
         if record.name == __name__:
@@ -255,10 +256,14 @@ class ReportHandler(logging.Handler):
         if is_redis_outage(record):
             now = self.clock()
             if self.outage_started is None or now - self.outage_seen > OUTAGE_GRACE:
+                # A new outage: none of it reported yet.
                 self.outage_started = now
+                self.outage_reported = False
             self.outage_seen = now
-            if now - self.outage_started < OUTAGE_GRACE:
+            # Once it has lasted, one report for the whole outage, not one a minute.
+            if now - self.outage_started < OUTAGE_GRACE or self.outage_reported:
                 return
+            self.outage_reported = True
         try:
             self.reporter.submit(report_from_record(record))
         except Exception:

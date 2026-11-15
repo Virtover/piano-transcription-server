@@ -456,11 +456,12 @@ def test_a_long_redis_outage_is_reported():
     handler, sent = gated(clock)
     message = "Consumer encountered a connection error: Error 111 connecting to 100.64.0.1:6379. Connection refused."
 
-    for _ in range(5):
+    for _ in range(20):
         handler.emit(outage_record(message))
         clock.now += 40
 
-    assert len(sent) >= 1
+    # One report for the whole outage, not one a minute.
+    assert len(sent) == 1
 
 
 def test_a_new_outage_after_a_quiet_while_waits_again():
@@ -481,5 +482,19 @@ def test_other_errors_are_reported_at_once():
     handler.emit(outage_record("Job 1 failed", name="app.worker.tasks"))
     # A connection refused by something other than Redis.
     handler.emit(outage_record("Could not reach Google Play: Connection refused", name="app.google_play"))
+
+    assert len(sent) == 2
+
+
+def test_the_next_outage_is_reported_again_once():
+    clock = Clock()
+    handler, sent = gated(clock)
+    message = "Consumer encountered a connection error: Error 111 connecting to redis:6379. Connection refused."
+    for _ in range(2):
+        for _ in range(6):
+            handler.emit(outage_record(message))
+            clock.now += 40
+        # Redis answers again for a while.
+        clock.now += error_report.OUTAGE_GRACE + 60
 
     assert len(sent) == 2
