@@ -76,6 +76,13 @@ def _user(args: dict) -> dict:
     return {"user": _text(args, "user")}
 
 
+def _developer(args: dict) -> dict:
+    developer = args.get("developer")
+    if not isinstance(developer, bool):
+        raise AdminError("developer must be true or false")
+    return {"user": _text(args, "user"), "developer": developer}
+
+
 def _block(args: dict) -> dict:
     return {"user": _text(args, "user"), "for": _duration(args)}
 
@@ -173,6 +180,13 @@ ACTIONS: dict[str, Action] = {
         _credit,
         lambda args: users.credit_plan(args["user"], args["minutes"]),
         lambda args, actor, reason: users.credit(args["user"], args["minutes"], actor, reason),
+        reason_required=True,
+    ),
+    "user.developer": Action(
+        "Make an account a developer's",
+        _developer,
+        lambda args: users.developer_plan(args["user"], args["developer"]),
+        lambda args, actor, reason: users.set_developer(args["user"], args["developer"], actor, reason),
         reason_required=True,
     ),
     "limits.pause": Action(

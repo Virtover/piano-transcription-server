@@ -44,6 +44,7 @@ def api_context(tmp_path, monkeypatch, video_sites) -> Iterator[tuple[TestClient
     from app import main
     from app.api.routes import announcements as announcement_routes
     from app.api.routes import billing as billing_routes
+    from app.api.routes import developer as developer_routes
     from app.api.routes import transcriptions as transcription_routes
     from app.billing import Billing
     from app.config import settings
@@ -60,10 +61,12 @@ def api_context(tmp_path, monkeypatch, video_sites) -> Iterator[tuple[TestClient
     billing = Billing(settings.database.path)
     monkeypatch.setattr(billing_routes, "redis", redis)
     monkeypatch.setattr(transcription_routes, "redis", redis)
+    monkeypatch.setattr(developer_routes, "redis", redis)
     monkeypatch.setattr(tasks, "redis", redis)
     monkeypatch.setattr(video_sites, "redis", redis)
     monkeypatch.setattr(billing_routes, "billing", billing)
     monkeypatch.setattr(transcription_routes, "billing", billing)
+    monkeypatch.setattr(developer_routes, "billing", billing)
     monkeypatch.setattr(tasks, "billing", billing)
     announcement_routes.cache.clear()
     def fake_check_video(source_url):

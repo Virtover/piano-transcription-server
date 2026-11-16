@@ -38,14 +38,14 @@ def _take(redis: Redis, key: str, job_id: str, limit: int, job_key) -> bool:
     return True
 
 
-def acquire(redis: Redis, job_id: str, user_id: str, job_key) -> None:
+def acquire(redis: Redis, job_id: str, user_id: str, job_key, per_user: bool = True) -> None:
     """Count a new job against the limits, or raise TooManyJobs. With
     billing off every client is the same anonymous user, so only the total
-    applies."""
+    applies; per_user False, for a developer's account, skips the user's."""
     limits = settings.limits
     if not _take(redis, ALL_JOBS_KEY, job_id, limits.max_active_jobs, job_key):
         raise TooManyJobs("The server is busy; try again when some transcriptions have finished")
-    if settings.billing.provider == "none":
+    if settings.billing.provider == "none" or not per_user:
         return
     # An administrator can change the per-user limit for a while.
     per_user = controls.per_user_job_limit(redis)

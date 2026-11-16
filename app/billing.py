@@ -146,6 +146,9 @@ class Billing:
                     ALTER TABLE transcription_reservations ADD COLUMN IF NOT EXISTS monthly_ended INTEGER NOT NULL DEFAULT 0;
                     ALTER TABLE minute_ledger ADD COLUMN IF NOT EXISTS pool TEXT NOT NULL DEFAULT 'paid'
                         CHECK (pool IN ('paid', 'monthly'));
+                    -- Added with developer accounts: 1 when an administrator made the
+                    -- account a developer's, whose jobs are never charged.
+                    ALTER TABLE users ADD COLUMN IF NOT EXISTS developer INTEGER NOT NULL DEFAULT 0;
                     INSERT INTO billing_state (key, value) VALUES ('minute_ledger_since', '{ledger_since}')
                     ON CONFLICT (key) DO NOTHING
                     ;
@@ -268,6 +271,8 @@ class Billing:
                 connection.execute(
                     "ALTER TABLE users ADD COLUMN monthly_minutes INTEGER NOT NULL DEFAULT 0 CHECK (monthly_minutes >= 0)"
                 )
+            if "developer" not in columns:
+                connection.execute("ALTER TABLE users ADD COLUMN developer INTEGER NOT NULL DEFAULT 0")
             reservation_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(transcription_reservations)")
             }
@@ -453,11 +458,15 @@ class Billing:
             # of a period that has just ended.
             _renew_monthly(connection, user_id)
             user = connection.execute(
-                "SELECT minutes, monthly_minutes FROM users WHERE user_id = ?",
+                "SELECT minutes, monthly_minutes, developer FROM users WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
             held = _held(connection, user_id)
             available = user["minutes"] + user["monthly_minutes"] - held["total"]
+            if user["developer"]:
+                # A developer's jobs hold and cost nothing: without a
+                # reservation, settling and releasing them change nothing.
+                return int(available)
             if available < cost:
                 raise InsufficientMinutes()
             from_monthly = min(cost, max(0, user["monthly_minutes"] - held["monthly"]))
@@ -628,6 +637,32 @@ class Billing:
                 (email.strip().lower(),),
             ).fetchone()
         return user["user_id"] if user else None
+
+    def is_developer(self, user_id: str | None) -> bool:
+        """Whether an administrator made the account a developer's: its jobs
+        are never charged, and the API shows it the developer extras."""
+        if settings.billing.provider == "none" or not user_id:
+            return False
+        with closing(self._connect()) as connection:
+            user = connection.execute(
+                "SELECT developer FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        return bool(user and user["developer"])
+
+    def set_developer(self, user_id: str, developer: bool, actor: str, reason: str | None = None) -> bool:
+        """Make the account a developer's, or end that, with its audit entry
+        in the same transaction. Returns whether anything changed."""
+        with self._connect() as connection:
+            self._begin_write(connection)
+            changed = connection.execute(
+                "UPDATE users SET developer = ? WHERE user_id = ? AND developer != ?",
+                (int(developer), user_id, int(developer)),
+            ).rowcount
+            if changed:
+                _log_admin_action(
+                    connection, actor, "user.developer", user_id, "on" if developer else "off", reason
+                )
+            return bool(changed)
 
     def adjust_minutes(self, user_id: str, minutes: int, reason: str, actor: str | None = None) -> int:
         """Add minutes to a user's balance by hand, or take them away when
@@ -968,8 +1003,9 @@ ADMIN_WEB_WRITES = {
         "admin_actions": "INSERT",
         "admin_web_caps": "INSERT",
         "announcements": "INSERT, UPDATE (content, starts_at, ends_at, updated_at)",
-        # monthly_minutes only to settle the jobs it cancels.
-        "users": "UPDATE (minutes, monthly_minutes)",
+        # monthly_minutes only to settle the jobs it cancels; developer to
+        # make an account a developer's, or end that.
+        "users": "UPDATE (minutes, monthly_minutes, developer)",
         "minute_ledger": "INSERT",
         "transcription_reservations": "UPDATE (status, charged_minutes)",
         "job_diagnostics": "INSERT, UPDATE",

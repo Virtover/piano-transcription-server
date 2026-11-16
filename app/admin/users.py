@@ -1,5 +1,6 @@
 """`user`: one account's balance and history, credits and debits by hand,
-and account deletion. `users find`: accounts by part of their email."""
+developer accounts, and account deletion. `users find`: accounts by part of
+their email."""
 
 from app import controls
 from app.admin.common import (
@@ -57,6 +58,8 @@ def account(who: str) -> dict:
         "monthly_minutes": user["monthly_minutes"],
         "reserved_minutes": held,
         "available_minutes": user["minutes"] + user["monthly_minutes"] - held,
+        # Jobs of a developer's account are never charged.
+        "developer": bool(user.get("developer")),
         "free_minutes": free,
         "blocked": {"reason": block.value or None, "expires_in": block.expires_in} if block else None,
         "purchases": [
@@ -96,7 +99,7 @@ def find(text: str, limit: int = FOUND) -> list[dict]:
     # The text is matched as written: % and _ are not wildcards.
     pattern = "%" + text.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
     rows = tasks.billing.read(
-        "SELECT user_id, email, minutes, monthly_minutes FROM users "
+        "SELECT user_id, email, minutes, monthly_minutes, developer FROM users "
         "WHERE lower(email) LIKE ? ESCAPE '!' OR lower(user_id) LIKE ? ESCAPE '!' "
         "ORDER BY email, user_id LIMIT ?",
         (pattern, pattern, limit),
@@ -128,6 +131,25 @@ def credit(who: str, minutes: int, actor: str, reason: str | None = None) -> dic
     return {**plan, "balance_after": balance}
 
 
+def developer_plan(who: str, developer: bool) -> dict:
+    """What making the account a developer's, or ending that, changes."""
+    user = find_user(who)
+    now = bool(user.get("developer"))
+    if now == developer:
+        state = "already a developer's" if developer else "not a developer's"
+        raise AdminError(f"The account of {user['email'] or user['user_id']} is {state}")
+    return {"user_id": user["user_id"], "email": user["email"], "developer_now": now, "developer": developer}
+
+
+def set_developer(who: str, developer: bool, actor: str, reason: str | None = None) -> dict:
+    """Make the account a developer's, whose jobs are never charged, or end
+    that. The change and its audit entry are written together."""
+    reason = check_reason(reason, required=True)
+    plan = developer_plan(who, developer)
+    tasks.billing.set_developer(plan["user_id"], developer, actor, reason)
+    return plan
+
+
 def delete_plan(who: str) -> dict:
     user = find_user(who)
     return {"user_id": user["user_id"], "email": user["email"], "minutes": user["minutes"]}
@@ -154,6 +176,8 @@ def run_show(args) -> None:
         return
     print(f"User {data['user_id']}")
     print(f"  email: {data['email'] or '-'}")
+    if data["developer"]:
+        print("  DEVELOPER: jobs are never charged")
     print(
         f"  balance: {data['minutes']} paid and {data['monthly_minutes']} monthly minutes, "
         f"{data['reserved_minutes']} reserved by running jobs, {data['available_minutes']} available"
@@ -249,6 +273,25 @@ def run_credit(args) -> None:
     else:
         text = f"Took {-args.minutes} minutes from {label}; balance {result['balance_after']} minutes"
     finish(args, result, text, ["user", plan["user_id"], "credit", str(-args.minutes), "--reason", "<why>"])
+
+
+def run_developer(args) -> None:
+    ask_reason(args)
+    developer = args.state == "on"
+    plan = developer_plan(args.user, developer)
+    label = plan["email"] or plan["user_id"]
+    if developer:
+        say(args, f"{label}: their jobs will no longer be charged, and the apps show them the developer extras.")
+        question = f"Make the account of {label} a developer's?"
+    else:
+        say(args, f"{label}: their jobs will be charged again from their balance.")
+        question = f"End the developer account of {label}?"
+    if not proceed(args, plan, question):
+        return
+    set_developer(args.user, developer, args.by, args.reason)
+    text = f"{label} is now a developer" if developer else f"{label} is no longer a developer"
+    undo = ["user", plan["user_id"], "developer", "off" if developer else "on", "--reason", "<why>"]
+    finish(args, plan, text, undo)
 
 
 def run_delete(args) -> None:

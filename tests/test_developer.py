@@ -1,0 +1,111 @@
+"""Developer accounts: their jobs are never charged nor held to the per-user
+job limit, and they alone see job details and the server's state."""
+import pytest
+
+from app.billing import Billing
+
+
+def bearer(user):
+    return {"Authorization": f"Bearer {user}"}
+
+
+@pytest.fixture
+def billed(api_context):
+    client, settings, billing = api_context
+    settings.billing.provider = "google_play"
+    settings.billing.free_minutes = 3
+    settings.billing.free_minutes_period = "30d"
+    for user in ("dev", "regular"):
+        # The first request creates the account, with its monthly minutes.
+        assert client.get("/api/billing/balance", headers=bearer(user)).status_code == 200
+    assert billing.set_developer("dev", True, "test")
+    return client, settings, billing
+
+
+def submit(client, user):
+    return client.post("/api/transcriptions", headers=bearer(user), json={"source_url": "https://example.com/video"})
+
+
+def test_a_developer_is_never_charged(billed):
+    client, _, billing = billed
+
+    # Each job costs 2 of the 3 minutes a user has.
+    for _ in range(3):
+        assert submit(client, "dev").status_code == 202
+
+    balance = client.get("/api/billing/balance", headers=bearer("dev")).json()
+    assert balance["developer"] is True and balance["minutes"] == 3
+    assert billing.reserved_job_ids() == []
+
+
+def test_a_developer_with_nothing_left_can_still_transcribe(billed):
+    client, _, billing = billed
+    billing.adjust_minutes("dev", -10, "test")
+
+    assert submit(client, "dev").status_code == 202
+    assert submit(client, "regular").status_code == 202
+    assert submit(client, "regular").status_code == 402
+
+
+def test_a_developer_is_not_held_to_the_per_user_limit(billed):
+    client, settings, billing = billed
+    settings.limits.max_active_jobs_per_user = 1
+    billing.adjust_minutes("regular", 100, "test")
+
+    assert [submit(client, "dev").status_code for _ in range(3)] == [202, 202, 202]
+    assert [submit(client, "regular").status_code for _ in range(2)] == [202, 429]
+
+
+def test_only_a_developer_sees_job_details(billed):
+    client, _, _ = billed
+    developer_job = submit(client, "dev").json()["job_id"]
+    regular_job = submit(client, "regular").json()["job_id"]
+
+    details = client.get(f"/api/transcriptions/{developer_job}", headers=bearer("dev")).json()["developer"]
+    assert details["cost_minutes"] == 2 and details["duration_seconds"] == 130.0
+    assert details["outsourced"] is False and details["queued_at"] > 0
+
+    assert client.get(f"/api/transcriptions/{regular_job}", headers=bearer("regular")).json()["developer"] is None
+
+
+def test_the_server_state_is_only_for_developers(billed):
+    client, _, _ = billed
+    submit(client, "dev")
+
+    assert client.get("/api/developer/server").status_code == 401
+    assert client.get("/api/developer/server", headers=bearer("regular")).status_code == 403
+
+    state = client.get("/api/developer/server", headers=bearer("dev")).json()
+    assert state["active_jobs"] == 1
+    assert state["backends"]["local"]["waiting"] == 1
+    assert state["paused"] is False and state["outsourcing"] is False
+
+
+def test_ending_a_developer_account_charges_again(billed):
+    client, _, billing = billed
+
+    assert billing.set_developer("dev", False, "test")
+    assert not billing.set_developer("dev", False, "test")
+
+    assert submit(client, "dev").status_code == 202
+    balance = client.get("/api/billing/balance", headers=bearer("dev")).json()
+    assert (balance["minutes"], balance["developer"]) == (1, False)
+    assert [row["action"] for row in billing.read("SELECT action FROM admin_actions ORDER BY id")] == [
+        "user.developer", "user.developer",
+    ]
+
+
+def test_an_old_database_gets_the_developer_column(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE users (user_id TEXT PRIMARY KEY, email TEXT UNIQUE, minutes INTEGER NOT NULL DEFAULT 0, "
+            "free_grant_at INTEGER NOT NULL DEFAULT 0)"
+        )
+        connection.execute("INSERT INTO users (user_id, minutes) VALUES ('old', 5)")
+
+    billing = Billing(str(path))
+
+    assert billing.read("SELECT developer FROM users WHERE user_id = 'old'")[0]["developer"] == 0
