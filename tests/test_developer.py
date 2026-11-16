@@ -140,6 +140,22 @@ def test_recovery_after_a_crash_leaves_a_developers_jobs_alone(billed):
     assert client.get("/api/billing/balance", headers=bearer("dev")).json()["minutes"] == 3
 
 
+def test_a_developers_job_ended_on_a_cluster_node_settles_once_and_free(billed):
+    client, _, billing = billed
+    from app import cluster
+    from app.api.routes import transcriptions
+    from app.worker import tasks
+    job_id = submit(client, "dev").json()["job_id"]
+    # A node never reaches the database: it marks the job ended and names it for the hub.
+    transcriptions.redis.hset(tasks.job_key(job_id), "status", "completed")
+    cluster.HubBilling(transcriptions.redis).settle_success(job_id)
+
+    assert tasks.settle_node_jobs() == 1
+    # Settled for good: not looked at again, whatever it holds (nothing).
+    assert transcriptions.redis.zcard(cluster.SETTLE_KEY) == 0
+    assert client.get("/api/billing/balance", headers=bearer("dev")).json()["minutes"] == 3
+
+
 def test_ending_a_developer_account_mid_job_does_not_charge_that_job(billed):
     client, _, billing = billed
     job_id = submit(client, "dev").json()["job_id"]
