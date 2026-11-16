@@ -95,6 +95,61 @@ def test_ending_a_developer_account_charges_again(billed):
     ]
 
 
+def test_a_database_that_cannot_be_reached_leaves_no_placeholder(billed, monkeypatch):
+    client, _, billing = billed
+    from app.api.routes import transcriptions
+    from app.worker import tasks
+
+    down = [True]
+    reachable = billing.is_developer
+
+    def unreachable(user_id):
+        if down[0]:
+            raise ConnectionError("database down")
+        return reachable(user_id)
+
+    monkeypatch.setattr(billing, "is_developer", unreachable)
+    with pytest.raises(ConnectionError):
+        client.post(
+            "/api/transcriptions",
+            headers={**bearer("dev"), "Idempotency-Key": "retry-me"},
+            json={"source_url": "https://example.com/video"},
+        )
+    assert list(transcriptions.redis.scan_iter(match=tasks.job_key("*"))) == []
+
+    # Back up: the same submission goes through instead of waiting out a placeholder.
+    down[0] = False
+    response = client.post(
+        "/api/transcriptions",
+        headers={**bearer("dev"), "Idempotency-Key": "retry-me"},
+        json={"source_url": "https://example.com/video"},
+    )
+    assert response.status_code == 202
+
+
+def test_recovery_after_a_crash_leaves_a_developers_jobs_alone(billed):
+    client, _, billing = billed
+    job_id = submit(client, "dev").json()["job_id"]
+    from app.worker import tasks
+
+    # What the API runs at start, after a crash or a power cut: nothing is held, so nothing changes.
+    tasks.reconcile_billing()
+    billing.settle_success(job_id)
+    billing.release(job_id)
+
+    assert client.get("/api/billing/balance", headers=bearer("dev")).json()["minutes"] == 3
+
+
+def test_ending_a_developer_account_mid_job_does_not_charge_that_job(billed):
+    client, _, billing = billed
+    job_id = submit(client, "dev").json()["job_id"]
+
+    billing.set_developer("dev", False, "test")
+    billing.settle_success(job_id)
+
+    assert client.get("/api/billing/balance", headers=bearer("dev")).json()["minutes"] == 3
+
+
 def test_an_old_database_gets_the_developer_column(tmp_path):
     import sqlite3
 

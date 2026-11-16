@@ -30,6 +30,7 @@ DATABASE_PROBES = {
     "read-only": [
         "UPDATE billing_state SET value = value WHERE false",
         "UPDATE users SET minutes = minutes WHERE false",
+        "UPDATE users SET developer = developer WHERE false",
     ],
     "read-write": [
         "UPDATE billing_state SET value = value WHERE false",

@@ -245,14 +245,17 @@ def hold_place(job_id: str, user_id: str, status: str) -> None:
     against the job limits. The placeholder expires if the API stops first.
     Raises SubmissionExists if the job already exists."""
     key = job_key(job_id)
+    # A developer tests with many jobs at once; the total still applies.
+    # Asked before anything is stored, so a database that cannot be reached
+    # leaves no placeholder behind to refuse the retry.
+    per_user = not billing.is_developer(user_id)
     # Claimed atomically, so two copies of a submission cannot both queue it.
     if not redis.hsetnx(key, "status", status):
         raise SubmissionExists()
     redis.hset(key, "user_id", user_id)
     redis.expire(key, PLACEHOLDER_TTL)
     try:
-        # A developer tests with many jobs at once; the total still applies.
-        job_limits.acquire(redis, job_id, user_id, job_key, per_user=not billing.is_developer(user_id))
+        job_limits.acquire(redis, job_id, user_id, job_key, per_user=per_user)
     except job_limits.TooManyJobs as error:
         redis.delete(key)
         raise HTTPException(status_code=429, detail=str(error), headers={"Retry-After": "60"}) from error

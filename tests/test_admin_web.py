@@ -492,8 +492,9 @@ def test_credentials_that_may_write_are_refused(api_context):
     # PostgreSQL would.
     problems = least_privilege_problems("read-only")
 
-    assert len(problems) == 4
+    assert len(problems) == 5
     assert all("admin-read-only" in problem for problem in problems)
+    assert any("SET developer" in problem for problem in problems)
     assert len(least_privilege_problems("read-write")) == 3
     assert not tasks.redis.exists("controls:admin_web_probe")
 
