@@ -141,7 +141,7 @@ python scripts/admin.py nodes invite desktop --tasks transcribe,arrange
 python scripts/admin.py nodes revoke laptop
 ```
 
-* **`nodes`** lists every device: whether it takes work, its allowed tasks, its public address, and each service's state, what it runs now, and when it was last seen.
+* **`nodes`** lists every device: whether it takes work, its allowed tasks, its public address, what its jobs run on (each GPU's name and VRAM, free VRAM when the worker started, or the processor, cores, and RAM), how many jobs it takes at once and whether arrangements share those places, and each service's state, what it runs now, and when it was last seen.
 * **`off`** and **`on`** stop a device taking work, or let it again; running jobs finish either way. **`allow`** and **`deny`** change its tasks: `transcribe`, `arrange`, `dispatch`, `check`, or `all`. They apply within 10 seconds and are written to the audit log.
 * **`invite`**, **`revoke`**, and **`hub`** run on the host, because they write files in `secrets/`; see [Home cluster](cluster.md).
 

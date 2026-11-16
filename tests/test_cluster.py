@@ -15,7 +15,8 @@ import pytest
 from app import cluster, video_check, video_sites
 from app.errors import SourceTemporarilyUnavailable, SourceVideoUnavailable
 from app.transcription.cancellation import TranscriptionCancelled
-from app.worker import supervisor, tasks
+from app.worker import launcher, supervisor, tasks
+from app.worker.places import PLACES_VARIABLE
 
 
 @pytest.fixture(autouse=True)
@@ -773,7 +774,8 @@ def make_supervisor(monkeypatch, role="local", offered=("transcribe", "arrange")
         started.append(process)
         return process
 
-    plan = types.SimpleNamespace(threads=3, cpu_threads=None, summary="1 GPU(s)", arrangement=True, warnings=())
+    plan = launcher.WorkerPlan(processes=1, threads=6, cpu_threads=None, summary="1 GPU(s)", arrangement=True,
+                               places=3)
     monkeypatch.setattr(supervisor.Supervisor, "capabilities", lambda self: list(offered))
     monkeypatch.setattr(supervisor.shutil, "which", lambda name: "/usr/bin/dramatiq")
     monkeypatch.setattr(supervisor, "DRAIN_FILE", Path(supervisor.__file__).parent / "no-such-drain-file")
@@ -796,6 +798,9 @@ def test_the_supervisor_runs_what_the_switches_allow(monkeypatch):
 
     assert [queues(process) for process in started] == [["default", "arrangement"]]
     assert started[0].env[supervisor.SERVICE_ENVIRONMENT] == "worker"
+    # Its places on the models, and no more prefetched jobs than threads.
+    assert started[0].env[PLACES_VARIABLE] == "3"
+    assert started[0].env["dramatiq_queue_prefetch"] == "6"
     status = cluster.statuses(redis)[0]
     assert status["running"] == ["transcribe", "arrange"]
     assert status["node"] == "hub" and status["service"] == "worker"
@@ -1105,3 +1110,37 @@ def test_a_node_invited_without_dispatch_does_not_offer_it_or_complain(monkeypat
     monkeypatch.setattr(supervisor, "OFFERED", {"node": ("dispatch",)})
     assert supervisor.Supervisor.capabilities(instance) == []
     assert instance.problem == ""
+
+
+def test_each_device_shows_what_its_jobs_run_on_and_how_many_at_once(api_context, capsys):
+    from app.admin import nodes
+
+    cluster.register(tasks.redis, "laptop", ["transcribe"])
+    gpu = {"kind": "gpu", "places": 3, "limited_by": "CPU cores", "arrangements": True, "gpus": [
+        {"index": 0, "name": "NVIDIA GeForce RTX 3060 Ti", "vram_mib": 8192, "free_mib": 5857, "jobs": 3,
+         "arrangements": True},
+    ]}
+    cpu = {"kind": "cpu", "places": 2, "arrangements": False, "name": "Intel(R) Core(TM) i5", "cores": 4,
+           "threads": 2, "ram_mib": 16384}
+    cluster.publish_status(tasks.redis, "hub", "worker", {"state": "running", "hardware": gpu})
+    cluster.publish_status(tasks.redis, "laptop", "worker", {"state": "running", "hardware": cpu})
+
+    devices = {device["node"]: device for device in nodes.overview()["devices"]}
+    nodes.run_list(type("Args", (), {"json": False})())
+    text = capsys.readouterr().out
+
+    assert devices["hub"]["services"][0]["hardware"] == gpu
+    assert "3 place(s) at once (fewer than fit in VRAM: CPU cores); transcriptions and arrangements share them" in text
+    assert "GPU 0: NVIDIA GeForce RTX 3060 Ti, 8.0 GiB VRAM, 5.7 GiB free at start, 3 job(s) fit, arrangements" in text
+    assert "2 place(s) at once; transcriptions only" in text
+    assert "CPU: Intel(R) Core(TM) i5, 4 core(s), 2 thread(s) for the models, 16.0 GiB RAM" in text
+
+
+def test_the_supervisor_publishes_its_hardware(monkeypatch):
+    instance, redis, _, _ = make_supervisor(monkeypatch)
+    instance.local_plan = launcher.WorkerPlan(processes=1, threads=6, cpu_threads=None, summary="1 GPU(s)",
+                                              arrangement=True, places=3, hardware={"kind": "gpu", "places": 3})
+
+    instance.step()
+
+    assert cluster.statuses(redis)[0]["hardware"] == {"kind": "gpu", "places": 3}

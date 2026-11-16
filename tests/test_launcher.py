@@ -4,6 +4,7 @@ import types
 import pytest
 
 from app.worker import launcher
+from app.worker.places import PLACES_VARIABLE
 
 GiB = 1024**3
 
@@ -18,6 +19,7 @@ def cores(monkeypatch):
     # machine, or earlier tests, left free.
     class Memory:
         available = 64 * 1024**3
+        total = 64 * 1024**3
 
     # A stand-in module, so that this also runs where psutil is not installed.
     monkeypatch.setattr(
@@ -33,10 +35,18 @@ def capacity(*jobs):
     return [(index, count, 6 * GiB, 8 * GiB) for index, count in enumerate(jobs)]
 
 
+@pytest.fixture(autouse=True)
+def launcher_environment(monkeypatch):
+    # main() writes Dramatiq's environment into os.environ: undone after each test.
+    for name in (PLACES_VARIABLE, "dramatiq_queue_prefetch", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        monkeypatch.setenv(name, "")
+
+
 def test_cpu_mode_threads_follow_batch_size(default_settings, cores):
     plan = launcher.plan_worker(None)
 
-    assert (plan.processes, plan.threads, plan.cpu_threads) == (1, 6, 6)
+    # On the CPU, one thread per place: the last steps need the same cores.
+    assert (plan.processes, plan.threads, plan.cpu_threads, plan.places) == (1, 6, 6, 6)
     assert "no CUDA GPU" in plan.summary
 
 
@@ -59,7 +69,9 @@ def test_cpu_threads_are_capped_by_physical_cores(default_settings, cores):
 def test_gpu_mode_threads_follow_vram_capacity(default_settings, cores):
     plan = launcher.plan_worker(capacity(3, 2))
 
-    assert (plan.threads, plan.cpu_threads) == (5, None)
+    # A place per job that fits in VRAM, and a second thread for each, for
+    # jobs past their model step.
+    assert (plan.places, plan.threads, plan.cpu_threads) == (5, 10, None)
     assert "2 GPU(s), up to 5 job(s) by VRAM" in plan.summary
 
 
@@ -75,11 +87,13 @@ def test_enforce_cpu_ignores_gpu_capacity(default_settings, cores):
 
 def test_gpu_mode_respects_max_concurrency_and_cores(default_settings, cores):
     default_settings.worker.max_concurrency = 2
-    assert launcher.plan_worker(capacity(5)).threads == 2
+    plan = launcher.plan_worker(capacity(5))
+    assert (plan.places, plan.hardware["limited_by"]) == (2, "WORKER_MAX_CONCURRENCY")
 
     default_settings.worker.max_concurrency = None
     cores(3)
-    assert launcher.plan_worker(capacity(5)).threads == 3
+    plan = launcher.plan_worker(capacity(5))
+    assert (plan.places, plan.hardware["limited_by"]) == (3, "CPU cores")
 
 
 def test_gpu_without_room_falls_back_to_cpu(default_settings, cores):
@@ -99,7 +113,20 @@ def test_main_passes_resolved_values_to_dramatiq(default_settings, cores, monkey
 
     assert calls == [["/usr/bin/dramatiq", "app.worker.tasks", "--processes", "1", "--threads", "6", "--queues", "default"]]
     assert os.environ["OMP_NUM_THREADS"] == "6"
+    assert os.environ[PLACES_VARIABLE] == "6"
     assert "WORKER_THREADS" not in os.environ
+
+
+def test_main_gives_dramatiq_the_places_and_a_prefetch_of_its_threads(default_settings, cores, monkeypatch):
+    default_settings.worker.arrangement = False
+
+    args = run_main(monkeypatch, capacity(3))
+
+    assert args[args.index("--threads") + 1] == "6"
+    assert os.environ[PLACES_VARIABLE] == "3"
+    # Not Dramatiq's default of twice the threads per queue, which would
+    # hold jobs here that a free device could run.
+    assert os.environ["dramatiq_queue_prefetch"] == "6"
 
 
 def test_remote_worker_idles_when_outsourcing_is_off(default_settings, monkeypatch, capsys):
@@ -203,3 +230,26 @@ def test_main_prints_the_warning_when_no_gpu_has_room(default_settings, cores, m
     run_main(monkeypatch, [(0, 1, 2 * GiB, 8 * GiB)])
 
     assert "Warning: WORKER_ARRANGEMENT is on" in capsys.readouterr().out
+
+
+def test_a_gpu_plan_names_the_gpu_and_its_vram(default_settings, cores, monkeypatch):
+    default_settings.worker.arrangement = True
+    monkeypatch.setattr(launcher, "cuda_device_names", lambda: {0: "NVIDIA GeForce RTX 3060 Ti"})
+
+    plan = launcher.plan_worker([(0, 3, 6 * GiB, 8 * GiB)])
+
+    assert "GPU 0 (NVIDIA GeForce RTX 3060 Ti, 8.00 GiB): 3 job(s)" in plan.summary
+    assert plan.hardware == {"kind": "gpu", "places": 3, "limited_by": None, "arrangements": True, "gpus": [
+        {"index": 0, "name": "NVIDIA GeForce RTX 3060 Ti", "vram_mib": 8192, "free_mib": 6144, "jobs": 3,
+         "arrangements": True},
+    ]}
+
+
+def test_a_cpu_plan_names_the_processor_and_its_ram(default_settings, cores, monkeypatch):
+    monkeypatch.setattr(launcher, "cpu_model_name", lambda: "Intel(R) Core(TM) i7-10700K")
+
+    hardware = launcher.plan_worker(None).hardware
+
+    assert hardware["kind"] == "cpu" and hardware["places"] == 6
+    assert (hardware["name"], hardware["cores"], hardware["threads"], hardware["ram_mib"]) == (
+        "Intel(R) Core(TM) i7-10700K", 8, 6, 64 * 1024)

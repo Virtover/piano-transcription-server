@@ -539,9 +539,11 @@ def transcribe_piano(
     output_path: Path,
     progress_callback: ProgressCallback | None = None,
     cancellation_callback: CancellationCallback | None = None,
+    model_done_callback: Callable[[], None] | None = None,
 ):
     """
-    Transcribe one WAV file to MIDI.
+    Transcribe one WAV file to MIDI. model_done_callback is called once
+    Transkun is done with it, before the tempo map and the MIDI file.
 
     Progress range:
 
@@ -604,6 +606,8 @@ def transcribe_piano(
         progress_callback=report_progress,
         cancellation_callback=cancellation_callback,
     )
+    if model_done_callback:
+        model_done_callback()
 
     if progress_callback:
         progress_callback(0.96)

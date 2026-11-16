@@ -1013,6 +1013,17 @@ const NODE_TASKS = [
   ["check", "Link checks for the hub"],
 ];
 
+// What a device's jobs run on: each GPU with its VRAM, or the processor and its RAM.
+function hardwareLines(hardware) {
+  const gib = (mib) => typeof mib === "number" ? `${(mib / 1024).toFixed(1)} GiB` : "?";
+  if (hardware.kind === "gpu") {
+    return (hardware.gpus || []).map((gpu) => [`GPU ${gpu.index}`,
+      `${gpu.name || "name unknown"} · ${gib(gpu.vram_mib)} VRAM, ${gib(gpu.free_mib)} free at start · ${gpu.jobs} jobs fit`]);
+  }
+  return [["CPU", `${hardware.name || "name unknown"} · ${hardware.cores} cores, ${hardware.threads} for the models`
+    + (hardware.ram_mib ? ` · ${gib(hardware.ram_mib)} RAM` : "")]];
+}
+
 async function nodesView() {
   const subtitle = "What each device may do; a switched-off task finishes its running jobs first";
   fill(main, head("Devices", subtitle), skeleton("dashboard"));
@@ -1037,6 +1048,10 @@ async function nodesView() {
       task, title, allowed: allowed.includes(task), running: running.has(task), offered: offered.has(task),
     }));
     const problems = device.services.filter((service) => service.problem || (service.code && !service.same_code));
+    const hardware = device.services.map((service) => service.hardware).find((item) => item && item.kind) || null;
+    // Places on the models, which transcriptions and arrangements share.
+    const places = (task) => !hardware || !["transcribe", "arrange"].includes(task) ? null
+      : task === "arrange" && !hardware.arrangements ? null : hardware.places;
     const card = iconCard("limits", color, device.node, device.address ? `public address ${device.address}` + (device.shares_address_with.length
       ? `, shared with ${device.shares_address_with.join(", ")}: video sites limit them together` : "")
       : "public address not learned yet",
@@ -1054,8 +1069,16 @@ async function nodesView() {
           : qbtn(row.allowed ? "Turn off" : "Turn on", row.allowed ? "c-grey" : "c-green",
             () => change("nodes.task", { node: device.node, task: row.task, allowed: !row.allowed },
               { title: `Turn ${row.title.toLowerCase()} ${row.allowed ? "off" : "on"} on ${device.node}`, after: () => open("nodes") }));
-        return el("li", {}, el("span", { class: "task-name", text: row.title }), state, button || el("span"));
+        const count = places(row.task);
+        return el("li", {}, el("span", { class: "task-name" }, row.title,
+          count ? el("small", { class: "secondary", text: ` · ${count} at once` }) : null), state, button || el("span"));
       })),
+      hardware ? el("dl", { class: "hardware" }, hardwareLines(hardware).flatMap(([label, text]) => [
+        el("dt", { text: label }), el("dd", { text })])) : null,
+      hardware && hardware.arrangements ? el("p", { class: "secondary hardware-note",
+        text: `Transcriptions and arrangements share the ${hardware.places} places`
+          + (hardware.limited_by ? `, fewer than fit in VRAM because of ${hardware.limited_by}` : "")
+          + "; a place is free again once a job's model step ends." }) : null,
       problems.length ? alertBox("warn",
         problems.map((service) => service.problem || `${service.service} runs other code than the hub; update it`).join(" · ")) : null,
       // Removing takes its password and keys, which only the hub's command line holds.

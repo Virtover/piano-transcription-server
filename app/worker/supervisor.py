@@ -180,10 +180,7 @@ class Supervisor:
             if task in allowed
         )
         if local_queues and self.local_plan is not None:
-            environment = {SERVICE_ENVIRONMENT: "worker"}
-            if self.local_plan.cpu_threads:
-                environment.update(OMP_NUM_THREADS=str(self.local_plan.cpu_threads),
-                                   MKL_NUM_THREADS=str(self.local_plan.cpu_threads))
+            environment = {SERVICE_ENVIRONMENT: "worker", **self.local_plan.environment()}
             wanted["local"] = (local_queues, self.local_plan.threads, environment)
         if "check" in allowed:
             wanted["checks"] = ((launcher.CHECK_QUEUE,), CHECK_THREADS, {SERVICE_ENVIRONMENT: "worker"})
@@ -307,6 +304,7 @@ class Supervisor:
                 "running": self.running(),
                 "stopping": [child.group for child in self.children.values() if child.stopping],
                 "summary": summary,
+                "hardware": self.local_plan.hardware if self.local_plan else {},
                 "problem": self.problem,
                 "egress": cluster.egress(self.redis) or "",
                 "address": cluster.egress_address(self.redis, self.node) or "",

@@ -169,7 +169,8 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_media.py` | `ffprobe` checks: accepted and rejected formats, files without audio, and playlist files. Real-file tests need `ffmpeg`. |
 | `test_pipeline_upload.py` | Converting uploaded audio and video to the WAV format the model needs. Needs the worker image. |
 | `test_config.py` | Settings parsing, durations, deprecated names, unknown-name warnings, secrets, startup validation, the `check` and `describe` commands, and drift guards against `.env.example` and these docs. |
-| `test_launcher.py` | Worker resources resolved at startup: threads, CPU threads, and the values passed to Dramatiq. |
+| `test_launcher.py` | Worker resources resolved at startup: places, threads, CPU threads, and the values passed to Dramatiq. |
+| `test_places.py` | Places on a device's models: in order of arrival, given back when the model step ends or the job fails; a job without a place stays queued, goes to a device with a free one, or is queued again when the worker stops; the heartbeat reports places. |
 | `test_job_storage.py` | `JOB_STORAGE=s3` with an in-memory bucket: submissions kept only in the bucket, workers' scratch folders, results and signed download links, cleanup, account deletion, settings, requirements, and the online check. |
 | `test_managed_services.py` | Redis and PostgreSQL outside the stack: TLS options, warnings about unencrypted connections, the online check without `CONFIG`, backups turned off, and their requirements. |
 | `test_metrics.py` | `GET /metrics`: its token, waiting and running jobs per queue, the oldest wait, worker capacity, the text format, and the requests in flight. |

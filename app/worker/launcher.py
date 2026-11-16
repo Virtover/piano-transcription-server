@@ -3,18 +3,24 @@ import shutil
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.config import ensure_valid, settings
 from app.error_report import SERVICE_ENVIRONMENT
+from app.worker.places import GPU_THREADS_PER_PLACE, PLACES_VARIABLE
 from app.transcription.device import (
     arrangement_fits,
     cpu_batch_size,
+    cpu_model_name,
     cpu_thread_count,
+    cuda_device_names,
     cuda_job_capacities,
     gpu_batch_size,
     physical_cpu_count,
+    total_ram_bytes,
 )
+
+MiB = 1024**2
 
 
 # Must match the queue names in app.worker.tasks, which is not imported here
@@ -37,11 +43,33 @@ class WorkerPlan:
     warnings: tuple[str, ...] = ()
     # Whether it consumes the arrangement queue (WORKER_ARRANGEMENT, and room on a GPU).
     arrangement: bool = False
+    # Local jobs before or in their model step at once (app.worker.places);
+    # None for the remote dispatcher.
+    places: int | None = None
+    # What the jobs run on, for the admin page and `admin.py nodes`.
+    hardware: dict = field(default_factory=dict)
+
+    def environment(self) -> dict[str, str]:
+        """What Dramatiq's process needs in its environment for this plan."""
+        environment = {}
+        if self.cpu_threads:
+            # Read by the OpenMP and MKL libraries themselves.
+            environment.update(OMP_NUM_THREADS=str(self.cpu_threads), MKL_NUM_THREADS=str(self.cpu_threads))
+        if self.places:
+            environment[PLACES_VARIABLE] = str(self.places)
+            # Dramatiq's default, twice the threads per queue, would hold
+            # jobs here that a free device elsewhere could run.
+            environment["dramatiq_queue_prefetch"] = str(self.threads)
+        return environment
 
 
-def gpu_capacity(capacities: list[tuple[int, int, int, int]] | None) -> tuple[int, int, str] | None:
+def gpu_capacity(
+    capacities: list[tuple[int, int, int, int]] | None,
+    names: dict[int, str] | None = None,
+) -> tuple[int, int, str] | None:
     if not capacities:
         return None
+    names = names or {}
 
     device_capacities = [capacity for _, capacity, _, _ in capacities]
     total_capacity = sum(device_capacities)
@@ -49,10 +77,11 @@ def gpu_capacity(capacities: list[tuple[int, int, int, int]] | None) -> tuple[in
         return None
 
     parts = []
-    for index, capacity, free_memory, _ in capacities:
+    for index, capacity, free_memory, total_memory in capacities:
         batch = f"batch {gpu_batch_size(capacity)[0]}, " if capacity > 0 else ""
         arranges = "arrangements, " if capacity > 0 and arrangement_fits(free_memory) else ""
-        parts.append(f"GPU {index}: {capacity} job(s), {batch}{arranges}{free_memory / 1024**3:.2f} GiB free")
+        name = f" ({names[index]}, {total_memory / 1024**3:.2f} GiB)" if names.get(index) else ""
+        parts.append(f"GPU {index}{name}: {capacity} job(s), {batch}{arranges}{free_memory / 1024**3:.2f} GiB free")
     summary = ", ".join(parts)
     return len(device_capacities), total_capacity, summary
 
@@ -60,7 +89,8 @@ def gpu_capacity(capacities: list[tuple[int, int, int, int]] | None) -> tuple[in
 def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPlan:
     if settings.worker.enforce_cpu:
         capacities = None
-    gpu = gpu_capacity(capacities)
+    names = cuda_device_names() if capacities else {}
+    gpu = gpu_capacity(capacities, names)
     if gpu:
         device_count, gpu_jobs, gpu_summary = gpu
         warnings = tuple(
@@ -68,9 +98,11 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPla
             for index, capacity, _, _ in capacities
             if capacity > 0 and (warning := gpu_batch_size(capacity)[1])
         )
-        threads = min(physical_cpu_count(), gpu_jobs)
-        if settings.worker.max_concurrency:
-            threads = min(threads, settings.worker.max_concurrency)
+        places, limited_by = gpu_jobs, None
+        if physical_cpu_count() < places:
+            places, limited_by = physical_cpu_count(), "CPU cores"
+        if settings.worker.max_concurrency and settings.worker.max_concurrency < places:
+            places, limited_by = settings.worker.max_concurrency, "WORKER_MAX_CONCURRENCY"
         arrangement = any(
             capacity > 0 and arrangement_fits(free_memory) for _, capacity, free_memory, _ in capacities
         )
@@ -80,11 +112,32 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPla
                          "beside the reserves); arrangement jobs go to other workers or RunPod",)
         return WorkerPlan(
             processes=1,
-            threads=threads,
+            # The others finish jobs past their model step (app.worker.places).
+            threads=places * GPU_THREADS_PER_PLACE,
             cpu_threads=None,
             summary=f"{device_count} GPU(s), up to {gpu_jobs} job(s) by VRAM ({gpu_summary})",
             warnings=warnings,
             arrangement=arrangement,
+            places=places,
+            hardware={
+                "kind": "gpu",
+                "places": places,
+                # Why fewer places than jobs fit in VRAM, if so.
+                "limited_by": limited_by,
+                "arrangements": arrangement,
+                "gpus": [
+                    {
+                        "index": index,
+                        "name": names.get(index) or "",
+                        "vram_mib": round(total_memory / MiB),
+                        # At the worker's start, before it loaded its models.
+                        "free_mib": round(free_memory / MiB),
+                        "jobs": capacity,
+                        "arrangements": capacity > 0 and arrangement_fits(free_memory),
+                    }
+                    for index, capacity, free_memory, total_memory in capacities
+                ],
+            },
         )
 
     return WorkerPlan(
@@ -93,6 +146,18 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPla
         cpu_threads=cpu_thread_count(),
         summary=f"{physical_cpu_count()} CPU(s), no CUDA GPU detected, batch {cpu_batch_size()}",
         arrangement=settings.worker.arrangement,
+        # On the CPU, the last steps compete with the model for the same
+        # cores: a thread per place.
+        places=cpu_batch_size(),
+        hardware={
+            "kind": "cpu",
+            "places": cpu_batch_size(),
+            "arrangements": settings.worker.arrangement,
+            "name": cpu_model_name(),
+            "cores": physical_cpu_count(),
+            "threads": cpu_thread_count(),
+            "ram_mib": round(ram / MiB) if (ram := total_ram_bytes()) else None,
+        },
     )
 
 
@@ -164,10 +229,7 @@ def main(arguments: list[str] | None = None) -> None:
 
     # Read by app.worker.tasks in each Dramatiq process, which reports its errors.
     os.environ[SERVICE_ENVIRONMENT] = "remote-worker" if role == "remote" else "worker"
-    if plan.cpu_threads:
-        # Read by the OpenMP and MKL libraries themselves.
-        os.environ["OMP_NUM_THREADS"] = str(plan.cpu_threads)
-        os.environ["MKL_NUM_THREADS"] = str(plan.cpu_threads)
+    os.environ.update(plan.environment())
     for warning in plan.warnings:
         print(f"Warning: {warning}", flush=True)
     print(

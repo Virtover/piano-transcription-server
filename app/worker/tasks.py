@@ -24,6 +24,7 @@ from app.transcription.audio import check_midi
 from app.errors import UserFacingError
 from app.transcription.cancellation import TranscriptionCancelled
 from app.transcription.styles import DEFAULT_STYLE, STYLES
+from app.worker.places import Place, Places, configured as configured_places
 
 
 # Uploaded files are stored in the job directory under this name.
@@ -51,6 +52,9 @@ CHECK_QUEUE = "checks"
 # this far apart; then it runs the job itself.
 MAX_PASSES = 30
 PASS_DELAY_MS = 2000
+# A job waiting for a place on this device's models looks this often for
+# another device with a free one.
+PLACE_CHECK_INTERVAL = 2.0
 # Moves of one job to another device's address after a video site refused one.
 MAX_ADDRESS_MOVES = 3
 # The attempt token of a job queued again after its worker vanished: no
@@ -671,6 +675,7 @@ class JobContext:
         max_seconds: float | None = None,
         arrangement_style: str | None = None,
         token: str | None = None,
+        model_done: Callable[[], None] | None = None,
     ):
         self.job_id = job_id
         self.output_dir = output_dir
@@ -681,6 +686,9 @@ class JobContext:
         self.arrangement_style = arrangement_style
         # This attempt's token: it stops once another attempt owns the job.
         self.token = token
+        # Called once the job's model step has ended: it gives back the
+        # job's place on this device's models (app.worker.places).
+        self.model_done = model_done or (lambda: None)
 
     def is_cancelled(self) -> bool:
         return is_job_cancelled(self.job_id, self.token)
@@ -719,19 +727,12 @@ class AverageDuration:
 local_job_duration = AverageDuration()
 
 
-class RunningJobs:
-    """Local jobs this worker process runs now, for its heartbeat."""
-
-    def __init__(self):
-        self.count = 0
-        self._lock = threading.Lock()
-
-    def add(self, change: int) -> None:
-        with self._lock:
-            self.count = max(0, self.count + change)
-
-
-local_jobs_running = RunningJobs()
+# Set in a worker that consumes a local queue: the places on this device's
+# models (app.worker.places). None elsewhere, as in the API.
+model_places: Places | None = None
+# Set as the worker shuts down: a job still waiting for a place is queued
+# again, for another worker.
+worker_stopping = threading.Event()
 # Set by the heartbeat in a worker that consumes a local queue: how busy
 # this device is (app.worker.load). None elsewhere, as in the API.
 load_monitor = None
@@ -779,6 +780,66 @@ def roomier_device(job: dict[str, str], task: str) -> str | None:
     return None
 
 
+def restart_time_limit() -> None:
+    """Start Dramatiq's time limit of this thread's message again: the wait
+    for a place is not the job's time. The local actors use the default limit."""
+    from dramatiq.middleware import TimeLimit
+
+    for middleware in broker.middleware:
+        manager = getattr(middleware, "manager", None) if isinstance(middleware, TimeLimit) else None
+        if manager is not None:
+            manager.add_timeout(threading.get_ident(), middleware.time_limit)
+
+
+def wait_for_place(job_id: str) -> tuple[Place | None, bool]:
+    """A place on this device's models for a local job, before it is
+    claimed. While none is free, the job stays queued, and goes to another
+    device as soon as that one has a free place; it is queued again if this
+    worker stops. (the place, None) or (None, whether the job was sent on)."""
+    reasons: list[str] = []
+
+    def give_up() -> bool:
+        if worker_stopping.is_set():
+            reasons.append("this worker is stopping")
+            return True
+        try:
+            job = redis.hgetall(job_key(job_id))
+            if job.get("status") != "queued":
+                # Cancelled, or claimed by another delivery of its message.
+                return True
+            if not cluster.has_nodes(redis) or int(job.get("passes") or 0) >= MAX_PASSES:
+                return False
+            other = roomier_device(job, job_task(job, "local"))
+            if other:
+                reasons.append(f"no place is free here, and {other} has one")
+                return True
+        except Exception:
+            # Waiting here is always possible.
+            logger.exception("Could not look for another device for job %s", job_id)
+        return False
+
+    place = model_places.take(give_up, PLACE_CHECK_INTERVAL)
+    if place is not None:
+        restart_time_limit()
+        return place, False
+    if not reasons:
+        return None, False
+    try:
+        job = redis.hgetall(job_key(job_id))
+        if job.get("status") != "queued":
+            return None, False
+        if worker_stopping.is_set():
+            send_job(job_id, "local", *job_arguments(job))
+        else:
+            redis.hincrby(job_key(job_id), "passes", 1)
+            send_job(job_id, "local", *job_arguments(job), delay=PASS_DELAY_MS)
+    except Exception:
+        # Still queued: the leading API sends it again (resend_stale_queued).
+        logger.exception("Could not queue job %s again", job_id)
+    logger.info("Job %s left to another worker: %s", job_id, reasons[0])
+    return None, True
+
+
 def run_job(
     job_id: str,
     backend: routing.Backend,
@@ -795,13 +856,16 @@ def run_job(
     output_dir = storage().workspace(job_id)
     requeued = False
     claimed = False
+    place = None
     lease = JobLease(job_id)
     try:
+        if backend == "local" and model_places is not None:
+            place, requeued = wait_for_place(job_id)
+            if place is None:
+                return
         if not claim_job(job_id, lease.token):
             return
         claimed = True
-        if backend == "local":
-            local_jobs_running.add(1)
         lease.start()
         record_job(job_id)
         started = time.monotonic()
@@ -816,7 +880,8 @@ def run_job(
             max_seconds = float(stored["duration"]) if stored.get("duration") else None
         except ValueError:
             max_seconds = None
-        context = JobContext(job_id, output_dir, floor, max_seconds, arrangement_style(stored), lease.token)
+        context = JobContext(job_id, output_dir, floor, max_seconds, arrangement_style(stored), lease.token,
+                             place.release if place is not None else None)
 
         midi_path = transcribe(context)
 
@@ -880,9 +945,9 @@ def run_job(
         record_job(job_id)
         storage().discard_inputs(job_id, output_dir)
     finally:
+        if place is not None:
+            place.release()
         if claimed:
-            if backend == "local":
-                local_jobs_running.add(-1)
             lease.stop()
             # With S3, the attempt's scratch folder; the kept files stay.
             storage().release(output_dir)
@@ -1140,6 +1205,7 @@ def run_local_job(job_id: str, source_url: str | None, upload_title: str | None)
             cancellation_callback=context.is_cancelled,
             max_seconds=context.max_seconds,
             arrangement_style=context.arrangement_style,
+            model_done_callback=context.model_done,
         )
 
     run_job(job_id, "local", transcribe)
@@ -1230,33 +1296,41 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
         arranges = consumes(worker, ARRANGEMENT_QUEUE) and settings.worker.arrangement
         if not (transcribes or arranges):
             return
-        capacity = worker.worker_threads
         stop = self._stop = threading.Event()
-        global load_monitor
+        # Set when a place is taken or given back: other devices then see
+        # this one's free places at once, not up to an interval late.
+        changed = threading.Event()
+        global load_monitor, model_places
         from app.worker import load
 
+        places = model_places = Places(configured_places(worker.worker_threads), on_change=changed.set)
         monitor = load_monitor = load.LoadMonitor(gpu=not settings.worker.enforce_cpu and load.sample_gpus() is not None)
         monitor.start()
 
         def beat():
             while not stop.is_set():
+                changed.clear()
                 try:
                     current = monitor.current()
-                    routing.publish_heartbeat(redis, capacity, local_job_duration.value, arrangement=arranges,
+                    routing.publish_heartbeat(redis, places.capacity, local_job_duration.value, arrangement=arranges,
                                               transcription=transcribes, node=cluster.node_name(),
-                                              running=local_jobs_running.count, utilization=current.utilization,
+                                              running=places.in_use, utilization=current.utilization,
                                               free_mib=current.free_mib, gpu=current.gpu)
                 except Exception:
                     logger.exception("Could not publish the worker heartbeat")
-                stop.wait(self.interval)
+                changed.wait(self.interval)
 
         threading.Thread(target=beat, name="worker-heartbeat", daemon=True).start()
 
     def before_worker_shutdown(self, broker, worker):
+        worker_stopping.set()
         if load_monitor is not None:
             load_monitor.stop()
         if self._stop is not None:
             self._stop.set()
+            # Ends the wait of the heartbeat thread, which then stops.
+            if model_places is not None:
+                model_places.notify_change()
             try:
                 routing.clear_heartbeat(redis)
             except Exception:

@@ -75,6 +75,39 @@ def gpu_batch_size(capacity: int) -> tuple[int, str | None]:
     return configured, None
 
 
+def cuda_device_names() -> dict[int, str]:
+    """Each CUDA device's name, as "NVIDIA GeForce RTX 3060 Ti"; empty
+    without torch or CUDA."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return {}
+        return {index: torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())}
+    except Exception:
+        return {}
+
+
+def cpu_model_name() -> str:
+    """The processor's name, as "Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz",
+    or "" when it cannot be read."""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as cpuinfo:
+            for line in cpuinfo:
+                key, _, value = line.partition(":")
+                if key.strip() == "model name" and value.strip():
+                    return value.strip()
+    except OSError:
+        pass
+    import platform
+
+    return platform.processor() or ""
+
+
+def total_ram_bytes() -> int | None:
+    return psutil.virtual_memory().total if psutil else None
+
+
 def nvidia_smi_free_memory() -> dict[str, int]:
     """Free memory in bytes for each GPU UUID, as reported by nvidia-smi."""
     try:

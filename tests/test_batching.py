@@ -226,7 +226,7 @@ def test_auto_batch_size_is_per_gpu(default_settings, monkeypatch):
 
     assert "GPU 0: 3 job(s), batch 3," in plan.summary
     assert "GPU 1: 10 job(s), batch 10," in plan.summary
-    assert plan.threads == 13
+    assert (plan.places, plan.threads) == (13, 26)
     assert plan.warnings == ()
 
 
@@ -245,7 +245,7 @@ def test_cpu_batch_size_uses_cpu_and_ram(default_settings, monkeypatch):
     # Transcriptions only: arrangements, on by default, ask for more RAM per job.
     default_settings.worker.arrangement = False
     monkeypatch.setattr(device, "physical_cpu_count", lambda: 8)
-    memory = type("Memory", (), {"available": 16 * 1024**3})()
+    memory = type("Memory", (), {"available": 16 * 1024**3, "total": 32 * 1024**3})()
     monkeypatch.setattr(
         device,
         "psutil",
@@ -267,7 +267,7 @@ def test_cpu_batch_size_uses_cpu_and_ram(default_settings, monkeypatch):
 
 def test_cpu_batch_size_makes_room_for_arrangements_when_they_are_on(default_settings, monkeypatch):
     monkeypatch.setattr(device, "physical_cpu_count", lambda: 8)
-    memory = type("Memory", (), {"available": 16 * 1024**3})()
+    memory = type("Memory", (), {"available": 16 * 1024**3, "total": 32 * 1024**3})()
     monkeypatch.setattr(
         device,
         "psutil",

@@ -15,6 +15,7 @@ import threading
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -256,8 +257,10 @@ def arrange_piano(
     style: str,
     progress_callback: ProgressCallback | None = None,
     cancellation_callback: CancellationCallback | None = None,
+    model_done_callback: Callable[[], None] | None = None,
 ) -> None:
-    """Arrange one audio file for piano, as MIDI. Progress as transcribe_piano's:
+    """Arrange one audio file for piano, as MIDI; model_done_callback as
+    transcribe_piano's. Progress as transcribe_piano's:
 
         0.07 - 0.15   model and audio loading
         0.15 - 0.95   the model's windows
@@ -284,6 +287,8 @@ def arrange_piano(
             progress_callback(max(0.15, min(0.15 + 0.80 * window_progress, 0.95)))
 
     events = arrange(audio, sample_rate, style, device, report, cancellation_callback)
+    if model_done_callback:
+        model_done_callback()
     if progress_callback:
         progress_callback(0.96)
     # The same writer, tempo map included, as a transcription.

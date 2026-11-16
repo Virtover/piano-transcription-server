@@ -37,6 +37,7 @@ python scripts/kube.py restart 5m                               # server.py's an
 | `app/outsource/` | Routing between local and RunPod, storage, the RunPod client |
 | `app/cluster.py`, `docs/cluster.md` | A home cluster: the hub and its nodes, their switches and status, the settings nodes take from the hub, public addresses, billing nodes leave to the hub |
 | `app/worker/supervisor.py`, `app/worker/load.py` | With Compose: Dramatiq as children, by the cluster's switches; how busy the device is, for placing jobs |
+| `app/worker/places.py` | Places on a device's models: a job holds one until its model step ends, and the worker has twice as many threads on a GPU |
 | `app/video_check.py` | Reading a video's length with yt-dlp, by the API or, while a site refuses the hub's address, by a node |
 | `docker-compose.hub.yml`, `docker-compose.node.yml`, `scripts/nodes.py`, `redis/node.acl` | The hub's published services; a node's worker; the host side of hub setup, invites, and join; a node's Redis rules |
 | `app/transcription/` | Audio, batching, and the model |

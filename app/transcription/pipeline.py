@@ -1,6 +1,7 @@
 """Local transcription: fetch audio, then run the model on this machine."""
 
 from pathlib import Path
+from typing import Callable
 
 from app.transcription.audio import (  # noqa: F401  (re-exported)
     AUDIO_FILE_SUFFIXES,
@@ -29,10 +30,12 @@ def transcribe_source(
     upload_title: str | None = None,
     max_seconds: float | None = None,
     arrangement_style: str | None = None,
+    model_done_callback: Callable[[], None] | None = None,
 ) -> Path:
     """Transcribe source_url, or upload_path when it is given, at most about
     max_seconds of it: the duration the job was charged for. With
-    arrangement_style, arrange it for piano in that style instead."""
+    arrangement_style, arrange it for piano in that style instead.
+    model_done_callback is called once the model step has ended."""
     from app.transcription.piano_transcription import transcribe_piano
 
     try:
@@ -58,6 +61,7 @@ def transcribe_source(
                 style=arrangement_style,
                 progress_callback=progress_callback,
                 cancellation_callback=cancellation_callback,
+                model_done_callback=model_done_callback,
             )
         else:
             transcribe_piano(
@@ -65,6 +69,7 @@ def transcribe_source(
                 output_path=midi_path,
                 progress_callback=progress_callback,
                 cancellation_callback=cancellation_callback,
+                model_done_callback=model_done_callback,
             )
 
         check_midi(midi_path)

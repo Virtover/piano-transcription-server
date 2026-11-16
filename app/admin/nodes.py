@@ -62,6 +62,8 @@ def overview() -> dict:
                     "running": status.get("running") or [],
                     "stopping": status.get("stopping") or [],
                     "summary": status.get("summary") or "",
+                    # Empty from a service of before it.
+                    "hardware": status.get("hardware") or {},
                     "problem": status.get("problem") or "",
                     "protocol": status.get("protocol"),
                     "code": status.get("code"),
@@ -170,6 +172,32 @@ def service_line(service: dict) -> list:
             ago(service["seen"])]
 
 
+def hardware_lines(device: dict) -> list[str]:
+    """What a device's jobs run on, and how many at once."""
+    hardware = next((service["hardware"] for service in device["services"] if service.get("hardware")), None)
+    if not hardware:
+        return []
+    places = hardware.get("places") or 0
+    shared = "transcriptions and arrangements share them" if hardware.get("arrangements") else "transcriptions only"
+    limit = f" (fewer than fit in VRAM: {hardware['limited_by']})" if hardware.get("limited_by") else ""
+    lines = [f"{places} place(s) at once{limit}; {shared}"]
+    if hardware.get("kind") == "gpu":
+        for gpu in hardware.get("gpus") or []:
+            name = gpu.get("name") or "name unknown"
+            lines.append(f"GPU {gpu.get('index')}: {name}, {gib(gpu.get('vram_mib'))} VRAM, "
+                         f"{gib(gpu.get('free_mib'))} free at start, {gpu.get('jobs')} job(s) fit"
+                         + (", arrangements" if gpu.get("arrangements") else ""))
+    else:
+        cpu = hardware.get("name") or "name unknown"
+        ram = f", {gib(hardware.get('ram_mib'))} RAM" if hardware.get("ram_mib") else ""
+        lines.append(f"CPU: {cpu}, {hardware.get('cores')} core(s), {hardware.get('threads')} thread(s) for the models{ram}")
+    return lines
+
+
+def gib(mib) -> str:
+    return f"{mib / 1024:.1f} GiB" if isinstance(mib, (int, float)) else "?"
+
+
 def sharing(device: dict, devices: list[dict]) -> list[str]:
     """The other devices behind the same public address: video sites see
     them as one, and limit them together."""
@@ -195,6 +223,8 @@ def run_list(args) -> None:
         if not device["enabled"]:
             header += "  [off]"
         print(f"{header}  allowed: {task_list(device['tasks'])}  public address: {address_text(device, data['devices'])}")
+        for line in hardware_lines(device):
+            print(f"  {line}")
         if not device["services"]:
             print("  not running")
         else:
