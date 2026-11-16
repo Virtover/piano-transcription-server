@@ -90,6 +90,9 @@ class BalanceResponse(BaseModel):
     paid_minutes: int = 0
     free_minutes_seconds_until_next_grant: int | None = None
     free_minutes_next_grant_at: int | None = None
+    # A developer's account, made so by an administrator: its jobs are never
+    # charged, so apps show its minutes as unlimited.
+    developer: bool = False
 
 
 @dataclass
@@ -258,6 +261,7 @@ def balance(user: AuthenticatedUser | None = Depends(current_user)) -> BalanceRe
         user_id=user_id,
         **billing.balances(user_id),
         **billing.free_minutes_status(user_id),
+        developer=billing.is_developer(user_id),
     )
 
 

@@ -90,6 +90,11 @@ def parser() -> argparse.ArgumentParser:
     command = user_actions.add_parser("credit", parents=[changes, asks], help="add minutes, or take them with a negative number")
     command.add_argument("minutes", type=int)
     command.set_defaults(run=users.run_credit)
+    command = user_actions.add_parser(
+        "developer", parents=[changes, asks], help="make the account a developer's, whose jobs are never charged, or end that"
+    )
+    command.add_argument("state", choices=["on", "off"])
+    command.set_defaults(run=users.run_developer)
     command = user_actions.add_parser("delete", parents=[changes, asks], help="delete the account and its data")
     command.set_defaults(run=users.run_delete)
 

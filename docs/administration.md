@@ -72,6 +72,7 @@ These commands need billing; without it there are no accounts.
 python scripts/admin.py user user@example.com
 python scripts/admin.py user user@example.com credit 30 --reason "refund for a failed job"
 python scripts/admin.py user user@example.com credit -30 --reason "chargeback"
+python scripts/admin.py user dev@example.com developer on --reason "tests the app"
 python scripts/admin.py user user@example.com delete --reason "deletion request by email"
 python scripts/admin.py users find example.com
 ```
@@ -80,6 +81,7 @@ A user is named by email address or user ID. The email must belong to someone wh
 
 * **`user <user>`** shows the paid and monthly balances, minutes reserved by running jobs, the last and next renewal of the monthly minutes, a block, purchases with order IDs and whether they were voided, the latest balance changes, and recent jobs. A negative balance means a refunded purchase's minutes were already used; see [Refunds and chargebacks](google-play-billing.md#-refunds-and-chargebacks).
 * **`credit <minutes>`** adds paid minutes, which never expire, or takes them away with a negative number. It shows the balance before and after, and asks first. The balance can go below zero. The reason is kept with the balance change and in the audit log.
+* **`developer on|off`** makes the account a developer's, or ends that. A developer's jobs are never charged and hold no minutes, and they are not held to the per-user job limit; the total limit still applies. The balance stays as it is and is charged again from `off`. The API tells the apps (`developer` in `GET /api/billing/balance`), which then show unlimited minutes, the developer background, each job's details, and the server's state from `GET /api/developer/server`. A reason is required, and the change is in the audit log as `user.developer`.
 * **`delete`** deletes the account and its data, the same as `DELETE /api/account`, including running jobs and remaining minutes, and cannot be undone. It asks you to type the account's email address, or its user ID if it has none. See **Account deletion** in the [API guide](api.md#-account-deletion) for what is kept. Use it for deletion requests that arrive by email or a web form.
 * **`users find <text>`** lists the accounts whose email address or user ID contains the text, at least 3 characters, for when you know only part of an address. `%` and `_` are matched as written.
 
@@ -236,11 +238,11 @@ The charts are drawn from what the server already keeps (balance changes, and jo
 
 * **`disabled`** (the default): the service does not start.
 * **`read-only`**: the page shows everything above. It adds only two kinds of entries to the audit log: who opened which account, and who lowered the page's access.
-* **`read-write`**: the page can also cancel a job, with or without a refund; add or take away minutes, at most 600 at once; pause and resume submissions; turn video links off and on; accept a video site again; block and unblock a user; change the per-user limit; and publish, replace, and end [announcements](#-announcements), with translations. Each change goes through the same functions as the command line, so it is checked, charged, and written to the audit log the same way. Queueing a job again and deleting an account stay on the command line: the first downloads from a video site and writes job files, which the page's service may not, and the second cannot be undone.
+* **`read-write`**: the page can also cancel a job, with or without a refund; add or take away minutes, at most 600 at once; make an account a developer's, or end that; pause and resume submissions; turn video links off and on; accept a video site again; block and unblock a user; change the per-user limit; and publish, replace, and end [announcements](#-announcements), with translations. Each change goes through the same functions as the command line, so it is checked, charged, and written to the audit log the same way. Queueing a job again and deleting an account stay on the command line: the first downloads from a video site and writes job files, which the page's service may not, and the second cannot be undone.
 
 ### Making a change from the page
 
-Every change takes two steps. First you give a reason (required to cancel, change a balance, or block) and the page shows what will happen, from the server: for example the balance before and after. Then you confirm within two minutes. The server keeps what you reviewed under a one-time confirmation, so the browser cannot change it; the change is made once, by the same administrator, and only if nothing changed meanwhile; otherwise you review it again. Each administrator can make at most 30 changes an hour from the page; more is done on the command line.
+Every change takes two steps. First you give a reason (required to cancel, change a balance, make or end a developer account, or block) and the page shows what will happen, from the server: for example the balance before and after. Then you confirm within two minutes. The server keeps what you reviewed under a one-time confirmation, so the browser cannot change it; the change is made once, by the same administrator, and only if nothing changed meanwhile; otherwise you review it again. Each administrator can make at most 30 changes an hour from the page; more is done on the command line.
 
 ### How it is protected
 

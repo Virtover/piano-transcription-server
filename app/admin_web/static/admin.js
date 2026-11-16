@@ -9,7 +9,7 @@ const modalRoot = document.getElementById("modal-root");
 const SVG_NS = document.querySelector(".adm-nav svg").namespaceURI;
 const REFRESH_SECONDS = 30;
 // Changes that need a reason; the server checks this too.
-const REASON_REQUIRED = new Set(["job.cancel", "user.credit", "limits.block"]);
+const REASON_REQUIRED = new Set(["job.cancel", "user.credit", "user.developer", "limits.block"]);
 const STATUS_KIND = {
   queued: "info", processing: "busy", completed: "good", failed: "bad",
   cancelled: "quiet", preparing: "quiet", uploading: "quiet",
@@ -473,6 +473,12 @@ function planSummary(action, plan) {
       el("div", { class: "delta" }, `${fmt(plan.balance)} min`, el("span", { class: "arrow", text: "→" }), `${fmt(plan.balance_after)} min`),
       facts([["Account", plan.email || plan.user_id], ["Change", `${plan.minutes > 0 ? "+" : ""}${fmt(plan.minutes)} minutes`]]));
   }
+  if (action === "user.developer") {
+    return el("div", { class: "change-summary" },
+      el("div", { class: "delta" }, plan.developer_now ? "developer" : "regular", el("span", { class: "arrow", text: "→" }), plan.developer ? "developer" : "regular"),
+      facts([["Account", plan.email || plan.user_id],
+        ["Jobs", plan.developer ? "never charged; the balance stays as it is" : "charged from the balance again"]]));
+  }
   if (action === "announce.add") {
     return el("div", { class: "change-summary" },
       plan.replaces ? alertBox("warn", `Replaces the announcement ${plan.id}`) : null,
@@ -743,6 +749,7 @@ function users() {
         { label: "User ID", render: (row) => el("span", { class: "mono", text: row.user_id }) },
         { label: "Paid", num: true, render: (row) => fmt(row.minutes) },
         { label: "Monthly", num: true, render: (row) => fmt(row.monthly_minutes) },
+        { label: "Role", render: (row) => (row.developer ? badge("developer", "violet") : "–") },
       ], rows, { onRow: (row) => openUser(row.user_id), empty: "No user matches", emptyIcon: "users" })));
     } catch (error) {
       fill(results, errorBox(error));
@@ -769,6 +776,17 @@ async function openUser(who) {
   const name = account.email || account.user_id;
   const actions = [qbtn("← Users", "c-grey", () => open("users"))];
   if (canChange("user.credit")) actions.push(qbtn("Change balance", "c-gold", () => creditDialog(account)));
+  if (canChange("user.developer")) {
+    const developer = !account.developer;
+    actions.push(qbtn(developer ? "Make developer" : "End developer", developer ? "c-violet" : "c-grey", () =>
+      change("user.developer", { user: account.user_id, developer }, {
+        title: developer ? `Make ${name} a developer` : `End the developer account of ${name}`,
+        describe: el("p", { class: "secondary", text: developer
+          ? "Their jobs are never charged, and the app shows them the developer extras: unlimited minutes, the developer background, job details and the server's state."
+          : "Their jobs are charged from their balance again, and the app hides the developer extras." }),
+        after: () => openUser(account.user_id),
+      })));
+  }
   if (account.blocked && canChange("limits.unblock")) {
     actions.push(qbtn("Unblock", "c-green", () => change("limits.unblock", { user: account.user_id }, { title: `Unblock ${name}`, after: () => openUser(account.user_id) })));
   } else if (!account.blocked && canChange("limits.block")) {
@@ -778,7 +796,9 @@ async function openUser(who) {
     el("div", { class: "adm-head" },
       el("div", { class: "profile" }, el("div", { class: "avatar", text: (name || "?").charAt(0) }),
         el("div", {}, el("h1", { text: name }), el("p", { text: account.user_id }))),
-      el("div", { class: "adm-head-right" }, account.blocked ? badge("blocked", "bad") : badge("active", "good"), el("div", { class: "chips" }, actions))),
+      el("div", { class: "adm-head-right" }, account.developer ? badge("developer", "violet") : null,
+        account.blocked ? badge("blocked", "bad") : badge("active", "good"), el("div", { class: "chips" }, actions))),
+    account.developer ? alertBox("info", "A developer's account: their jobs are never charged. The balance below stays as it is.") : null,
     account.blocked ? alertBox("error", `Blocked${account.blocked.expires_in ? ` for ${span(account.blocked.expires_in)} more` : ""}: ${account.blocked.reason || "no reason given"}`) : null,
     account.minutes < 0 ? alertBox("warn", "The paid balance is negative: a refunded purchase's minutes were already used.") : null,
     el("div", { class: "stats" },

@@ -492,8 +492,9 @@ def test_credentials_that_may_write_are_refused(api_context):
     # PostgreSQL would.
     problems = least_privilege_problems("read-only")
 
-    assert len(problems) == 4
+    assert len(problems) == 5
     assert all("admin-read-only" in problem for problem in problems)
+    assert any("SET developer" in problem for problem in problems)
     assert len(least_privilege_problems("read-write")) == 3
     assert not tasks.redis.exists("controls:admin_web_probe")
 
@@ -725,6 +726,28 @@ def test_a_change_is_planned_then_applied_once(writable):
     # The same confirmation never works twice.
     assert apply(client, planned).status_code == 409
     assert billing.get_balance("user") == 50
+
+
+def test_an_account_is_made_a_developers_and_back(writable):
+    client, _, billing = writable
+
+    planned = act(client, "user.developer", {"user": "user@example.com", "developer": True}, "tests the app").json()
+    assert planned["plan"]["developer"] is True and planned["plan"]["developer_now"] is False
+    assert not billing.is_developer("user")
+
+    assert apply(client, planned).status_code == 200
+    assert billing.is_developer("user")
+    row = audit_rows(billing)[-1]
+    assert (row["action"], row["target"], row["detail"]) == ("user.developer", "user", "on")
+    assert client.get("/api/users/user", headers=signed_in()).json()["developer"] is True
+
+    # Asking for what already is refuses, and a reason is needed.
+    assert act(client, "user.developer", {"user": "user", "developer": True}).status_code == 400
+    assert act(client, "user.developer", {"user": "user", "developer": False}, reason="").status_code == 400
+    assert act(client, "user.developer", {"user": "user", "developer": "yes"}).status_code == 400
+
+    assert apply(client, act(client, "user.developer", {"user": "user", "developer": False}).json()).status_code == 200
+    assert not billing.is_developer("user")
 
 
 def test_the_browser_cannot_change_what_was_confirmed(writable):

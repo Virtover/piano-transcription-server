@@ -21,6 +21,7 @@ from app.api.routes.transcriptions import (
 from app.api.routes.account import router as account_router
 from app.api.routes.announcements import router as announcements_router
 from app.api.routes.billing import router as billing_router, server_info
+from app.api.routes.developer import router as developer_router
 from app.config import ensure_valid, settings
 from app import google_play
 from app.google_play import sync_products
@@ -224,6 +225,7 @@ app.include_router(router, prefix="/api")
 app.include_router(billing_router, prefix="/api")
 app.include_router(account_router, prefix="/api")
 app.include_router(announcements_router, prefix="/api")
+app.include_router(developer_router, prefix="/api")
 app.add_api_route("/api/server-info", server_info, methods=["GET"], include_in_schema=False)
 
 

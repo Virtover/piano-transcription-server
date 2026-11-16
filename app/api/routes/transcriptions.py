@@ -93,6 +93,19 @@ class TranscriptionMetadataResponse(BaseModel):
     like_count: int | None = None
 
 
+class DeveloperJobDetails(BaseModel):
+    """What happened to a job, shown only to a developer's account."""
+    duration_seconds: float | None = None
+    # What the job would have cost; a developer is never charged.
+    cost_minutes: int | None = None
+    outsourced: bool = False
+    requeue_reason: str | None = None
+    queued_at: float | None = None
+    created_at: int | None = None
+    started_at: int | None = None
+    finished_at: int | None = None
+
+
 class TranscriptionStatusResponse(BaseModel):
     job_id: str
     status: str
@@ -111,6 +124,31 @@ class TranscriptionStatusResponse(BaseModel):
     style: str | None = None
     # A planned server restart or shutdown, if one is pending.
     maintenance: NoticeResponse | None = None
+    # Only for a developer's account.
+    developer: DeveloperJobDetails | None = None
+
+
+def _number(value: str | None, kind=float):
+    try:
+        return kind(float(value)) if value else None
+    except ValueError:
+        return None
+
+
+def developer_details(job_id: str, job: dict[str, str]) -> DeveloperJobDetails:
+    record = billing.read(
+        "SELECT created_at, started_at, finished_at FROM job_diagnostics WHERE job_id = ?",
+        (job_id,),
+    )
+    times = dict(record[0]) if record else {}
+    return DeveloperJobDetails(
+        duration_seconds=_number(job.get("duration")),
+        cost_minutes=_number(job.get("full_cost"), int),
+        outsourced=job.get("outsourced") == "1",
+        requeue_reason=job.get("requeue_reason"),
+        queued_at=_number(job.get("queued_at")),
+        **times,
+    )
 
 
 def current_user_balance(user_id: str | None) -> int | None:
@@ -207,13 +245,17 @@ def hold_place(job_id: str, user_id: str, status: str) -> None:
     against the job limits. The placeholder expires if the API stops first.
     Raises SubmissionExists if the job already exists."""
     key = job_key(job_id)
+    # A developer tests with many jobs at once; the total still applies.
+    # Asked before anything is stored, so a database that cannot be reached
+    # leaves no placeholder behind to refuse the retry.
+    per_user = not billing.is_developer(user_id)
     # Claimed atomically, so two copies of a submission cannot both queue it.
     if not redis.hsetnx(key, "status", status):
         raise SubmissionExists()
     redis.hset(key, "user_id", user_id)
     redis.expire(key, PLACEHOLDER_TTL)
     try:
-        job_limits.acquire(redis, job_id, user_id, job_key)
+        job_limits.acquire(redis, job_id, user_id, job_key, per_user=per_user)
     except job_limits.TooManyJobs as error:
         redis.delete(key)
         raise HTTPException(status_code=429, detail=str(error), headers={"Retry-After": "60"}) from error
@@ -253,7 +295,7 @@ def give_back_place(job_id: str, user_id: str) -> None:
 def ensure_minimum_balance(user: AuthenticatedUser | None) -> None:
     """Refuse a user who could not pay for even the shortest job, before
     their upload is read."""
-    if user is None:
+    if user is None or billing.is_developer(user.user_id):
         return
     billing.renew_monthly_minutes(user.user_id, user.email)
     required = transcription_cost(0)
@@ -587,6 +629,7 @@ def get_transcription(
         mode="arrangement" if job.get("mode") == ARRANGEMENT else "transcription",
         style=arrangement_style(job),
         maintenance=current_notice(),
+        developer=developer_details(job_id, job) if billing.is_developer(job.get("user_id")) else None,
     )
 
 
