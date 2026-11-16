@@ -144,7 +144,7 @@ class Supervisor:
                 ensure_valid("worker")
             except ConfigError as error:
                 raise SystemExit(str(error)) from None
-            self.local_plan = launcher.plan_worker(launcher.cuda_job_capacities())
+            self.local_plan = launcher.plan_worker(*launcher.measure_gpus())
             for warning in self.local_plan.warnings:
                 say(f"Warning: {warning}")
             if not self.local_plan.arrangement:

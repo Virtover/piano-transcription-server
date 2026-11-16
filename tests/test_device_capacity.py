@@ -155,3 +155,39 @@ def test_job_capacity_counts_whole_jobs_in_the_budget(default_settings):
     assert device.job_capacity((1.25 + 3) * GiB) == 3
     assert device.job_capacity((1.25 + 3.9) * GiB) == 3
     assert device.job_capacity(1 * GiB) == 0
+
+
+# --- The launcher's measurement, handed to Dramatiq ---------------------------------------
+
+@pytest.mark.parametrize("text", [None, "", "x", "0=", "0=-5", "=1"])
+def test_launcher_capacities_without_a_usable_measurement(default_settings, monkeypatch, text):
+    if text is None:
+        monkeypatch.delenv(device.MEASURED_FREE_VARIABLE, raising=False)
+    else:
+        monkeypatch.setenv(device.MEASURED_FREE_VARIABLE, text)
+
+    # The worker then measures itself, as before.
+    assert device.launcher_capacities() is None
+
+
+def test_launcher_capacities_give_each_gpus_jobs(default_settings, monkeypatch):
+    worker = default_settings.worker
+    free = int((device.gpu_reserve_gib(worker) + device.TEMPO_MAP_MEMORY_GIB + 3 * worker.memory_per_job_gib)
+               * 1024**3) + 1
+    monkeypatch.setenv(device.MEASURED_FREE_VARIABLE, f"0={free},1=0")
+
+    assert device.launcher_capacities() == [(0, 3, free, 0), (1, 0, 0, 0)]
+
+
+def test_launcher_capacities_round_trip(default_settings, monkeypatch):
+    measured = [(0, device.job_capacity(11 * 1024**3), 11 * 1024**3, 12 * 1024**3)]
+    monkeypatch.setenv(device.MEASURED_FREE_VARIABLE, device.measured_free_text(measured))
+
+    assert device.launcher_capacities() == [(0, measured[0][1], 11 * 1024**3, 0)]
+
+
+def test_launcher_capacities_ignored_with_enforce_cpu(default_settings, monkeypatch):
+    default_settings.worker.enforce_cpu = True
+    monkeypatch.setenv(device.MEASURED_FREE_VARIABLE, "0=12000000000")
+
+    assert device.launcher_capacities() is None

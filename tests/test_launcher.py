@@ -4,6 +4,7 @@ import types
 import pytest
 
 from app.worker import launcher
+from app.transcription.device import MEASURED_FREE_VARIABLE
 from app.worker.places import PLACES_VARIABLE
 
 GiB = 1024**3
@@ -38,7 +39,8 @@ def capacity(*jobs):
 @pytest.fixture(autouse=True)
 def launcher_environment(monkeypatch):
     # main() writes Dramatiq's environment into os.environ: undone after each test.
-    for name in (PLACES_VARIABLE, "dramatiq_queue_prefetch", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    for name in (PLACES_VARIABLE, MEASURED_FREE_VARIABLE, "dramatiq_queue_prefetch", "OMP_NUM_THREADS",
+                 "MKL_NUM_THREADS"):
         monkeypatch.setenv(name, "")
 
 
@@ -85,15 +87,17 @@ def test_enforce_cpu_ignores_gpu_capacity(default_settings, cores):
     assert "no CUDA GPU" in plan.summary
 
 
-def test_gpu_mode_respects_max_concurrency_and_cores(default_settings, cores):
+def test_gpu_places_follow_vram_and_max_concurrency_not_cores(default_settings, cores):
     default_settings.worker.max_concurrency = 2
     plan = launcher.plan_worker(capacity(5))
     assert (plan.places, plan.hardware["limited_by"]) == (2, "WORKER_MAX_CONCURRENCY")
 
+    # A place lasts only to the end of the model step, which runs in one
+    # thread for the whole batch: fewer cores than places is fine.
     default_settings.worker.max_concurrency = None
     cores(3)
     plan = launcher.plan_worker(capacity(5))
-    assert (plan.places, plan.hardware["limited_by"]) == (3, "CPU cores")
+    assert (plan.places, plan.threads, plan.hardware["limited_by"]) == (5, 10, None)
 
 
 def test_gpu_without_room_falls_back_to_cpu(default_settings, cores):
@@ -103,7 +107,7 @@ def test_gpu_without_room_falls_back_to_cpu(default_settings, cores):
 def test_main_passes_resolved_values_to_dramatiq(default_settings, cores, monkeypatch):
     default_settings.worker.arrangement = False
     calls = []
-    monkeypatch.setattr(launcher, "cuda_job_capacities", lambda: None)
+    monkeypatch.setattr(launcher, "measure_gpus", lambda: (None, {}))
     monkeypatch.setattr(launcher.shutil, "which", lambda name: "/usr/bin/dramatiq")
     monkeypatch.setattr(launcher.os, "execv", lambda path, args: calls.append(args))
     monkeypatch.delenv("WORKER_THREADS", raising=False)
@@ -124,6 +128,8 @@ def test_main_gives_dramatiq_the_places_and_a_prefetch_of_its_threads(default_se
 
     assert args[args.index("--threads") + 1] == "6"
     assert os.environ[PLACES_VARIABLE] == "3"
+    # The worker sizes its batches by this measurement, not its own.
+    assert os.environ[MEASURED_FREE_VARIABLE] == f"0={6 * GiB}"
     # Not Dramatiq's default of twice the threads per queue, which would
     # hold jobs here that a free device could run.
     assert os.environ["dramatiq_queue_prefetch"] == "6"
@@ -200,7 +206,7 @@ def test_cpu_plans_arrange_when_the_feature_is_on(default_settings, cores, enabl
 
 def run_main(monkeypatch, capacities):
     calls = []
-    monkeypatch.setattr(launcher, "cuda_job_capacities", lambda: capacities)
+    monkeypatch.setattr(launcher, "measure_gpus", lambda: (capacities, {}))
     monkeypatch.setattr(launcher.shutil, "which", lambda name: "/usr/bin/dramatiq")
     monkeypatch.setattr(launcher.os, "execv", lambda path, args: calls.append(args))
     launcher.main([])
@@ -234,9 +240,7 @@ def test_main_prints_the_warning_when_no_gpu_has_room(default_settings, cores, m
 
 def test_a_gpu_plan_names_the_gpu_and_its_vram(default_settings, cores, monkeypatch):
     default_settings.worker.arrangement = True
-    monkeypatch.setattr(launcher, "cuda_device_names", lambda: {0: "NVIDIA GeForce RTX 3060 Ti"})
-
-    plan = launcher.plan_worker([(0, 3, 6 * GiB, 8 * GiB)])
+    plan = launcher.plan_worker([(0, 3, 6 * GiB, 8 * GiB)], {0: "NVIDIA GeForce RTX 3060 Ti"})
 
     assert "GPU 0 (NVIDIA GeForce RTX 3060 Ti, 8.00 GiB): 3 job(s)" in plan.summary
     assert plan.hardware == {"kind": "gpu", "places": 3, "limited_by": None, "arrangements": True, "gpus": [
@@ -253,3 +257,43 @@ def test_a_cpu_plan_names_the_processor_and_its_ram(default_settings, cores, mon
     assert hardware["kind"] == "cpu" and hardware["places"] == 6
     assert (hardware["name"], hardware["cores"], hardware["threads"], hardware["ram_mib"]) == (
         "Intel(R) Core(TM) i7-10700K", 8, 6, 64 * 1024)
+
+
+def test_the_gpus_are_measured_in_a_process_of_their_own(default_settings):
+    # A process that used CUDA keeps a context on the GPU until it exits.
+    calls = []
+
+    def run(command, **options):
+        calls.append(command)
+        output = '{"capacities": [[0, 9, 12348030976, 12481724416]], "names": {"0": "NVIDIA GeForce RTX 3060"}}'
+        return types.SimpleNamespace(returncode=0, stdout="a warning\n" + output + "\n", stderr="")
+
+    capacities, names = launcher.measure_gpus(run)
+
+    assert calls[0][:2] == [launcher.sys.executable, "-c"]
+    assert capacities == [(0, 9, 12348030976, 12481724416)]
+    assert names == {0: "NVIDIA GeForce RTX 3060"}
+
+
+def test_a_failed_measuring_process_measures_here(default_settings, monkeypatch, capsys):
+    monkeypatch.setattr(launcher, "cuda_job_capacities", lambda: [(0, 2, 4 * GiB, 8 * GiB)])
+    monkeypatch.setattr(launcher, "cuda_device_names", lambda: {0: "GPU"})
+
+    def run(command, **options):
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="Traceback: boom")
+
+    assert launcher.measure_gpus(run) == ([(0, 2, 4 * GiB, 8 * GiB)], {0: "GPU"})
+    assert "could not measure the GPUs in a process of their own" in capsys.readouterr().out
+
+
+def test_no_gpus_measured_without_cuda(default_settings):
+    def run(command, **options):
+        return types.SimpleNamespace(returncode=0, stdout='{"capacities": null, "names": {}}\n', stderr="")
+
+    assert launcher.measure_gpus(run) == (None, {})
+
+
+def test_enforce_cpu_measures_no_gpu(default_settings):
+    default_settings.worker.enforce_cpu = True
+
+    assert launcher.measure_gpus(lambda *a, **k: pytest.fail("measured")) == (None, {})

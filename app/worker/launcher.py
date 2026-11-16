@@ -1,6 +1,8 @@
+import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -16,6 +18,8 @@ from app.transcription.device import (
     cuda_device_names,
     cuda_job_capacities,
     gpu_batch_size,
+    MEASURED_FREE_VARIABLE,
+    measured_free_text,
     physical_cpu_count,
     total_ram_bytes,
 )
@@ -48,6 +52,8 @@ class WorkerPlan:
     places: int | None = None
     # What the jobs run on, for the admin page and `admin.py nodes`.
     hardware: dict = field(default_factory=dict)
+    # The GPUs' free VRAM as measured here, for Dramatiq (MEASURED_FREE_VARIABLE).
+    measured_free: str = ""
 
     def environment(self) -> dict[str, str]:
         """What Dramatiq's process needs in its environment for this plan."""
@@ -60,7 +66,38 @@ class WorkerPlan:
             # Dramatiq's default, twice the threads per queue, would hold
             # jobs here that a free device elsewhere could run.
             environment["dramatiq_queue_prefetch"] = str(self.threads)
+        if self.measured_free:
+            environment[MEASURED_FREE_VARIABLE] = self.measured_free
         return environment
+
+
+# Run by measure_gpus in a process of its own: (capacities, names) as JSON.
+MEASURE_SCRIPT = """
+import json
+from app.transcription.device import cuda_device_names, cuda_job_capacities
+print(json.dumps({"capacities": cuda_job_capacities(), "names": cuda_device_names()}))
+"""
+
+
+def measure_gpus(run=subprocess.run) -> tuple[list[tuple[int, int, int, int]] | None, dict[int, str]]:
+    """Each GPU's job capacity and name, measured in a process of its own:
+    a process that once used CUDA holds a context of about 100 MiB of VRAM
+    until it exits, which the jobs would then lack. Measured here if that
+    process fails."""
+    if settings.worker.enforce_cpu:
+        return None, {}
+    try:
+        result = run([sys.executable, "-c", MEASURE_SCRIPT], capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or "").strip()[-500:] or f"exit code {result.returncode}")
+        data = json.loads(result.stdout.strip().splitlines()[-1])
+        capacities = [tuple(int(value) for value in item) for item in data["capacities"]] \
+            if data["capacities"] is not None else None
+        return capacities, {int(index): str(name) for index, name in data["names"].items()}
+    except Exception as error:
+        print(f"Warning: could not measure the GPUs in a process of their own ({error}); measuring here",
+              flush=True)
+        return cuda_job_capacities(), cuda_device_names()
 
 
 def gpu_capacity(
@@ -86,10 +123,10 @@ def gpu_capacity(
     return len(device_capacities), total_capacity, summary
 
 
-def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPlan:
+def plan_worker(capacities: list[tuple[int, int, int, int]] | None, names: dict[int, str] | None = None) -> WorkerPlan:
     if settings.worker.enforce_cpu:
         capacities = None
-    names = cuda_device_names() if capacities else {}
+    names = names or {}
     gpu = gpu_capacity(capacities, names)
     if gpu:
         device_count, gpu_jobs, gpu_summary = gpu
@@ -98,9 +135,9 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPla
             for index, capacity, _, _ in capacities
             if capacity > 0 and (warning := gpu_batch_size(capacity)[1])
         )
+        # Not capped by CPU cores: a job holds its place only up to the end
+        # of its model step, which runs in one thread for the whole batch.
         places, limited_by = gpu_jobs, None
-        if physical_cpu_count() < places:
-            places, limited_by = physical_cpu_count(), "CPU cores"
         if settings.worker.max_concurrency and settings.worker.max_concurrency < places:
             places, limited_by = settings.worker.max_concurrency, "WORKER_MAX_CONCURRENCY"
         arrangement = any(
@@ -119,6 +156,7 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None) -> WorkerPla
             warnings=warnings,
             arrangement=arrangement,
             places=places,
+            measured_free=measured_free_text(capacities),
             hardware={
                 "kind": "gpu",
                 "places": places,
@@ -224,7 +262,7 @@ def main(arguments: list[str] | None = None) -> None:
         queues = [REMOTE_QUEUE]
     else:
         ensure_valid("worker")
-        plan = plan_worker(cuda_job_capacities())
+        plan = plan_worker(*measure_gpus())
         queues = [LOCAL_QUEUE, ARRANGEMENT_QUEUE] if plan.arrangement else [LOCAL_QUEUE]
 
     # Read by app.worker.tasks in each Dramatiq process, which reports its errors.

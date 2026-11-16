@@ -12,6 +12,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# The launcher's measurement of each GPU's free VRAM, "index=bytes,...", in
+# Dramatiq's environment: the worker sizes its batches and memory budget by
+# it instead of measuring again beside its own CUDA context.
+MEASURED_FREE_VARIABLE = "MODEL_GPU_FREE_MEMORY"
+
 # VRAM of the tempo map's beat tracker (app/transcription/tempo.py), which
 # runs on the job's GPU one job at a time. Only its weights and one 30 s
 # chunk are on the GPU, so this does not depend on the audio's length.
@@ -189,6 +194,29 @@ def cpu_budget_gib() -> float:
     if psutil is None:
         return float("inf")
     return max(0.0, psutil.virtual_memory().available / 1024**3 - settings.worker.cpu_reserve_gib)
+
+
+def measured_free_text(capacities: list[tuple[int, int, int, int]]) -> str:
+    return ",".join(f"{index}={free_memory}" for index, _, free_memory, _ in capacities)
+
+
+def launcher_capacities() -> list[tuple[int, int, int, int]] | None:
+    """The job capacities of the launcher's measurement, as
+    cuda_job_capacities gives them (total memory unknown: 0), or None
+    without one."""
+    text = os.environ.get(MEASURED_FREE_VARIABLE)
+    if not text or settings.worker.enforce_cpu:
+        return None
+    capacities = []
+    try:
+        for item in text.split(","):
+            index, free_memory = (int(value) for value in item.split("="))
+            if index < 0 or free_memory < 0:
+                return None
+            capacities.append((index, job_capacity(free_memory), free_memory, 0))
+    except ValueError:
+        return None
+    return capacities or None
 
 
 def cuda_job_capacities() -> list[tuple[int, int, int, int]] | None:

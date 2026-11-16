@@ -43,6 +43,7 @@ from app.transcription.device import (
     cpu_budget_gib,
     cpu_thread_count,
     cuda_job_capacities,
+    launcher_capacities,
     gpu_batch_size,
     gpu_budget_gib,
 )
@@ -159,7 +160,12 @@ def select_device() -> str:
     # Concurrency is already limited by the worker thread count.
     with _cuda_capacities_lock:
         if _cuda_capacities is None:
-            measured = cuda_job_capacities() or []
+            # The launcher measured before any process of the worker held
+            # a CUDA context; measuring here would count this one's.
+            measured = [
+                capacity for capacity in launcher_capacities() or []
+                if capacity[0] < torch.cuda.device_count()
+            ] or cuda_job_capacities() or []
             _cuda_free_memory.update({index: free for index, _, free, _ in measured})
             _cuda_capacities = {
                 device_index: capacity
