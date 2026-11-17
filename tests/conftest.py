@@ -69,7 +69,7 @@ def api_context(tmp_path, monkeypatch, video_sites) -> Iterator[tuple[TestClient
     monkeypatch.setattr(developer_routes, "billing", billing)
     monkeypatch.setattr(tasks, "billing", billing)
     announcement_routes.cache.clear()
-    def fake_check_video(source_url):
+    def fake_check_video(source_url, user_id=None):
         return billing_routes.CheckedVideo(130.0, {"title": "Nocturne", "duration": 130}, time.time())
 
     monkeypatch.setattr(transcription_routes, "check_video", fake_check_video)

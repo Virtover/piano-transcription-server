@@ -391,6 +391,9 @@ class SubscriptionPlan(BaseModel):
     minutes: UnlimitedInt
     # The base plan the apps buy; without it, the subscription's first.
     base_plan: str | None = Field(default=None, min_length=1, max_length=63)
+    # Longer videos for subscribers: used only when above
+    # MAX_VIDEO_LENGTH_MINUTES (configuration_warnings says otherwise).
+    max_video_length_minutes: int | None = Field(default=None, gt=0)
 
     @field_validator("name")
     @classmethod
@@ -1107,6 +1110,15 @@ def offsite_problems(config: "Settings") -> list[str]:
 def configuration_warnings(config: "Settings", environment: dict[str, str]) -> list[str]:
     """Choices that work but are probably mistakes."""
     warnings = []
+    general = config.limits.max_video_length_minutes
+    for product_id, plan in config.billing.subscriptions.items():
+        if plan.max_video_length_minutes is not None and (general is None or plan.max_video_length_minutes <= general):
+            limit = "unlimited" if general is None else f"{general:g}"
+            warnings.append(
+                f"BILLING_SUBSCRIPTIONS: {product_id}'s max_video_length_minutes "
+                f"({plan.max_video_length_minutes}) is not above MAX_VIDEO_LENGTH_MINUTES ({limit}), so it is "
+                "ignored: subscribers get the general limit."
+            )
     if config.database.backups == "provider":
         warnings.append(
             "The server does not back up the billing database (DATABASE_BACKUPS=provider): its provider must. "
@@ -1176,10 +1188,24 @@ def unwritable_directories(config: "Settings | None" = None, role: str = "all") 
 
 
 def ensure_valid(role: str) -> None:
-    """Fail fast at process startup."""
+    """Fail fast at process startup, and log the choices that are probably
+    mistakes, as `check` lists them."""
     problems = validate_settings(settings, role) + unwritable_directories(settings, role)
     if problems:
         raise ConfigError(problems)
+    if role == "api":
+        log_configuration_warnings()
+
+
+def log_configuration_warnings() -> None:
+    """Log what `check` lists as probably mistakes; never stops the server."""
+    try:
+        warnings = configuration_warnings(settings, read_environment(ENV_FILES))
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("Could not check the configuration for warnings")
+        return
+    for warning in warnings:
+        logging.getLogger(__name__).warning("Configuration: %s", warning)
 
 
 # --- `python -m app.config check` -----------------------------------------

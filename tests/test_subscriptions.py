@@ -104,6 +104,8 @@ def end_subscription_period(billing, user_id="user"):
         (40 * DAY, now - 1, user_id, now),
     )
     write(billing, "UPDATE users SET free_grant_at = free_grant_at - ? WHERE user_id = ?", (40 * DAY, user_id))
+    # Google was asked after the end: no renewal came.
+    write(billing, "UPDATE subscriptions SET checked_at = ? WHERE user_id = ?", (now, user_id))
 
 
 # --- Settings ------------------------------------------------------------------------------------
@@ -733,9 +735,9 @@ def test_server_info_lists_the_plans_by_level(google):
 
     assert info["subscriptions"] == [
         {"product_id": "sub_pro", "base_plan": "pro-monthly", "name": "Pro", "minutes_per_period": 100,
-         "unlimited": False, "level": 1},
+         "unlimited": False, "level": 1, "max_video_length_minutes": None},
         {"product_id": "sub_unlimited", "base_plan": "unlimited-monthly", "name": "Unlimited",
-         "minutes_per_period": None, "unlimited": True, "level": 2},
+         "minutes_per_period": None, "unlimited": True, "level": 2, "max_video_length_minutes": None},
     ]
     assert info["welcome_minutes"] == 20
     assert "unlimited_daily_minutes" not in info
@@ -1008,6 +1010,8 @@ def test_the_admin_web_role_gives_minutes_to_all_and_never_reads_tokens(subs, mo
     assert page.credit_all(3, "outage", "web:admin", "grant1")["accounts"] == 1
     assert page.undo_credit_all("grant1", "mistake", "web:admin")["taken"] == 3
     page.release("job-1")
+    # The page shows a subscriber's account: every column it reads is granted.
+    assert page.subscription_status("user")["unlimited"] is True
     assert owner.subscription_status("user")["unlimited_heavy_use"] is False
     with psycopg.connect(role_url) as connection:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
@@ -1140,3 +1144,163 @@ def test_google_reports_the_deferred_plan(google):
     info = google_play.parse_subscription("token", response)
 
     assert (info.product_id, info.deferred_product_id) == ("sub_unlimited", "sub_pro")
+
+
+
+# --- Longer videos for a plan -------------------------------------------------------------------
+
+def test_a_plans_longer_video_limit_applies_to_its_subscribers_only(google, monkeypatch):
+    from app.api.routes import billing as billing_routes
+    from app.api.routes import transcriptions as transcription_routes
+
+    client, settings, billing, fake = google
+
+    def check_video(source_url, user_id=None):
+        # The site's answer, then the real length check.
+        return billing_routes.CheckedVideo(
+            billing_routes.ensure_allowed_length(130.0, user_id), {"title": "Long", "duration": 130}, time.time()
+        )
+
+    monkeypatch.setattr(transcription_routes, "check_video", check_video)
+    monkeypatch.setattr(billing_routes, "check_video", check_video)
+    settings.limits.max_video_length_minutes = 2  # the test video is 130 s
+    settings.billing.subscriptions = {
+        **plans(),
+        "sub_unlimited": SubscriptionPlan(name="Unlimited", minutes="unlimited", base_plan="unlimited-monthly",
+                                          max_video_length_minutes=5),
+    }
+    link = {"source_url": "https://www.youtube.com/watch?v=long"}
+
+    refused = client.post("/api/transcriptions", json=link, headers=AUTH)
+    assert refused.status_code == 413
+    assert refused.json()["detail"]["error_code"] == "video_too_long"
+    assert refused.json()["detail"]["max_video_length_minutes"] == 2
+    assert client.get("/api/billing/balance", headers=AUTH).json()["max_video_length_minutes"] == 2
+    offers = {offer["product_id"]: offer for offer in client.get("/api/billing/server-info").json()["subscriptions"]}
+    assert (offers["sub_pro"]["max_video_length_minutes"], offers["sub_unlimited"]["max_video_length_minutes"]) == (None, 5)
+
+    fake.subscriptions["token-1"] = google_subscription(product="sub_unlimited")
+    verify(client, product="sub_unlimited")
+
+    balance = client.get("/api/billing/balance", headers=AUTH).json()
+    assert balance["max_video_length_minutes"] == 5
+    assert balance["subscription"]["max_video_length_minutes"] == 5
+    assert client.get("/api/billing/cost", params=link, headers=AUTH).status_code == 200
+    assert client.post("/api/transcriptions", json=link, headers=AUTH).status_code == 202
+    # An uploaded file's length is checked the same way.
+    assert client.get("/api/billing/cost", params={"duration_seconds": 290}, headers=AUTH).status_code == 200
+    assert client.get("/api/billing/cost", params={"duration_seconds": 310}, headers=AUTH).status_code == 413
+
+    # When the plan ends, the general limit is back.
+    end_subscription_period(billing, user_id_of(client))
+    assert client.get("/api/billing/balance", headers=AUTH).json()["max_video_length_minutes"] == 2
+
+
+def test_a_plan_limit_not_above_the_general_one_is_ignored_with_a_warning(google, caplog):
+    from app import config
+
+    client, settings, _, _ = google
+    settings.limits.max_video_length_minutes = 120
+    settings.billing.subscriptions = {
+        "sub_pro": SubscriptionPlan(name="Pro", minutes=100, base_plan="pro-monthly", max_video_length_minutes=60),
+        "sub_unlimited": SubscriptionPlan(name="Unlimited", minutes="unlimited", base_plan="unlimited-monthly",
+                                          max_video_length_minutes=180),
+    }
+
+    warnings = config.configuration_warnings(settings, {})
+    assert any("sub_pro's max_video_length_minutes (60) is not above MAX_VIDEO_LENGTH_MINUTES (120)" in warning
+               for warning in warnings)
+    assert not any("sub_unlimited" in warning for warning in warnings)
+    offers = {offer["product_id"]: offer for offer in client.get("/api/billing/server-info").json()["subscriptions"]}
+    assert offers["sub_pro"]["max_video_length_minutes"] is None
+    # Logged at the API's start too.
+    caplog.clear()
+    config.log_configuration_warnings()
+    assert "sub_pro's max_video_length_minutes" in caplog.text
+
+    settings.limits.max_video_length_minutes = None
+    assert any("sub_unlimited" in warning and "unlimited" in warning
+               for warning in config.configuration_warnings(settings, {}))
+
+
+def test_plans_read_their_video_limit_from_the_environment(monkeypatch):
+    from app import config
+
+    monkeypatch.setenv(
+        "BILLING_SUBSCRIPTIONS",
+        '{"sub_unlimited":{"name":"Unlimited","minutes":"unlimited","max_video_length_minutes":120}}',
+    )
+    loaded = config.load_settings(env_file=None, secrets_dir=None)
+    assert loaded.billing.subscriptions["sub_unlimited"].max_video_length_minutes == 120
+    with pytest.raises(ValidationError):
+        BillingSettings(_env_file=None, subscriptions={"a": {"name": "A", "minutes": 5, "max_video_length_minutes": 0}})
+
+
+
+# --- Found by review ---------------------------------------------------------------------------------
+
+def test_a_refund_after_a_deferred_change_takes_back_only_what_was_used(subs):
+    _, settings, billing = subs
+    settings.billing.subscriptions = {**plans(), "sub_max": SubscriptionPlan(name="Max", minutes=300)}
+    billing.record_subscription("user", sub(token="old", product="sub_max", order="GPA.1"))
+    billing.reserve("user", "job-1", 50)
+    billing.settle_success("job-1")
+    billing.record_subscription("user", sub(token="new", product="sub_max", order="GPA.2", linked_token="old",
+                                            deferred_product_id="sub_pro"))
+    # The renewal into Pro expires the 250 left.
+    billing.record_subscription("user", sub(token="new", product="sub_pro", order="GPA.2..0", linked_token="old"))
+
+    assert billing.void_purchase("old", "GPA.1") == ("user", 50)
+    assert balances(billing)["paid_minutes"] == -50
+    assert_ledger_adds_up(billing)
+
+
+def test_a_late_report_of_a_replaced_token_does_not_bring_its_period_back(subs):
+    _, _, billing = subs
+    billing.record_subscription("user", sub(token="old", order="GPA.1"))
+    billing.record_subscription("user", sub(token="new", product="sub_unlimited", order="GPA.2", linked_token="old"))
+    # A refresh read the old token before the upgrade, and writes after it.
+    billing.record_subscription("user", sub(token="old", order="GPA.1"))
+    ended = billing.read("SELECT ends_at FROM subscription_periods WHERE order_id = 'GPA.1'")[0]["ends_at"]
+    assert ended <= int(time.time())
+    # With the new plan refunded, the old one does not come back.
+    billing.void_purchase("new", "GPA.2")
+    assert billing.subscription_status("user")["subscription"] is None
+
+
+def test_a_pending_payment_is_read_again_until_paid(subs):
+    _, _, billing = subs
+    billing.record_subscription("user", sub(state="PENDING", acknowledged=False))
+    write(billing, "UPDATE subscriptions SET checked_at = checked_at - 120")
+
+    assert billing.subscriptions_to_check() == ["token-1"]
+    billing.record_subscription("user", sub(state="ACTIVE", acknowledged=True))
+    assert billing.subscriptions_to_check() == []
+
+
+def test_minutes_wait_for_googles_answer_just_after_the_period_ends(subs):
+    _, _, billing = subs
+    billing.record_subscription("user", sub(days=1))
+    billing.reserve("user", "job-1", 30)
+    billing.settle_success("job-1")
+    # The period ended a minute ago; Google has not been read since.
+    write(billing, "UPDATE subscription_periods SET ends_at = ?", (int(time.time()) - 60,))
+    write(billing, "UPDATE subscriptions SET checked_at = ?", (int(time.time()) - 600,))
+
+    assert billing.renew_monthly_minutes("user") == 0
+    assert balances(billing)["monthly_minutes"] == 70
+    # A grace period: the plan and its minutes stay.
+    billing.record_subscription("user", sub(state="IN_GRACE_PERIOD", days=2))
+    assert billing.subscription_status("user")["subscription"] is not None
+    assert balances(billing)["monthly_minutes"] == 70
+    assert_ledger_adds_up(billing)
+
+
+def test_purchase_tokens_are_redacted_from_reports():
+    from app.error_report import redact
+
+    text = ("HttpError 400 when requesting https://androidpublisher.googleapis.com/androidpublisher/v3/applications/"
+            "com.example/purchases/subscriptionsv2/tokens/abcDEF.AO-J1Ox_secret-token:acknowledge?alt=json returned")
+    redacted = redact(text, [])
+    assert "abcDEF" not in redacted and "secret-token" not in redacted
+    assert "/tokens/" in redacted and ":acknowledge" in redacted

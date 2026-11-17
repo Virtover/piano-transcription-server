@@ -574,8 +574,8 @@ def test_links_to_a_refused_site_are_refused_but_others_and_uploads_accepted(api
     from app.api.routes import transcriptions
 
     monkeypatch.setattr(transcriptions, "probe_audio", lambda path, measure=True, max_seconds=None: 130.0)
-    monkeypatch.setattr(billing_routes, "video_duration", lambda url: 90.0)
-    monkeypatch.setattr(transcriptions, "check_video", lambda url: pytest.fail("the link was checked"))
+    monkeypatch.setattr(billing_routes, "video_duration", lambda url, user_id=None: 90.0)
+    monkeypatch.setattr(transcriptions, "check_video", lambda url, user_id=None: pytest.fail("the link was checked"))
     video_sites.open_breaker(YOUTUBE, video_sites.LIMITED, "429")
 
     link = client.post("/api/transcriptions", json={"source_url": "https://youtu.be/1"})

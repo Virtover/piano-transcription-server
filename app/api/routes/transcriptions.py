@@ -192,8 +192,10 @@ def ensure_no_maintenance_pending() -> None:
     )
 
 
-def max_length_seconds() -> float | None:
-    minutes = settings.limits.max_video_length_minutes
+def max_length_seconds(user_id: str | None = None) -> float | None:
+    from app.api.routes.billing import max_video_minutes
+
+    minutes = max_video_minutes(user_id)
     return minutes * 60 if minutes else None
 
 
@@ -473,7 +475,7 @@ def submit_link(
 ) -> CreateTranscriptionResponse:
     """Check a video link and queue it, for a job whose place is held, with
     fields such as its mode."""
-    video = check_video(source_url)
+    video = check_video(source_url, user.user_id if user else None)
     # The worker downloads with this info instead of asking the site again;
     # not with a node's answer, which holds only the length and metadata.
     if not video.info.get(video_check.DELEGATED_MARK):
@@ -568,10 +570,11 @@ async def upload_transcription(
 
         try:
             # Measured by decoding, not read from the header, which can understate it.
-            duration = await run_in_threadpool(probe_audio, upload_path, True, max_length_seconds())
+            uploader = user.user_id if user else None
+            duration = await run_in_threadpool(probe_audio, upload_path, True, max_length_seconds(uploader))
         except UnsupportedMedia as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        ensure_allowed_length(duration)
+        ensure_allowed_length(duration, uploader)
         await run_in_threadpool(keep_job_file, job_id, upload_path)
         # Before the job is queued, as for a link.
         job_storage.storage().release(job_dir)

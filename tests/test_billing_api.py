@@ -20,6 +20,7 @@ def test_none_provider_exposes_balance_and_rejects_google_play(api_context):
         "subscription": None,
         "unlimited": False,
         "unlimited_heavy_use": False,
+        "max_video_length_minutes": 20.0,
     }
 
     response = client.post(
@@ -50,7 +51,7 @@ def test_cost_endpoint_validates_duration_and_calculates_minutes(api_context, mo
     client, _, _ = api_context
     from app.api.routes import billing as billing_routes
 
-    monkeypatch.setattr(billing_routes, "video_duration", lambda source_url: 130.0)
+    monkeypatch.setattr(billing_routes, "video_duration", lambda source_url, user_id=None: 130.0)
     response = client.get("/api/billing/cost", params={"source_url": "https://example.com/video"})
 
     assert response.status_code == 200

@@ -298,6 +298,7 @@ A failed job has an `error_code` next to its `error`. Refusals of a link, and `4
 | `source_unsupported` | `422` | The link is not one the server can read: a site it does not accept, or an address it must not open. | Ask for an upload. |
 | `source_failed` | `422`, or a failed job | The video could not be read for another reason. | Show the message; offer an upload. |
 | `insufficient_minutes` | `402` | Not enough minutes; `required_minutes` says how many the job needs. | Offer to buy minutes. |
+| `video_too_long` | `413` | The video is longer than this user may send: `max_video_length_minutes`, the general limit or a longer one of their plan. | Say the limit; plans with longer videos say so in `server-info`. |
 | `subscription_owned` | `409`, from verifying a subscription | Another account of the app has this subscription. | Tell the user to sign in with the account that bought it. Do not retry. |
 | `arrangement_unavailable` | `409`, or `503` | Piano arrangements are off on this server (`409`), or no live worker has room for them and outsourcing is off (`503`). | Hide or disable the arrangement option; on `503`, retry later. |
 | `transcription_failed` | a failed job | Converting, transcribing, or arranging the audio failed. | Show the message. |

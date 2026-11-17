@@ -776,8 +776,9 @@ class Billing:
                        next_product_id = excluded.next_product_id""",
                 (subscription_id, info.token, user_id, info.product_id, info.state, info.expires_at,
                  int(info.auto_renewing), info.latest_order_id, now, now,
-                 # A paid one waits to be acknowledged; others need nothing.
-                 int(info.acknowledged or not info.paid), info.deferred_product_id),
+                 # A paid one waits to be acknowledged, and a pending one to be
+                 # paid; others need nothing.
+                 int(info.acknowledged or (not info.paid and info.state != "PENDING")), info.deferred_product_id),
             )
             subscription = connection.execute(
                 "SELECT revoked_at, replaced_by FROM subscriptions WHERE id = ?", (subscription_id,)
@@ -827,9 +828,10 @@ class Billing:
                     connection, user_id, subscription_id, info.product_id, info.latest_order_id,
                     now, info.expires_at, plan.minutes,
                 )
-            elif known:
+            elif known and subscription["replaced_by"] is None:
                 # A known order: its period follows Google's expiry, kept
                 # through a grace period, ended at once when not entitled.
+                # A replaced token's period is the replacing one's to end.
                 if info.entitled and subscription["revoked_at"] is None:
                     connection.execute(
                         "UPDATE subscription_periods SET ends_at = ? "
@@ -1443,7 +1445,7 @@ SEQUENCES = {"admin_actions", "admin_web_caps", "minute_ledger"}
 PURCHASE_COLUMNS_SHOWN = ("product_id", "user_id", "minutes", "order_id", "voided_at")
 SUBSCRIPTION_COLUMNS_SHOWN = (
     "id", "user_id", "product_id", "state", "expires_at", "auto_renewing", "latest_order_id",
-    "replaced_by", "revoked_at", "checked_at", "created_at",
+    "replaced_by", "revoked_at", "checked_at", "created_at", "acknowledged", "next_product_id",
 )
 TOKEN_TABLES = {"purchases": PURCHASE_COLUMNS_SHOWN, "subscriptions": SUBSCRIPTION_COLUMNS_SHOWN}
 
@@ -1554,11 +1556,21 @@ def _renew_monthly(connection: sqlite3.Connection, user_id: str) -> int:
     # A subscription period that ended, whose unused minutes have not yet
     # expired: free periods start again from its end.
     ended = connection.execute(
-        """SELECT order_id, ends_at FROM subscription_periods
+        """SELECT order_id, ends_at, subscription_id FROM subscription_periods
            WHERE user_id = ? AND voided_at IS NULL AND unused_minutes IS NULL AND ends_at <= ?
            ORDER BY ends_at DESC LIMIT 1""",
         (user_id, now),
     ).fetchone()
+    if ended is not None and now - int(ended["ends_at"]) < RENEWAL_ANSWER_WAIT:
+        # Not yet read from Google since it ended: a renewal or a grace
+        # period may follow. The refresh reads it within minutes.
+        unread = connection.execute(
+            "SELECT 1 FROM subscriptions WHERE id = ? AND checked_at < ? AND revoked_at IS NULL "
+            "AND replaced_by IS NULL AND state != 'EXPIRED'",
+            (ended["subscription_id"], ended["ends_at"]),
+        ).fetchone()
+        if unread is not None:
+            return 0
     after_subscription = ended is not None
     subscription_end = int(ended["ends_at"]) if ended else 0
     if not after_subscription and now - user["free_grant_at"] < period_seconds():
@@ -1654,6 +1666,9 @@ SUBSCRIPTION_CHECK_FOR = 90 * 24 * 60 * 60
 SUBSCRIPTION_CHECK_MIN_WAIT = 60
 SUBSCRIPTION_CHECK_MAX_WAIT = 6 * 60 * 60
 UNLIMITED_WINDOW = 24 * 60 * 60
+# How long after a subscription period's end its minutes wait for Google's
+# answer on a renewal or a grace period, before the free minutes return.
+RENEWAL_ANSWER_WAIT = 60 * 60
 
 
 @dataclass(frozen=True)
@@ -1860,7 +1875,12 @@ def _void_subscription_order(connection, token: str, order_id: str | None) -> tu
         from_monthly = min(period["minutes"], left)
         from_paid = period["minutes"] - from_monthly
     else:
-        from_paid = max(0, period["minutes"] - (period["unused_minutes"] or 0))
+        unused = (period["unused_minutes"] or 0) + sum(
+            int(row["unused_minutes"] or 0) for row in connection.execute(
+                "SELECT unused_minutes FROM subscription_periods WHERE carried_from = ?", (period["order_id"],)
+            ).fetchall()
+        )
+        from_paid = max(0, period["minutes"] - unused)
     connection.execute(
         "UPDATE users SET minutes = minutes - ?, monthly_minutes = monthly_minutes - ? WHERE user_id = ?",
         (from_paid, from_monthly, user_id),

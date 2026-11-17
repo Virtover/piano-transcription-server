@@ -72,6 +72,9 @@ class SubscriptionOffer(BaseModel):
     unlimited: bool
     # From 1, by minutes; unlimited is the highest.
     level: int
+    # Longer videos than max_video_length_minutes for its subscribers; None
+    # when the plan has the general limit.
+    max_video_length_minutes: int | None = None
 
 
 class SubscriptionResponse(BaseModel):
@@ -89,6 +92,8 @@ class SubscriptionResponse(BaseModel):
     # user deferred to the renewal, as a downgrade; None when it stays.
     next_product_id: str | None = None
     next_name: str | None = None
+    # The plan's longer video limit, if it has one.
+    max_video_length_minutes: int | None = None
 
 
 class ServerInfoResponse(BaseModel):
@@ -134,6 +139,9 @@ class BalanceResponse(BaseModel):
     # one at a time.
     unlimited: bool = False
     unlimited_heavy_use: bool = False
+    # The longest video this user may submit now, with their plan; None for
+    # no limit.
+    max_video_length_minutes: float | None = None
 
 
 class GoogleSubscriptionRequest(BaseModel):
@@ -158,7 +166,7 @@ class CheckedVideo:
     checked_at: float
 
 
-def check_video(source_url: HttpUrl) -> CheckedVideo:
+def check_video(source_url: HttpUrl, user_id: str | None = None) -> CheckedVideo:
     """Read a video's info with yt-dlp, and check its length. A check is
     reused for VIDEO_CHECK_TTL, so asking the cost and then submitting the
     video asks the site once. Requests for a URL being checked wait for that
@@ -172,7 +180,9 @@ def check_video(source_url: HttpUrl) -> CheckedVideo:
             checked = run_check(key, safe_url)
     except SourceError as error:
         raise source_refusal(error) from error
-    return CheckedVideo(ensure_allowed_length(float(checked["info"]["duration"])), checked["info"], checked["checked_at"])
+    return CheckedVideo(
+        ensure_allowed_length(float(checked["info"]["duration"]), user_id), checked["info"], checked["checked_at"]
+    )
 
 
 def cached_check(key: str, wait: float = 0) -> dict[str, Any] | None:
@@ -246,8 +256,8 @@ def source_refusal(error: SourceError) -> HTTPException:
     )
 
 
-def video_duration(source_url: HttpUrl) -> float:
-    return check_video(source_url).duration
+def video_duration(source_url: HttpUrl, user_id: str | None = None) -> float:
+    return check_video(source_url, user_id).duration
 
 
 def ensure_accepting(user_id: str, link: bool, submission: bool = True, source_url: str | None = None) -> None:
@@ -269,9 +279,39 @@ def ensure_accepting(user_id: str, link: bool, submission: bool = True, source_u
         raise source_refusal(limited)
 
 
-def ensure_allowed_length(duration: float) -> float:
-    if settings.limits.max_video_length_minutes and duration > settings.limits.max_video_length_minutes * 60:
-        raise HTTPException(status_code=413, detail="Video exceeds the configured maximum length")
+def plan_video_minutes(product_id: str | None) -> int | None:
+    """A plan's longer video limit, or None when it has none above the
+    general MAX_VIDEO_LENGTH_MINUTES, which then applies."""
+    plan = settings.billing.subscriptions.get(product_id) if product_id else None
+    general = settings.limits.max_video_length_minutes
+    if plan is None or plan.max_video_length_minutes is None or general is None:
+        return None
+    return plan.max_video_length_minutes if plan.max_video_length_minutes > general else None
+
+
+def max_video_minutes(user_id: str | None) -> float | None:
+    """The longest video the user may submit, in minutes; None for no limit:
+    the general limit, or a longer one of the plan whose period runs."""
+    general = settings.limits.max_video_length_minutes
+    if general is None or not user_id or settings.billing.provider == "none" or not any(
+        plan.max_video_length_minutes for plan in settings.billing.subscriptions.values()
+    ):
+        return general
+    subscription = billing.subscription_status(user_id)["subscription"]
+    return plan_video_minutes(subscription["product_id"] if subscription else None) or general
+
+
+def ensure_allowed_length(duration: float, user_id: str | None = None) -> float:
+    minutes = max_video_minutes(user_id)
+    if minutes and duration > minutes * 60:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "message": f"Videos can be up to {minutes:g} minutes long",
+                "error_code": "video_too_long",
+                "max_video_length_minutes": minutes,
+            },
+        )
     return duration
 
 
@@ -312,6 +352,7 @@ def server_info() -> ServerInfoResponse:
                     minutes_per_period=plan.minutes,
                     unlimited=plan.unlimited,
                     level=levels[product_id],
+                    max_video_length_minutes=plan_video_minutes(product_id),
                 )
                 for product_id, plan in settings.billing.subscriptions.items()
                 if product_id in offered
@@ -345,7 +386,11 @@ def balance_of(user_id: str) -> BalanceResponse:
         subscription=SubscriptionResponse(
             **{key: value for key, value in subscription.items() if key != "minutes"},
             minutes_per_period=subscription["minutes"],
+            max_video_length_minutes=plan_video_minutes(subscription["product_id"]),
         ) if subscription else None,
+        max_video_length_minutes=(
+            max_video_minutes(user_id) if settings.billing.provider != "none" else settings.limits.max_video_length_minutes
+        ),
         unlimited=status["unlimited"],
         unlimited_heavy_use=status["unlimited_heavy_use"],
     )
@@ -367,10 +412,11 @@ def cost(
         submission=False,
         source_url=str(source_url) if source_url is not None else None,
     )
+    user_id = user.user_id if user else None
     if source_url is not None:
-        duration = video_duration(source_url)
+        duration = video_duration(source_url, user_id)
     else:
-        duration = ensure_allowed_length(duration_seconds)
+        duration = ensure_allowed_length(duration_seconds, user_id)
     return CostResponse(duration_seconds=duration, cost_minutes=transcription_cost(duration))
 
 
@@ -562,8 +608,12 @@ def verify_google_subscription(
             google_play.acknowledge_subscription(service, info.product_id, request.purchase_token)
             billing.mark_subscription_acknowledged(request.purchase_token)
             acknowledged = True
-        except Exception:
-            logger.exception("Could not acknowledge a Google Play subscription of %s", info.product_id)
+        except Exception as error:  # noqa: BLE001
+            logger.error(
+                "Could not acknowledge a Google Play subscription of %s (%s)",
+                info.product_id,
+                google_play.google_error_summary(error),
+            )
     if result["status"] == "started":
         logger.info(
             "Google Play subscription %s started for user %s: %d minutes",

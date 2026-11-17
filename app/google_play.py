@@ -327,7 +327,7 @@ def refresh_subscriptions(billing, service=None, now: int | None = None) -> int:
                 continue
             if is_network_error(error):
                 raise
-            logger.warning("Could not read a Google Play subscription (%s)", error)
+            logger.warning("Could not read a Google Play subscription (%s)", google_error_summary(error))
             billing.mark_subscription_checked(token)
             continue
         result = billing.record_subscription(None, info)
@@ -343,6 +343,20 @@ def refresh_subscriptions(billing, service=None, now: int | None = None) -> int:
             try:
                 acknowledge_subscription(service, info.product_id, token)
                 billing.mark_subscription_acknowledged(token)
-            except Exception:
-                logger.exception("Could not acknowledge a Google Play subscription of %s", info.product_id)
+            except Exception as error:  # noqa: BLE001
+                logger.error(
+                    "Could not acknowledge a Google Play subscription of %s (%s)",
+                    info.product_id,
+                    google_error_summary(error),
+                )
     return read
+
+
+def google_error_summary(error: Exception) -> str:
+    """What went wrong with a Google request, without its URL, which names
+    the purchase token."""
+    status = getattr(getattr(error, "resp", None), "status", None)
+    reason = getattr(error, "reason", None) or getattr(error, "_get_reason", lambda: None)()
+    if status is not None:
+        return f"HTTP {status}" + (f": {reason}" if reason else "")
+    return type(error).__name__

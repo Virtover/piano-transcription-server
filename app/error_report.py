@@ -109,10 +109,15 @@ def secret_values(config) -> list[str]:
     return sorted({value for value in values if len(value) >= MIN_REDACTED_LENGTH}, key=len, reverse=True)
 
 
+PURCHASE_TOKEN_PATH = re.compile(r"(/tokens/)[^/:?\s\"'<>]+")
+
+
 def redact(text: str, secrets: list[str]) -> str:
     for secret in secrets:
         text = text.replace(secret, REDACTED)
     text = URL_PASSWORD.sub(lambda m: m.group(1) + REDACTED + "@", text)
+    # Google Play's URLs name a purchase by its token, which claims it.
+    text = PURCHASE_TOKEN_PATH.sub(r"\1" + REDACTED, text)
     return URL_QUERY.sub(lambda m: m.group(1) + "?…", text)
 
 
