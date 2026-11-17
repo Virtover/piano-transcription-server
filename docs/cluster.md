@@ -107,6 +107,8 @@ A switch set on the hub lasts until changed, also across reboots. A device stopp
 
 **Updates:** update the hub first (`git pull`, then `python scripts/server.py restart 5m`), then each device (`git pull`, then `python scripts/server.py update`). A device of an older protocol version waits, taking no job, until it is updated; one of other code but the same protocol runs, and `nodes` says so.
 
+**Restarts on a device:** `stop`, `restart`, and `update` first let the device's running jobs finish (`--grace`, by default 5 minutes), and `nodes` shows its worker as `drained` meanwhile. `restart` and `update` then always start a new container, which takes work again, also when nothing was rebuilt. If one is cut off in between (Ctrl+C, a lost connection, a power cut), the drain lapses 5 minutes after its grace period, and the worker takes work again by itself.
+
 **Revoking** removes the node's Redis user and its bucket keys, and closes its connections; its running jobs are queued again elsewhere within a minute. With a provider's bucket, every node shares its keys: replace them at the provider if a device may be in the wrong hands.
 
 ## 📦 Images from the hub (optional)
