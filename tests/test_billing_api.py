@@ -157,6 +157,26 @@ def test_a_purchase_consumed_meanwhile_counts_as_consumed(api_context, monkeypat
     assert products.consumed == 0
 
 
+def test_a_purchase_another_request_consumed_first_counts_as_consumed(api_context, monkeypatch, caplog):
+    from googleapiclient.errors import HttpError
+
+    client, settings, _ = api_context
+    # The app sent the purchase twice at once; the other request consumed it,
+    # and Google then answers that the product is no longer owned.
+    not_owned = HttpError(
+        types.SimpleNamespace(status=400, reason="Bad Request"),
+        b'{"error": {"errors": [{"reason": "productNotOwnedByUser"}]}}',
+    )
+    products = FakeProducts(COMPLETED, [not_owned])
+    products.later_states = [{"consumptionState": 1}]
+    google_play_service(monkeypatch, settings, COMPLETED, products)
+
+    response = verify(client)
+
+    assert response.json()["consumed"] is True
+    assert "Could not consume" not in caplog.text
+
+
 def test_consuming_gives_up_after_its_attempts(api_context, monkeypatch, caplog):
     from app.api.routes import billing as billing_routes
 

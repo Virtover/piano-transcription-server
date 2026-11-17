@@ -394,6 +394,14 @@ def is_concurrent_update(error: Exception) -> bool:
     return status == 409 and b"concurrentUpdate" in (getattr(error, "content", None) or b"")
 
 
+def _consumed(products: Any, package: str, product_id: str, token: str) -> bool:
+    try:
+        state = products.get(packageName=package, productId=product_id, token=token).execute()
+    except Exception:
+        return False
+    return state.get("consumptionState") == 1
+
+
 def consume_purchase(service: Any, product_id: str, token: str) -> None:
     """Consume the purchase, waiting out concurrent changes. Returns once it
     is consumed, by this call or by another; raises otherwise."""
@@ -405,7 +413,13 @@ def consume_purchase(service: Any, product_id: str, token: str) -> None:
             products.consume(packageName=package, productId=product_id, token=token).execute()
             return
         except Exception as error:
-            if attempt == CONSUME_ATTEMPTS or not is_concurrent_update(error):
+            if not is_concurrent_update(error):
+                # Another request may have consumed it just before: Google
+                # then says the product is no longer owned.
+                if _consumed(products, package, product_id, token):
+                    return
+                raise
+            if attempt == CONSUME_ATTEMPTS:
                 raise
         time.sleep(wait)
         wait *= 2
