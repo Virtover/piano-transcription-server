@@ -1,5 +1,5 @@
 /* The server panel, in the style of the Piano Weave website's admin panel:
-   neutral glass over a deep crimson glow, champagne gold accents, a colour per
+   neutral glass over a warm lamplight glow, champagne gold accents, a colour per
    tile. The site's fonts (Inter, JetBrains Mono) are used when installed;
    nothing loads from elsewhere, as the page's policy allows only its own files. */
 
@@ -46,11 +46,12 @@
 body {
   font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   background-color: #0a0b10;
-  /* The website admin's backdrop: a crimson glow from above and from the far corner. */
+  /* Lamplight: a warm glow from above, as from a lamp over the keys, and a
+     fainter one from the far corner. */
   background-image:
-    radial-gradient(ellipse 1100px 620px at 70% -10%, rgba(220, 38, 38, 0.24), transparent 70%),
-    radial-gradient(ellipse 800px 650px at 100% 100%, rgba(185, 28, 28, 0.18), transparent 70%),
-    linear-gradient(180deg, #140b0e 0%, #0a0b10 45%, #07070b 100%);
+    radial-gradient(ellipse 1100px 620px at 70% -10%, rgba(255, 184, 92, 0.20), transparent 70%),
+    radial-gradient(ellipse 800px 650px at 100% 100%, rgba(214, 140, 60, 0.12), transparent 70%),
+    linear-gradient(180deg, #15100a 0%, #0b0a09 45%, #070708 100%);
   background-attachment: fixed;
   color: var(--text-primary);
   line-height: 1.55;
@@ -62,7 +63,7 @@ body {
 body::before {
   content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
   background:
-    radial-gradient(ellipse at 60% 40%, rgba(120, 30, 36, 0.10), transparent 55%),
+    radial-gradient(ellipse at 60% 40%, rgba(140, 92, 40, 0.10), transparent 55%),
     radial-gradient(ellipse at center, transparent 35%, rgba(5, 5, 8, 0.7) 100%);
 }
 
