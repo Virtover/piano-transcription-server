@@ -418,9 +418,11 @@ class BillingSettings(BaseSettings):
     free_minutes_period: DurationText = Field(default=None, validation_alias="FREE_MINUTES_INTERVAL")
     # Given once, to each new account, as paid minutes that never expire.
     welcome_minutes: int = Field(default=0, ge=0, validation_alias="WELCOME_MINUTES")
-    # Fair use of an unlimited subscription: the most minutes of jobs it
-    # starts in any 24 hours.
-    unlimited_daily_minutes: int = Field(default=600, ge=1)
+    # An unlimited subscription is never refused for its use. Past this
+    # many minutes of jobs in 24 hours, its jobs run at most
+    # unlimited_heavy_use_jobs at a time and never on RunPod.
+    unlimited_heavy_use_minutes: int = Field(default=600, ge=1)
+    unlimited_heavy_use_jobs: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
     def _distinct_plans(self) -> "BillingSettings":

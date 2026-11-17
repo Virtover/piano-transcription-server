@@ -299,7 +299,7 @@ def test_the_admin_page_offers_only_modes_that_turn_it_on(server):
 def test_a_file_secret_is_copied(server, tmp_path_factory):
     download = tmp_path_factory.mktemp("downloads") / "key.json"
     download.write_text('{"type": "service_account"}', encoding="utf-8")
-    setup, _ = make(server, answers=["", "com.example.app", '["id.apps.googleusercontent.com"]', "", "", "", "", "", "", "",
+    setup, _ = make(server, answers=["", "com.example.app", '["id.apps.googleusercontent.com"]', "", "", "", "", "", "", "", "",
                                      str(download), ""])
 
     setup.set_up("billing")

@@ -257,7 +257,8 @@ def run_show(args) -> None:
             f"{when(subscription['period_ends_at'])}, Google Play state {subscription['state'] or '-'}"
         )
         if data["unlimited"]:
-            print(f"  unlimited: {data['unlimited_minutes_left']} minutes left of the fair-use limit for 24 hours")
+            heavy = "heavy use in the last 24 hours: one job at a time, never outsourced" if data["unlimited_heavy_use"] else "normal use"
+            print(f"  unlimited: {heavy}")
     free = data["free_minutes"]
     if free is not None and subscription is None:
         next_grant = when(free["next_grant_at"]) if free["next_grant_at"] else "the next request"

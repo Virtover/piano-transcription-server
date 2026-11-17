@@ -101,8 +101,6 @@ class ServerInfoResponse(BaseModel):
     subscriptions: list[SubscriptionOffer] | None = None
     # Given once to each new account; only when billing is enabled.
     welcome_minutes: int | None = None
-    # An unlimited plan's fair-use limit, in minutes of jobs a day.
-    unlimited_daily_minutes: int | None = None
     # only present when billing is enabled
     free_minutes: int | None = None
     free_minutes_period: str | None = None
@@ -127,10 +125,11 @@ class BalanceResponse(BaseModel):
     developer: bool = False
     # The subscription whose period runs now; its minutes are monthly_minutes.
     subscription: SubscriptionResponse | None = None
-    # An unlimited subscription: jobs are not charged, up to the fair-use
-    # limit, of which unlimited_minutes_left remain in the last 24 hours.
+    # An unlimited subscription: jobs are never charged nor refused for use.
+    # After heavy use in the last 24 hours (unlimited_heavy_use), they run
+    # one at a time.
     unlimited: bool = False
-    unlimited_minutes_left: int | None = None
+    unlimited_heavy_use: bool = False
 
 
 class GoogleSubscriptionRequest(BaseModel):
@@ -316,7 +315,6 @@ def server_info() -> ServerInfoResponse:
             key=lambda offer: offer.level,
         )
         info.welcome_minutes = settings.billing.welcome_minutes
-        info.unlimited_daily_minutes = settings.billing.unlimited_daily_minutes
         info.free_minutes = settings.billing.free_minutes
         info.free_minutes_period = settings.billing.free_minutes_period
         info.google_oauth_client_ids = google_oauth_client_ids()
@@ -345,7 +343,7 @@ def balance_of(user_id: str) -> BalanceResponse:
             minutes_per_period=subscription["minutes"],
         ) if subscription else None,
         unlimited=status["unlimited"],
-        unlimited_minutes_left=status["unlimited_minutes_left"],
+        unlimited_heavy_use=status["unlimited_heavy_use"],
     )
 
 

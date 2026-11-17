@@ -168,7 +168,7 @@ class Billing:
                         product_id TEXT NOT NULL, minutes INTEGER CHECK (minutes > 0), starts_at BIGINT NOT NULL,
                         ends_at BIGINT NOT NULL, unused_minutes INTEGER, voided_at BIGINT
                     );
-                    -- Jobs of an unlimited subscription, for its fair-use limit
+                    -- Jobs of an unlimited subscription, to tell heavy use
                     -- and to charge them when its order is refunded. 0 minutes
                     -- once the job was released.
                     CREATE TABLE IF NOT EXISTS unlimited_usage (
@@ -548,9 +548,9 @@ class Billing:
                 return int(available)
             period = _current_period(connection, user_id)
             if period is not None and period["minutes"] is None:
-                # An unlimited subscription: nothing is held or charged, but
-                # the job counts towards its fair-use limit, and is charged
-                # after all if the order is refunded.
+                # An unlimited subscription: nothing is held or charged, and
+                # nothing refused. The job is counted, to tell heavy use, and
+                # charged after all if the order is refunded.
                 _use_unlimited(connection, user_id, job_id, cost, period["order_id"])
                 return int(available)
             if available < cost:
@@ -849,9 +849,9 @@ class Billing:
 
     def subscription_status(self, user_id: str) -> dict:
         """The user's subscription for the apps: the plan whose period runs
-        now, whether it renews, and for an unlimited one, what is left of
-        its fair-use limit."""
-        empty = {"subscription": None, "unlimited": False, "unlimited_minutes_left": None}
+        now, whether it renews, and for an unlimited one, whether its use in
+        the last 24 hours is heavy (see unlimited_heavy_use)."""
+        empty = {"subscription": None, "unlimited": False, "unlimited_heavy_use": False}
         if settings.billing.provider == "none":
             return empty
         now = int(time.time())
@@ -876,7 +876,7 @@ class Billing:
                 "state": subscription["state"] if subscription else None,
             },
             "unlimited": unlimited,
-            "unlimited_minutes_left": max(0, settings.billing.unlimited_daily_minutes - used) if unlimited else None,
+            "unlimited_heavy_use": unlimited and used >= settings.billing.unlimited_heavy_use_minutes,
         }
 
     def end_subscription(self, token: str) -> None:
@@ -899,6 +899,21 @@ class Billing:
                 "UPDATE subscriptions SET checked_at = ? WHERE purchase_token = ?",
                 (int(time.time()), token),
             )
+
+    def unlimited_heavy_use(self, user_id: str) -> bool:
+        """Whether the user is on an unlimited plan and started at least
+        BILLING_UNLIMITED_HEAVY_USE_MINUTES of jobs in the last 24 hours.
+        Such jobs are never refused: they run one at a time
+        (BILLING_UNLIMITED_HEAVY_USE_JOBS) and never on RunPod, so that one
+        account cannot take every worker or run up the provider's bill."""
+        if settings.billing.provider == "none":
+            return False
+        now = int(time.time())
+        with closing(self._connect()) as connection:
+            period = _current_period(connection, user_id, now)
+            if period is None or period["minutes"] is not None:
+                return False
+            return _unlimited_used(connection, user_id, now) >= settings.billing.unlimited_heavy_use_minutes
 
     def credit_all(self, minutes: int, reason: str, actor: str, grant_id: str) -> dict:
         """Add minutes to every account's paid balance, never expiring, with
@@ -1629,16 +1644,6 @@ class SubscriptionOwned(Exception):
     """The subscription belongs to another account."""
 
 
-class FairUseLimit(Exception):
-    """An unlimited subscription started its fair-use limit of jobs in the
-    last 24 hours."""
-
-    def __init__(self, retry_after: int, limit: int):
-        super().__init__(f"Fair-use limit of {limit} minutes a day reached")
-        self.retry_after = retry_after
-        self.limit = limit
-
-
 def subscription_key(token: str) -> str:
     """How tables other than subscriptions name a subscription: never by its
     purchase token, which would let whoever reads them claim it."""
@@ -1717,28 +1722,13 @@ def _unlimited_used(connection, user_id: str, now: int) -> int:
 
 
 def _use_unlimited(connection, user_id: str, job_id: str, cost: int, order_id: str) -> None:
-    """Count a job of an unlimited subscription, or raise FairUseLimit,
-    saying when it would fit."""
+    """Count a job of an unlimited subscription. Never refused for use."""
     now = int(time.time())
-    limit = settings.billing.unlimited_daily_minutes
     counted = connection.execute(
         "SELECT user_id, minutes FROM unlimited_usage WHERE job_id = ?", (job_id,)
     ).fetchone()
     if counted is not None and (counted["minutes"] > 0 or counted["user_id"] != user_id):
         raise ValueError(f"Job {job_id} already has a reservation")
-    rows = connection.execute(
-        "SELECT minutes, at FROM unlimited_usage WHERE user_id = ? AND at > ? AND minutes > 0 ORDER BY at",
-        (user_id, now - UNLIMITED_WINDOW),
-    ).fetchall()
-    used = sum(int(row["minutes"]) for row in rows)
-    if used + cost > limit:
-        retry_at = now + UNLIMITED_WINDOW
-        for row in rows:
-            used -= int(row["minutes"])
-            if used + cost <= limit:
-                retry_at = int(row["at"]) + UNLIMITED_WINDOW
-                break
-        raise FairUseLimit(max(1, retry_at - now), limit)
     counted = connection.execute(
         """INSERT INTO unlimited_usage (job_id, user_id, order_id, minutes, at) VALUES (?, ?, ?, ?, ?)
            ON CONFLICT (job_id) DO UPDATE SET order_id = excluded.order_id, minutes = excluded.minutes,

@@ -80,13 +80,13 @@ Plans have levels by their minutes, unlimited highest. Two plans may share neith
 * **Renewals** are read from Google Play: the API asks for each subscription from 10 minutes before its period ends, every minute, then more rarely, for up to 90 days. The app also sends its subscriptions at start. A renewal's order starts the next period once, however often it is reported.
 * **A grace period**, while Google retries a failed payment, keeps the plan but gives no new minutes until the payment comes. An account hold, a pause, or an expiry ends the period at once.
 * **Upgrades and downgrades** replace the subscription: the new one's first order starts its period, and the replaced one is never renewed again.
-* **Unlimited** plans charge nothing, but each account may start at most `BILLING_UNLIMITED_DAILY_MINUTES` minutes of jobs in any 24 hours; beyond that, a submission is refused with HTTP 429, `error_code` `fair_use_limit`, and `Retry-After`. The per-user job limit applies as for everyone.
+* **Unlimited** plans charge nothing and never refuse a job for its use. To keep one account from taking every worker, once it has started `BILLING_UNLIMITED_HEAVY_USE_MINUTES` minutes of jobs in the last 24 hours its jobs run `BILLING_UNLIMITED_HEAVY_USE_JOBS` at a time (one by default) and never on RunPod, so heavy use costs nothing beyond the server's own GPUs. Other users keep their place. The balance says so in `unlimited_heavy_use`.
 * **One account per subscription.** The app gives Google Play the SHA-256 of the user ID as the obfuscated account ID. A subscription bought for, or first sent by, another account is refused with HTTP 409, `error_code` `subscription_owned`. An account deleted and made again by the same person gets it back.
 * **Acknowledgement.** The server acknowledges each new subscription, which Google refunds within three days otherwise. If that fails, the answer has `acknowledged: false`, and the renewal reads try again.
 
 The app sends a subscription to `POST /api/billing/google-play/subscriptions/verify` with `product_id` and `purchase_token`, as for products. The answer has `status` (`started` when an order's period started now, `recorded` otherwise), `granted_minutes`, `acknowledged`, and the new balance. Each account may ask to verify products and subscriptions 60 times in 10 minutes.
 
-`GET /api/billing/server-info` lists the plans in `subscriptions`, lowest level first, and `GET /api/billing/balance` gives the running plan in `subscription`, with `unlimited` and `unlimited_minutes_left`.
+`GET /api/billing/server-info` lists the plans in `subscriptions`, lowest level first, and `GET /api/billing/balance` gives the running plan in `subscription`, with `unlimited` and `unlimited_heavy_use`.
 
 ## 🎁 Welcome minutes
 

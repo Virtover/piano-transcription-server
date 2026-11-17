@@ -212,10 +212,14 @@ def arrangement_workers(redis: Redis) -> tuple[int, int]:
     return len(workers), sum(1 for worker in workers if worker["arrangement"])
 
 
-def choose_backend(redis: Redis, job_id: str, arrangement: bool = False) -> Backend:
+def choose_backend(redis: Redis, job_id: str, arrangement: bool = False, outsource: bool = True) -> Backend:
     """Pick the backend for a newly queued job and count it as active there.
     An arrangement goes remote when no live local worker arranges, as when
-    the local wait is too long."""
+    the local wait is too long. outsource False keeps it local whatever the
+    mode, for heavy use of an unlimited plan."""
+    if not outsource:
+        redis.sadd(ACTIVE_KEYS["local"], job_id)
+        return "local"
     mode = settings.outsource.routing
     if outsourcing_enabled() and mode.startswith("remote_first"):
         if mode == "remote_first_fallback" or reserve_remote_slot(redis, job_id):

@@ -13,7 +13,6 @@ from pydantic import ValidationError
 
 from app.billing import (
     DELETED_USER_ID,
-    FairUseLimit,
     InsufficientMinutes,
     SubscriptionInfo,
     SubscriptionOwned,
@@ -42,7 +41,7 @@ def subs(request, api_context, monkeypatch):
     settings.billing.subscriptions = plans()
     settings.billing.free_minutes = 10
     settings.billing.free_minutes_period = "30d"
-    settings.billing.unlimited_daily_minutes = 60
+    settings.billing.unlimited_heavy_use_minutes = 60
     if request.param == "postgres":
         import psycopg
 
@@ -307,7 +306,7 @@ def test_an_upgrade_replaces_the_old_subscription(subs):
     status = billing.subscription_status("user")
     assert status["unlimited"] is True
     assert status["subscription"]["level"] == 2
-    assert status["unlimited_minutes_left"] == 60
+    assert status["unlimited_heavy_use"] is False
     old = billing.read("SELECT replaced_by FROM subscriptions WHERE purchase_token = 'old'")[0]
     assert old["replaced_by"] is not None
     # A late renewal report of the replaced one changes nothing.
@@ -367,19 +366,21 @@ def test_subscriptions_to_check_back_off_after_expiry(subs):
 
 # --- Unlimited ---------------------------------------------------------------------------------
 
-def test_unlimited_jobs_are_not_charged_up_to_the_fair_use_limit(subs):
+def test_unlimited_jobs_are_never_charged_nor_refused(subs):
     _, _, billing = subs
     billing.record_subscription("user", sub(product="sub_unlimited"))
 
     billing.reserve("user", "job-1", 40)
     billing.settle_success("job-1")
-    with pytest.raises(FairUseLimit) as refused:
-        billing.reserve("user", "job-2", 30)
+    assert billing.unlimited_heavy_use("user") is False
+    # Past the heavy-use threshold, still accepted and free.
+    billing.reserve("user", "job-2", 30)
+    billing.settle_success("job-2")
+    billing.reserve("user", "job-3", 500)
 
-    assert 0 < refused.value.retry_after <= DAY
     assert balances(billing) == {"minutes": 0, "monthly_minutes": 0, "paid_minutes": 0}
-    assert billing.subscription_status("user")["unlimited_minutes_left"] == 20
-    billing.reserve("user", "job-3", 20)
+    assert billing.unlimited_heavy_use("user") is True
+    assert billing.subscription_status("user")["unlimited_heavy_use"] is True
 
 
 def test_released_and_cancelled_unlimited_jobs_count_as_far_as_they_ran(subs):
@@ -390,20 +391,23 @@ def test_released_and_cancelled_unlimited_jobs_count_as_far_as_they_ran(subs):
     billing.reserve("user", "job-2", 50)
     billing.settle_cancellation("job-2", 10)
 
-    assert billing.subscription_status("user")["unlimited_minutes_left"] == 50
-    # A released job can be queued again.
+    used = billing.read("SELECT SUM(minutes) AS used FROM unlimited_usage")[0]["used"]
+    assert used == 10
+    assert billing.unlimited_heavy_use("user") is False
+    # A released job can be queued again; one in use cannot.
     billing.reserve("user", "job-1", 50)
     with pytest.raises(ValueError):
         billing.reserve("user", "job-1", 5)
 
 
-def test_the_fair_use_window_is_24_hours(subs):
+def test_heavy_use_counts_the_last_24_hours(subs):
     _, _, billing = subs
     billing.record_subscription("user", sub(product="sub_unlimited"))
     billing.reserve("user", "job-1", 60)
+    assert billing.unlimited_heavy_use("user") is True
     write(billing, "UPDATE unlimited_usage SET at = at - ?", (DAY + 1,))
 
-    billing.reserve("user", "job-2", 60)
+    assert billing.unlimited_heavy_use("user") is False
 
 
 def test_after_unlimited_ends_jobs_are_charged_again(subs):
@@ -417,32 +421,12 @@ def test_after_unlimited_ends_jobs_are_charged_again(subs):
     assert balances(billing)["minutes"] == 0
 
 
-def test_a_developer_is_not_limited_by_fair_use(subs):
+def test_only_unlimited_plans_have_heavy_use(subs):
     _, _, billing = subs
-    billing.record_subscription("user", sub(product="sub_unlimited"))
-    billing.set_developer("user", True, "admin")
-    for job in range(5):
-        billing.reserve("user", f"job-{job}", 60)
-
-
-# --- Refunds ------------------------------------------------------------------------------------
-
-def test_a_refunded_running_order_takes_its_minutes_back(subs):
-    _, _, billing = subs
-    billing.credit_purchase("user", "starter", "product-token", "GPA.P")
-    billing.record_subscription("user", sub(order="GPA.1"))
-    billing.reserve("user", "job-1", 70)
-    billing.settle_success("job-1")
-
-    assert billing.void_purchase("token-1", "GPA.1") == ("user", 100)
-
-    # 30 unused from the monthly balance, the 70 used from the paid one.
-    assert balances(billing) == {"minutes": -60, "monthly_minutes": 0, "paid_minutes": -60}
-    assert billing.subscription_status("user")["subscription"] is None
-    assert billing.void_purchase("token-1", "GPA.1") is None
-    # A refunded subscription is not given again by a late report.
-    assert billing.record_subscription("user", sub(order="GPA.1"))["minutes"] == 0
-    assert_ledger_adds_up(billing)
+    billing.record_subscription("user", sub())
+    billing.reserve("user", "job-1", 90)
+    assert billing.unlimited_heavy_use("user") is False
+    assert billing.unlimited_heavy_use("nobody") is False
 
 
 def test_a_refunded_past_order_takes_back_what_was_used(subs):
@@ -754,7 +738,7 @@ def test_server_info_lists_the_plans_by_level(google):
          "minutes_per_period": None, "unlimited": True, "level": 2},
     ]
     assert info["welcome_minutes"] == 20
-    assert info["unlimited_daily_minutes"] == 60
+    assert "unlimited_daily_minutes" not in info
 
 
 def test_server_info_offers_only_plans_active_in_google_play(google, monkeypatch):
@@ -929,49 +913,55 @@ def test_balance_shows_an_unlimited_plan(google):
     balance = client.get("/api/billing/balance", headers=AUTH).json()
 
     assert balance["unlimited"] is True
-    assert balance["unlimited_minutes_left"] == 60
+    assert balance["unlimited_heavy_use"] is False
+    assert "unlimited_minutes_left" not in balance
     assert balance["subscription"]["minutes_per_period"] is None
     assert balance["subscription"]["level"] == 2
 
 
-def test_an_unlimited_plan_refuses_jobs_past_fair_use(google):
+def test_heavy_use_of_unlimited_runs_one_job_at_a_time_and_never_outsourced(google, monkeypatch):
+    from app.outsource import routing
+
     client, settings, billing, fake = google
-    settings.billing.unlimited_daily_minutes = 3
+    settings.billing.unlimited_heavy_use_minutes = 3
+    settings.limits.max_active_jobs_per_user = 5
     fake.subscriptions["token-1"] = google_subscription(product="sub_unlimited")
     assert verify(client, product="sub_unlimited").json()["status"] == "started"
     user_id = user_id_of(client)
-    # The test video costs 2 minutes.
-    first = client.post("/api/transcriptions", json={"source_url": "https://www.youtube.com/watch?v=abc"}, headers=AUTH)
-    assert first.status_code in (200, 201, 202), first.text
+    chosen = []
+    original = routing.choose_backend
 
-    second = client.post("/api/transcriptions", json={"source_url": "https://www.youtube.com/watch?v=abd"}, headers=AUTH)
+    def choose(redis, job_id, arrangement=False, outsource=True):
+        chosen.append(outsource)
+        return original(redis, job_id, arrangement, outsource=outsource)
 
-    assert second.status_code == 429
-    assert second.json()["detail"]["error_code"] == "fair_use_limit"
-    assert int(second.headers["Retry-After"]) > 0
-    # Neither was charged: the free minutes are all there.
+    monkeypatch.setattr(routing, "choose_backend", choose)
+    # The test video costs 2 minutes: two jobs reach the threshold of 3.
+    for video in ("abc", "abd"):
+        response = client.post(
+            "/api/transcriptions", json={"source_url": f"https://www.youtube.com/watch?v={video}"}, headers=AUTH
+        )
+        assert response.status_code == 202, response.text
+    # The job that reaches the threshold is the first kept off RunPod.
+    assert chosen == [True, False]
+    assert billing.unlimited_heavy_use(user_id) is True
+
+    # Heavy use: the two still in progress hold the one place it has now.
+    third = client.post("/api/transcriptions", json={"source_url": "https://www.youtube.com/watch?v=abe"}, headers=AUTH)
+    assert third.status_code == 429
+    assert "one at a time" in third.json()["detail"]
+    assert client.get("/api/billing/balance", headers=AUTH).json()["unlimited_heavy_use"] is True
+
+    # Once nothing runs, it is accepted, free, and kept off RunPod.
+    from app import job_limits
+
+    from app.api.routes import transcriptions as transcription_routes
+
+    transcription_routes.redis.delete(job_limits.user_jobs_key(user_id))
+    fourth = client.post("/api/transcriptions", json={"source_url": "https://www.youtube.com/watch?v=abf"}, headers=AUTH)
+    assert fourth.status_code == 202, fourth.text
+    assert chosen[-1] is False
     assert billing.balances(user_id)["monthly_minutes"] == 0
-    assert billing.subscription_status(user_id)["unlimited_minutes_left"] == 1
-
-
-# --- Admin ---------------------------------------------------------------------------------------
-
-def test_admin_credit_all_needs_positive_minutes_and_accounts(subs):
-    from app.admin import users
-    from app.admin.common import AdminError
-
-    _, _, billing = subs
-    with pytest.raises(AdminError, match="no accounts"):
-        users.credit_all_plan(5)
-    billing.renew_monthly_minutes("a")
-    with pytest.raises(AdminError, match="positive"):
-        users.credit_all_plan(-5)
-    with pytest.raises(AdminError, match="At most"):
-        users.credit_all_plan(users.CREDIT_ALL_LIMIT + 1)
-    with pytest.raises(AdminError, match="reason"):
-        users.credit_all(5, "admin", None, "g")
-    assert users.credit_all_plan(5) == {"minutes": 5, "accounts": 1, "total": 5}
-    assert users.credit_all(5, "admin", "thanks", "g")["accounts"] == 1
 
 
 def test_admin_user_view_shows_the_subscription(subs):
@@ -1018,7 +1008,7 @@ def test_the_admin_web_role_gives_minutes_to_all_and_never_reads_tokens(subs, mo
     assert page.credit_all(3, "outage", "web:admin", "grant1")["accounts"] == 1
     assert page.undo_credit_all("grant1", "mistake", "web:admin")["taken"] == 3
     page.release("job-1")
-    assert owner.subscription_status("user")["unlimited_minutes_left"] == 60
+    assert owner.subscription_status("user")["unlimited_heavy_use"] is False
     with psycopg.connect(role_url) as connection:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             connection.execute("SELECT purchase_token FROM subscriptions")

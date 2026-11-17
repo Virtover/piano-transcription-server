@@ -38,10 +38,14 @@ def _take(redis: Redis, key: str, job_id: str, limit: int, job_key) -> bool:
     return True
 
 
-def acquire(redis: Redis, job_id: str, user_id: str, job_key, per_user: bool = True) -> None:
+def acquire(
+    redis: Redis, job_id: str, user_id: str, job_key, per_user: bool = True, heavy_use: bool = False
+) -> None:
     """Count a new job against the limits, or raise TooManyJobs. With
     billing off every client is the same anonymous user, so only the total
-    applies; per_user False, for a developer's account, skips the user's."""
+    applies; per_user False, for a developer's account, skips the user's.
+    heavy_use, for an unlimited plan used heavily, lowers the user's to
+    BILLING_UNLIMITED_HEAVY_USE_JOBS."""
     limits = settings.limits
     if not _take(redis, ALL_JOBS_KEY, job_id, limits.max_active_jobs, job_key):
         raise TooManyJobs("The server is busy; try again when some transcriptions have finished")
@@ -49,8 +53,16 @@ def acquire(redis: Redis, job_id: str, user_id: str, job_key, per_user: bool = T
         return
     # An administrator can change the per-user limit for a while.
     per_user = controls.per_user_job_limit(redis)
+    if heavy_use:
+        per_user = min(per_user or settings.billing.unlimited_heavy_use_jobs, settings.billing.unlimited_heavy_use_jobs)
     if not _take(redis, user_jobs_key(user_id), job_id, per_user, job_key):
         redis.srem(ALL_JOBS_KEY, job_id)
+        if heavy_use:
+            raise TooManyJobs(
+                "You have transcribed a lot today, so your transcriptions now run "
+                f"{'one' if per_user == 1 else per_user} at a time; this one can start when "
+                f"{'the current one finishes' if per_user == 1 else 'one finishes'}"
+            )
         raise TooManyJobs(
             f"You can have at most {per_user} transcriptions in progress; "
             "wait for one to finish"

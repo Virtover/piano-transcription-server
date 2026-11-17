@@ -15,7 +15,7 @@ from app import job_limits, job_storage, maintenance, video_check, video_info
 from app.job_storage import StorageUnavailable, delete_job_files
 from app.maintenance import NoticeResponse
 from app.config import settings
-from app.billing import Billing, FairUseLimit, transcription_cost, InsufficientMinutes
+from app.billing import Billing, transcription_cost, InsufficientMinutes
 from app.api.routes.billing import check_video, ensure_accepting, ensure_allowed_length
 from app.auth import AuthenticatedUser, current_user
 from app.media import UnsupportedMedia, probe_audio
@@ -249,13 +249,15 @@ def hold_place(job_id: str, user_id: str, status: str) -> None:
     # Asked before anything is stored, so a database that cannot be reached
     # leaves no placeholder behind to refuse the retry.
     per_user = not billing.is_developer(user_id)
+    # Heavy use of an unlimited plan: one job at a time, never refused for use.
+    heavy = per_user and billing.unlimited_heavy_use(user_id)
     # Claimed atomically, so two copies of a submission cannot both queue it.
     if not redis.hsetnx(key, "status", status):
         raise SubmissionExists()
     redis.hset(key, "user_id", user_id)
     redis.expire(key, PLACEHOLDER_TTL)
     try:
-        job_limits.acquire(redis, job_id, user_id, job_key, per_user=per_user)
+        job_limits.acquire(redis, job_id, user_id, job_key, per_user=per_user, heavy_use=heavy)
     except job_limits.TooManyJobs as error:
         redis.delete(key)
         raise HTTPException(status_code=429, detail=str(error), headers={"Retry-After": "60"}) from error
@@ -365,18 +367,6 @@ def queue_job(
     current_user_balance(current_user)
     try:
         current_balance = billing.reserve(current_user, job_id, cost, email)
-    except FairUseLimit as error:
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "message": f"Unlimited plans start up to {error.limit} minutes of transcriptions a day; "
-                "try again later",
-                "error_code": "fair_use_limit",
-                "required_minutes": cost,
-                "retry_after": error.retry_after,
-            },
-            headers={"Retry-After": str(error.retry_after)},
-        ) from error
     except InsufficientMinutes as error:
         raise HTTPException(
             status_code=402,
@@ -405,7 +395,10 @@ def queue_job(
     if backend is None:
         # From the stored job, which an administrator's requeue keeps.
         arrangement = redis.hget(job_key(job_id), "mode") == ARRANGEMENT
-        backend = routing.choose_backend(redis, job_id, arrangement)
+        # Heavy use of an unlimited plan never runs up the provider's bill.
+        backend = routing.choose_backend(
+            redis, job_id, arrangement, outsource=not billing.unlimited_heavy_use(current_user)
+        )
     else:
         routing.mark_active(redis, backend, job_id)
     redis.hset(job_key(job_id), "backend", backend)

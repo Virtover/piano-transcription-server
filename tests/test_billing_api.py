@@ -19,7 +19,7 @@ def test_none_provider_exposes_balance_and_rejects_google_play(api_context):
         "developer": False,
         "subscription": None,
         "unlimited": False,
-        "unlimited_minutes_left": None,
+        "unlimited_heavy_use": False,
     }
 
     response = client.post(
