@@ -9,7 +9,7 @@ const modalRoot = document.getElementById("modal-root");
 const SVG_NS = document.querySelector(".adm-nav svg").namespaceURI;
 const REFRESH_SECONDS = 30;
 // Changes that need a reason; the server checks this too.
-const REASON_REQUIRED = new Set(["job.cancel", "user.credit", "user.developer", "limits.block"]);
+const REASON_REQUIRED = new Set(["job.cancel", "user.credit", "users.credit_all", "user.developer", "limits.block"]);
 const STATUS_KIND = {
   queued: "info", processing: "busy", completed: "good", failed: "bad",
   cancelled: "quiet", preparing: "quiet", uploading: "quiet",
@@ -473,6 +473,12 @@ function planSummary(action, plan) {
       el("div", { class: "delta" }, `${fmt(plan.balance)} min`, el("span", { class: "arrow", text: "→" }), `${fmt(plan.balance_after)} min`),
       facts([["Account", plan.email || plan.user_id], ["Change", `${plan.minutes > 0 ? "+" : ""}${fmt(plan.minutes)} minutes`]]));
   }
+  if (action === "users.credit_all") {
+    return el("div", { class: "change-summary" },
+      el("div", { class: "delta" }, `+${fmt(plan.minutes)} min`, el("span", { class: "arrow", text: "×" }), `${fmt(plan.accounts)} accounts`),
+      facts([["Each account", `+${fmt(plan.minutes)} paid minutes, never expiring`], ["In all", `${fmt(plan.total)} minutes`],
+        ["Accounts made later", "get none"]]));
+  }
   if (action === "user.developer") {
     return el("div", { class: "change-summary" },
       el("div", { class: "delta" }, plan.developer_now ? "developer" : "regular", el("span", { class: "arrow", text: "→" }), plan.developer ? "developer" : "regular"),
@@ -532,10 +538,17 @@ function confirmStep(modal, action, planned, after, back) {
   };
   tick();
   modal.every(1, tick);
+  // Some changes ask for a phrase typed, which the server checks too.
+  const typed = planned.type_to_confirm ? input({ "aria-label": `Type ${planned.type_to_confirm}`, autocomplete: "off" }) : null;
+  if (typed) {
+    confirm.disabled = true;
+    typed.addEventListener("input", () => { confirm.disabled = left <= 0 || typed.value.trim() !== planned.type_to_confirm; });
+  }
   fill(modal.body, steps(1),
     planned.serious ? alertBox("warn", "This affects users at once.") : null,
     planSummary(action, planned.plan),
     el("p", { class: "pw-hint" }, "Reason: ", planned.reason || "none given"),
+    typed ? field(el("span", {}, "Type ", el("strong", { class: "mono", text: planned.type_to_confirm }), " to confirm"), typed) : null,
     message);
   fill(modal.foot, countdown, el("button", { type: "button", class: "btn", text: "Back out", onclick: modal.close }),
     back ? el("button", { type: "button", class: "btn", text: "Back to editing", onclick: () => { modal.close(); back(); } }) : null,
@@ -543,7 +556,7 @@ function confirmStep(modal, action, planned, after, back) {
   confirm.addEventListener("click", async () => {
     confirm.disabled = true;
     try {
-      const done = await post("/api/actions/apply", { token: planned.token });
+      const done = await post("/api/actions/apply", { token: planned.token, confirm: typed ? typed.value : null });
       modal.close();
       toast(`${done.title}: done`);
       (after || rerender)();
@@ -756,8 +769,9 @@ function users() {
     }
   };
   text.box.addEventListener("keydown", (event) => { if (event.key === "Enter") search(); });
+  const giveAll = canChange("users.credit_all") ? qbtn("Give everyone minutes", "c-gold", creditAllDialog) : null;
   fill(main,
-    head("Users", "Opening an account is written to the audit log"),
+    head("Users", "Opening an account is written to the audit log", giveAll),
     el("div", { class: "filters" }, field("Find", text.node), el("div", { class: "pw-field" }, el("button", { type: "button", class: "btn gold", onclick: search }, icon("search"), "Find"))),
     results);
 }
@@ -846,6 +860,27 @@ function creditDialog(account) {
       modal.close();
       change("user.credit", { user: account.user_id, minutes: direction.value === "add" ? count : -count },
         { title: `${direction.value === "add" ? "Add" : "Take away"} ${count} minutes`, after: () => openUser(account.user_id) });
+    } }));
+}
+
+// Minutes for every account: the amount, then why, then the plan with the
+// number of accounts, confirmed by typing a phrase the server checks.
+function creditAllDialog() {
+  const minutes = input({ type: "number", min: "1", max: String(me.credit_all_limit), step: "1", inputmode: "numeric", placeholder: "minutes" });
+  const modal = openModal({ title: "Give every account minutes" });
+  const message = el("div");
+  modal.body.append(
+    alertBox("warn", "Every account gets them at once, as paid minutes that never expire. This cannot be undone from the page."),
+    field("Minutes for each account", minutes, `1 to ${me.credit_all_limit} from this page; more with the command line`), message);
+  modal.foot.append(el("button", { type: "button", class: "btn", text: "Cancel", onclick: modal.close }),
+    el("button", { type: "button", class: "btn gold", text: "Next", onclick: () => {
+      const count = Number.parseInt(minutes.value, 10);
+      if (!Number.isInteger(count) || count < 1 || count > me.credit_all_limit) {
+        fill(message, errorBox(new Error(`Give a whole number of minutes from 1 to ${me.credit_all_limit}`)));
+        return;
+      }
+      modal.close();
+      change("users.credit_all", { minutes: count }, { title: `Give ${count} minutes to every account`, after: () => open("users") });
     } }));
 }
 

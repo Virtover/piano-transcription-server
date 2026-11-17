@@ -194,6 +194,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_audio_download.py` | The yt-dlp and ffmpeg commands: no generic extractor, conversion only by the restricted ffmpeg, and audio cut at the charged duration. |
 | `test_errors.py` | Job errors as users see them: no command lines or paths, and yt-dlp's reason when it gives one. |
 | `test_job_limits.py` | `MAX_ACTIVE_JOBS` and `MAX_ACTIVE_JOBS_PER_USER`: places taken during uploads and video checks, given back when jobs end or fail. |
+| `test_subscriptions.py` | Subscriptions (plans' settings and levels, periods replacing free minutes, renewals, grace, hold, upgrades, one account per subscription, the refresh from Google Play, acknowledgement), unlimited plans and their fair-use limit, refunded orders, crashes mid-transaction, welcome minutes, and minutes for every account. With `PIANO_TEST_POSTGRES_URL`, also on PostgreSQL, with the admin web page's role. |
 | `test_voided_purchases.py` | Refunds and chargebacks: minutes taken back once, negative balances, free minutes, and reading every page from Google Play. |
 | `test_deployment.py` | The images: pinned requirements and deno, services not running as root, and the startup check for root-owned volumes. |
 | `test_device_capacity.py` | GPU capacity calculation, including the `nvidia-smi` free memory check used under WSL. |

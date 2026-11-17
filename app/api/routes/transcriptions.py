@@ -15,7 +15,7 @@ from app import job_limits, job_storage, maintenance, video_check, video_info
 from app.job_storage import StorageUnavailable, delete_job_files
 from app.maintenance import NoticeResponse
 from app.config import settings
-from app.billing import Billing, transcription_cost, InsufficientMinutes
+from app.billing import Billing, FairUseLimit, transcription_cost, InsufficientMinutes
 from app.api.routes.billing import check_video, ensure_accepting, ensure_allowed_length
 from app.auth import AuthenticatedUser, current_user
 from app.media import UnsupportedMedia, probe_audio
@@ -365,6 +365,18 @@ def queue_job(
     current_user_balance(current_user)
     try:
         current_balance = billing.reserve(current_user, job_id, cost, email)
+    except FairUseLimit as error:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "message": f"Unlimited plans start up to {error.limit} minutes of transcriptions a day; "
+                "try again later",
+                "error_code": "fair_use_limit",
+                "required_minutes": cost,
+                "retry_after": error.retry_after,
+            },
+            headers={"Retry-After": str(error.retry_after)},
+        ) from error
     except InsufficientMinutes as error:
         raise HTTPException(
             status_code=402,

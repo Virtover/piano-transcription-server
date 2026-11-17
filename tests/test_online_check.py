@@ -519,3 +519,38 @@ def test_read_key_is_loaded_from_its_secret_file(tmp_path):
     assert provider.has_read_key
     assert provider._read_headers == {"Authorization": "Bearer read-key"}
     assert provider._headers == {"Authorization": "Bearer run-key"}
+
+
+class WithSubscriptions(Products):
+    """Products, and subscriptions listed by monetization().subscriptions()."""
+
+    def __init__(self, products, subscriptions):
+        super().__init__(products)
+        self.subscription_pages = [{"subscriptions": subscriptions}]
+
+    def subscriptions(self):
+        outer = self
+
+        class Listing:
+            def list(self, **arguments):
+                return self
+
+            def execute(self):
+                return outer.subscription_pages[0]
+
+        return Listing()
+
+
+def test_google_play_warns_about_subscriptions_without_their_base_plan(settings):
+    from app.config import SubscriptionPlan
+
+    settings.billing.subscriptions = {"sub_pro": SubscriptionPlan(name="Pro", minutes=100, base_plan="pro-monthly")}
+    products = [{"oneTimeProducts": [{"productId": "minutes_60"}]}]
+    active = [{"productId": "sub_pro", "basePlans": [{"basePlanId": "pro-monthly", "state": "ACTIVE"}]}]
+    inactive = [{"productId": "sub_pro", "basePlans": [{"basePlanId": "pro-monthly", "state": "INACTIVE"}]}]
+
+    assert check_google_play(settings, lambda config: WithSubscriptions(products, active)).status == "ok"
+    warned = check_google_play(settings, lambda config: WithSubscriptions(products, inactive))
+    assert warned.status == "warn" and "sub_pro" in warned.detail
+    missing = check_google_play(settings, lambda config: WithSubscriptions(products, []))
+    assert missing.status == "warn" and "sub_pro" in missing.detail

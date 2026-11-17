@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
 
-from app.billing import Billing, transcription_cost
+from app.billing import Billing, SubscriptionOwned, transcription_cost
 from app.config import settings
 from app import controls, google_play, maintenance, video_check, video_sites
 from app.errors import SourceBusy, SourceError, SourceTimedOut, SourceUnsupported, SourceVideoUnavailable
@@ -62,6 +62,31 @@ class Offer(BaseModel):
     transcription_minutes: int
 
 
+class SubscriptionOffer(BaseModel):
+    product_id: str
+    # The base plan to buy; None for the subscription's first.
+    base_plan: str | None = None
+    name: str
+    # Given each paid period in place of free_minutes; None for unlimited.
+    minutes_per_period: int | None
+    unlimited: bool
+    # From 1, by minutes; unlimited is the highest.
+    level: int
+
+
+class SubscriptionResponse(BaseModel):
+    product_id: str
+    name: str
+    minutes_per_period: int | None
+    level: int
+    # When the period that runs now ends: renewed then if auto_renewing.
+    period_ends_at: int
+    auto_renewing: bool
+    # Google Play's state, as ACTIVE, CANCELED (ends at period_ends_at), or
+    # IN_GRACE_PERIOD (a payment failed; it is retried).
+    state: str | None = None
+
+
 class ServerInfoResponse(BaseModel):
     billing_provider: str
     offers: list[Offer]
@@ -72,6 +97,12 @@ class ServerInfoResponse(BaseModel):
     max_upload_size_mb: float | None
     # Whether piano arrangements are on (WORKER_ARRANGEMENT), so an app can offer them.
     arrangement: bool = False
+    # Subscription plans, lowest level first; only when billing is enabled.
+    subscriptions: list[SubscriptionOffer] | None = None
+    # Given once to each new account; only when billing is enabled.
+    welcome_minutes: int | None = None
+    # An unlimited plan's fair-use limit, in minutes of jobs a day.
+    unlimited_daily_minutes: int | None = None
     # only present when billing is enabled
     free_minutes: int | None = None
     free_minutes_period: str | None = None
@@ -93,6 +124,27 @@ class BalanceResponse(BaseModel):
     # A developer's account, made so by an administrator: its jobs are never
     # charged, so apps show its minutes as unlimited.
     developer: bool = False
+    # The subscription whose period runs now; its minutes are monthly_minutes.
+    subscription: SubscriptionResponse | None = None
+    # An unlimited subscription: jobs are not charged, up to the fair-use
+    # limit, of which unlimited_minutes_left remain in the last 24 hours.
+    unlimited: bool = False
+    unlimited_minutes_left: int | None = None
+
+
+class GoogleSubscriptionRequest(BaseModel):
+    product_id: str
+    purchase_token: str = Field(min_length=1, max_length=4096)
+
+
+class VerifySubscriptionResponse(BaseModel):
+    user_id: str
+    # started: a paid order's period started now; recorded: known already,
+    # pending payment, or ended.
+    status: str
+    granted_minutes: int
+    acknowledged: bool
+    balance: BalanceResponse
 
 
 @dataclass
@@ -245,6 +297,25 @@ def server_info() -> ServerInfoResponse:
     notice = maintenance.current(redis)
     info.maintenance = notice.as_response() if notice else None
     if settings.billing.provider != "none":
+        levels = settings.billing.subscription_levels()
+        offered = google_play.offered_subscriptions()
+        info.subscriptions = sorted(
+            (
+                SubscriptionOffer(
+                    product_id=product_id,
+                    base_plan=plan.base_plan,
+                    name=plan.name,
+                    minutes_per_period=plan.minutes,
+                    unlimited=plan.unlimited,
+                    level=levels[product_id],
+                )
+                for product_id, plan in settings.billing.subscriptions.items()
+                if product_id in offered
+            ),
+            key=lambda offer: offer.level,
+        )
+        info.welcome_minutes = settings.billing.welcome_minutes
+        info.unlimited_daily_minutes = settings.billing.unlimited_daily_minutes
         info.free_minutes = settings.billing.free_minutes
         info.free_minutes_period = settings.billing.free_minutes_period
         info.google_oauth_client_ids = google_oauth_client_ids()
@@ -257,11 +328,23 @@ def balance(user: AuthenticatedUser | None = Depends(current_user)) -> BalanceRe
     email = user.email if user else None
     if settings.billing.provider != "none":
         billing.renew_monthly_minutes(user_id, email)
+    return balance_of(user_id)
+
+
+def balance_of(user_id: str) -> BalanceResponse:
+    status = billing.subscription_status(user_id)
+    subscription = status["subscription"]
     return BalanceResponse(
         user_id=user_id,
         **billing.balances(user_id),
         **billing.free_minutes_status(user_id),
         developer=billing.is_developer(user_id),
+        subscription=SubscriptionResponse(
+            **{key: value for key, value in subscription.items() if key != "minutes"},
+            minutes_per_period=subscription["minutes"],
+        ) if subscription else None,
+        unlimited=status["unlimited"],
+        unlimited_minutes_left=status["unlimited_minutes_left"],
     )
 
 
@@ -329,6 +412,26 @@ def consume_purchase(service: Any, product_id: str, token: str) -> None:
             return
 
 
+# Each verification asks Google; a client may ask this many times in
+# VERIFY_WINDOW seconds, plenty for retries and restoring purchases.
+VERIFY_LIMIT = 60
+VERIFY_WINDOW = 600
+VERIFY_KEY = "billing:verify:"
+
+
+def limit_verifications(user_id: str) -> None:
+    key = VERIFY_KEY + hashlib.sha256(user_id.encode()).hexdigest()[:24]
+    count = redis.incr(key)
+    if count == 1 or redis.ttl(key) < 0:
+        redis.expire(key, VERIFY_WINDOW)
+    if count > VERIFY_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many purchase checks; try again later",
+            headers={"Retry-After": str(max(1, redis.ttl(key)))},
+        )
+
+
 @router.post("/google-play/verify")
 def verify_google_purchase(
     request: GooglePurchaseRequest,
@@ -338,6 +441,7 @@ def verify_google_purchase(
         raise HTTPException(status_code=409, detail="Google Play billing is disabled")
     if user is None:
         raise HTTPException(status_code=409, detail="Google Play billing is disabled")
+    limit_verifications(user.user_id)
     if request.product_id not in settings.billing.products:
         logger.warning(
             "Refused Google Play purchase %s: product %s is not in BILLING_PRODUCTS",
@@ -395,4 +499,65 @@ def verify_google_purchase(
         credited_minutes=credited,
         minutes=billing.get_balance(user.user_id),
         consumed=consumed,
+    )
+
+
+@router.post("/google-play/subscriptions/verify")
+def verify_google_subscription(
+    request: GoogleSubscriptionRequest,
+    user: AuthenticatedUser | None = Depends(current_user),
+) -> VerifySubscriptionResponse:
+    """Check a subscription with Google Play and record it for the user: a
+    new purchase, a renewal, an upgrade, or restoring one on another device.
+    Safe to repeat: each paid order gives its minutes once."""
+    if settings.billing.provider != "google_play" or user is None:
+        raise HTTPException(status_code=409, detail="Google Play billing is disabled")
+    if request.product_id not in settings.billing.subscriptions:
+        logger.warning(
+            "Refused Google Play subscription %s: %s is not in BILLING_SUBSCRIPTIONS",
+            request.purchase_token[:8],
+            request.product_id,
+        )
+        raise HTTPException(status_code=400, detail="Unknown subscription")
+    if not google_play.is_configured():
+        raise HTTPException(status_code=503, detail="Google Play verification is not configured")
+    limit_verifications(user.user_id)
+    try:
+        service = google_play.android_publisher()
+        info = google_play.read_subscription(service, request.purchase_token)
+    except Exception as error:
+        if google_play.is_gone(error):
+            raise HTTPException(status_code=400, detail="Unknown subscription purchase") from error
+        raise HTTPException(status_code=502, detail="Google Play subscription verification failed") from error
+    if info.product_id not in settings.billing.subscriptions:
+        raise HTTPException(status_code=400, detail="Unknown subscription")
+    try:
+        result = billing.record_subscription(user.user_id, info, user.email)
+    except SubscriptionOwned as error:
+        logger.warning("Refused Google Play subscription %s: another account has it", request.purchase_token[:8])
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "This subscription belongs to another account", "error_code": "subscription_owned"},
+        ) from error
+    acknowledged = info.acknowledged
+    if not acknowledged and info.paid:
+        try:
+            google_play.acknowledge_subscription(service, info.product_id, request.purchase_token)
+            billing.mark_subscription_acknowledged(request.purchase_token)
+            acknowledged = True
+        except Exception:
+            logger.exception("Could not acknowledge a Google Play subscription of %s", info.product_id)
+    if result["status"] == "started":
+        logger.info(
+            "Google Play subscription %s started for user %s: %d minutes",
+            info.product_id,
+            user.user_id,
+            result["minutes"],
+        )
+    return VerifySubscriptionResponse(
+        user_id=user.user_id,
+        status=result["status"],
+        granted_minutes=result["minutes"],
+        acknowledged=acknowledged,
+        balance=balance_of(user.user_id),
     )

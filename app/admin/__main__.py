@@ -103,6 +103,11 @@ def parser() -> argparse.ArgumentParser:
     command = user_searches.add_parser("find", parents=[reads], help="accounts whose email address or user ID contains the text")
     command.add_argument("text", help=f"at least {users.SEARCH_LENGTH} characters, such as part of an email address")
     command.set_defaults(run=users.run_find)
+    command = user_searches.add_parser(
+        "credit-all", parents=[changes, asks], help="give every account paid minutes; asks you to type a confirmation"
+    )
+    command.add_argument("minutes", type=int)
+    command.set_defaults(run=users.run_credit_all)
 
     command = commands.add_parser("billing", parents=[reads], help="minutes sold, free, and used; negative balances; job time")
     command.add_argument("--per", choices=sorted(report.PERIOD_FORMATS), default="day", help="group per day or month (default: day)")

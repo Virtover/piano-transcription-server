@@ -750,6 +750,43 @@ def test_an_account_is_made_a_developers_and_back(writable):
     assert not billing.is_developer("user")
 
 
+def test_every_account_is_given_minutes_only_with_the_typed_phrase(writable):
+    client, _, billing = writable
+    billing.renew_monthly_minutes("second")
+
+    planned = act(client, "users.credit_all", {"minutes": 5}, "sorry for the outage").json()
+    assert planned["serious"] is True
+    assert planned["type_to_confirm"] == "give 5 to all"
+    accounts = planned["plan"]["accounts"]
+    assert planned["plan"]["total"] == 5 * accounts
+
+    # Without the phrase, or with another, nothing changes, and the
+    # confirmation is used up.
+    refused = client.post("/api/actions/apply", headers=changing(), json={"token": planned["token"], "confirm": "give 50 to all"})
+    assert refused.status_code == 400
+    assert billing.get_balance("user") == 30
+    assert apply(client, planned).status_code == 409
+
+    planned = act(client, "users.credit_all", {"minutes": 5}, "sorry for the outage").json()
+    done = client.post("/api/actions/apply", headers=changing(), json={"token": planned["token"], "confirm": " give 5 to all "})
+    assert done.status_code == 200
+    assert done.json()["result"]["accounts"] == accounts
+    assert billing.get_balance("user") == 35
+    row = audit_rows(billing)[-1]
+    assert (row["actor"], row["action"], row["reason"]) == ("web:chris@example.com", "users.credit_all", "sorry for the outage")
+
+
+@pytest.mark.parametrize("args", [{"minutes": 0}, {"minutes": -5}, {"minutes": 121}, {"minutes": "5"}, {}])
+def test_every_account_is_given_a_bounded_amount(writable, args):
+    client, _, _ = writable
+    assert act(client, "users.credit_all", args, "outage").status_code == 400
+
+
+def test_giving_every_account_minutes_needs_a_reason(writable):
+    client, _, _ = writable
+    assert act(client, "users.credit_all", {"minutes": 5}, "").status_code == 400
+
+
 def test_the_browser_cannot_change_what_was_confirmed(writable):
     client, _, billing = writable
     planned = act(client, "user.credit", {"user": "user", "minutes": 5}).json()

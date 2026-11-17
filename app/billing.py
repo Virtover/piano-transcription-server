@@ -7,6 +7,7 @@ import threading
 import time
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import duration_seconds as parse_duration, settings
@@ -16,7 +17,7 @@ TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 # Kinds of minute_ledger entries. Each change to a balance is one entry.
 # "free" renews the monthly minutes and "expired" takes back the ones left
 # unused at the end of the period.
-LEDGER_KINDS = ("purchase", "free", "used", "voided", "admin", "expired")
+LEDGER_KINDS = ("purchase", "free", "used", "voided", "admin", "expired", "subscription", "welcome")
 # A user's two balances, the minute_ledger pools: monthly minutes, renewed
 # every FREE_MINUTES_PERIOD and spent first, and paid minutes, which never
 # expire.
@@ -149,6 +150,40 @@ class Billing:
                     -- Added with developer accounts: 1 when an administrator made the
                     -- account a developer's, whose jobs are never charged.
                     ALTER TABLE users ADD COLUMN IF NOT EXISTS developer INTEGER NOT NULL DEFAULT 0;
+
+                    -- Added with subscriptions. A subscription is known by a
+                    -- hash of its purchase token (id), so that periods name it
+                    -- without the token, which the admin web page never reads.
+                    CREATE TABLE IF NOT EXISTS subscriptions (
+                        id TEXT PRIMARY KEY, purchase_token TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL,
+                        product_id TEXT NOT NULL, state TEXT NOT NULL, expires_at BIGINT NOT NULL,
+                        auto_renewing INTEGER NOT NULL DEFAULT 0, latest_order_id TEXT, replaced_by TEXT,
+                        revoked_at BIGINT, checked_at BIGINT NOT NULL, created_at BIGINT NOT NULL,
+                        acknowledged INTEGER NOT NULL DEFAULT 1
+                    );
+                    -- One row per paid order: the minutes it gave (NULL for
+                    -- unlimited) for its period, and those left unused when it ended.
+                    CREATE TABLE IF NOT EXISTS subscription_periods (
+                        order_id TEXT PRIMARY KEY, subscription_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                        product_id TEXT NOT NULL, minutes INTEGER CHECK (minutes > 0), starts_at BIGINT NOT NULL,
+                        ends_at BIGINT NOT NULL, unused_minutes INTEGER, voided_at BIGINT
+                    );
+                    -- Jobs of an unlimited subscription, for its fair-use limit
+                    -- and to charge them when its order is refunded. 0 minutes
+                    -- once the job was released.
+                    CREATE TABLE IF NOT EXISTS unlimited_usage (
+                        job_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, order_id TEXT NOT NULL,
+                        minutes INTEGER NOT NULL CHECK (minutes >= 0), at BIGINT NOT NULL
+                    );
+                    -- Accounts given WELCOME_MINUTES, by hash, kept after the
+                    -- account is deleted so that a new one is not given them again.
+                    CREATE TABLE IF NOT EXISTS welcome_claims (user_hash TEXT PRIMARY KEY, at BIGINT NOT NULL);
+                    CREATE INDEX IF NOT EXISTS subscriptions_user_index ON subscriptions (user_id);
+                    CREATE INDEX IF NOT EXISTS subscriptions_expires_index ON subscriptions (expires_at);
+                    CREATE INDEX IF NOT EXISTS subscription_periods_user_index ON subscription_periods (user_id, ends_at);
+                    CREATE INDEX IF NOT EXISTS subscription_periods_subscription_index ON subscription_periods (subscription_id);
+                    CREATE INDEX IF NOT EXISTS unlimited_usage_user_index ON unlimited_usage (user_id, at);
+                    CREATE INDEX IF NOT EXISTS unlimited_usage_order_index ON unlimited_usage (order_id);
                     INSERT INTO billing_state (key, value) VALUES ('minute_ledger_since', '{ledger_since}')
                     ON CONFLICT (key) DO NOTHING
                     ;
@@ -249,6 +284,49 @@ class Billing:
                 CREATE INDEX IF NOT EXISTS minute_ledger_at_index ON minute_ledger (at);
                 CREATE INDEX IF NOT EXISTS job_diagnostics_user_index ON job_diagnostics (user_id);
                 CREATE INDEX IF NOT EXISTS job_diagnostics_created_index ON job_diagnostics (created_at);
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id TEXT PRIMARY KEY,
+                    purchase_token TEXT NOT NULL UNIQUE,
+                    user_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    auto_renewing INTEGER NOT NULL DEFAULT 0,
+                    latest_order_id TEXT,
+                    replaced_by TEXT,
+                    revoked_at INTEGER,
+                    checked_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    acknowledged INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE IF NOT EXISTS subscription_periods (
+                    order_id TEXT PRIMARY KEY,
+                    subscription_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    minutes INTEGER CHECK (minutes > 0),
+                    starts_at INTEGER NOT NULL,
+                    ends_at INTEGER NOT NULL,
+                    unused_minutes INTEGER,
+                    voided_at INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS unlimited_usage (
+                    job_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    order_id TEXT NOT NULL,
+                    minutes INTEGER NOT NULL CHECK (minutes >= 0),
+                    at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS welcome_claims (
+                    user_hash TEXT PRIMARY KEY,
+                    at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS subscriptions_user_index ON subscriptions (user_id);
+                CREATE INDEX IF NOT EXISTS subscriptions_expires_index ON subscriptions (expires_at);
+                CREATE INDEX IF NOT EXISTS subscription_periods_user_index ON subscription_periods (user_id, ends_at);
+                CREATE INDEX IF NOT EXISTS subscription_periods_subscription_index ON subscription_periods (subscription_id);
+                CREATE INDEX IF NOT EXISTS unlimited_usage_user_index ON unlimited_usage (user_id, at);
+                CREATE INDEX IF NOT EXISTS unlimited_usage_order_index ON unlimited_usage (order_id);
                 """
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
@@ -375,6 +453,7 @@ class Billing:
                     "DELETE FROM deleted_users WHERE user_hash = ?",
                     (_user_hash(user_id),),
                 )
+            _give_welcome_minutes(connection, user_id)
         if email:
             connection.execute(
                 "UPDATE users SET email = ? WHERE user_id = ?",
@@ -388,7 +467,7 @@ class Billing:
         period or the new one."""
         if settings.billing.provider == "none":
             return 0
-        if not _free_minutes_enabled():
+        if not _free_minutes_enabled() and not _welcome_minutes_enabled():
             # Then this only lets left-over ones expire. Job status polls
             # call it, so it takes the write lock only when there are some.
             with closing(self._connect()) as connection:
@@ -399,7 +478,7 @@ class Billing:
                 return 0
         with self._connect() as connection:
             self._begin_write(connection)
-            if _free_minutes_enabled():
+            if _free_minutes_enabled() or _welcome_minutes_enabled():
                 self._ensure_user(connection, user_id, email)
             return _renew_monthly(connection, user_id)
 
@@ -467,6 +546,13 @@ class Billing:
                 # A developer's jobs hold and cost nothing: without a
                 # reservation, settling and releasing them change nothing.
                 return int(available)
+            period = _current_period(connection, user_id)
+            if period is not None and period["minutes"] is None:
+                # An unlimited subscription: nothing is held or charged, but
+                # the job counts towards its fair-use limit, and is charged
+                # after all if the order is refunded.
+                _use_unlimited(connection, user_id, job_id, cost, period["order_id"])
+                return int(available)
             if available < cost:
                 raise InsufficientMinutes()
             from_monthly = min(cost, max(0, user["monthly_minutes"] - held["monthly"]))
@@ -499,6 +585,8 @@ class Billing:
     def release(self, job_id: str) -> None:
         with self._connect() as connection:
             self._begin_write(connection)
+            # A job of an unlimited subscription no longer counts.
+            connection.execute("UPDATE unlimited_usage SET minutes = 0 WHERE job_id = ?", (job_id,))
             reservation = connection.execute(
                 "SELECT * FROM transcription_reservations WHERE job_id = ? AND status = 'reserved'",
                 (job_id,),
@@ -532,6 +620,15 @@ class Billing:
     def _settle(self, job_id: str, charged_minutes: int | None) -> None:
         with self._connect() as connection:
             self._begin_write(connection)
+            if charged_minutes is not None:
+                # A cancelled job of an unlimited subscription counts as far
+                # as it ran.
+                connection.execute(
+                    "UPDATE unlimited_usage SET minutes = MIN(minutes, ?) WHERE job_id = ?"
+                    if not self._postgres else
+                    "UPDATE unlimited_usage SET minutes = LEAST(minutes, ?) WHERE job_id = ?",
+                    (max(0, charged_minutes), job_id),
+                )
             reservation = connection.execute(
                 "SELECT * FROM transcription_reservations WHERE job_id = ?",
                 (job_id,),
@@ -591,8 +688,9 @@ class Billing:
             _log_minutes(connection, user_id, "purchase", minutes, order_id)
             return minutes
 
-    def void_purchase(self, token: str) -> tuple[str, int] | None:
-        """Take back the minutes of a refunded or charged-back purchase, once.
+    def void_purchase(self, token: str, order_id: str | None = None) -> tuple[str, int] | None:
+        """Take back the minutes of a refunded or charged-back purchase, once:
+        a product's, or a subscription order's (_void_subscription_order).
         The balance can go below zero when they were already used. Returns
         (user ID, minutes taken), or None if the token is unknown, already
         voided, or belonged to a deleted account."""
@@ -603,7 +701,7 @@ class Billing:
                 (token,),
             ).fetchone()
             if purchase is None:
-                return None
+                return _void_subscription_order(connection, token, order_id)
             connection.execute(
                 "UPDATE purchases SET voided_at = ? WHERE product_id = ? AND purchase_token = ?",
                 (int(time.time()), purchase["product_id"], purchase["purchase_token"]),
@@ -616,6 +714,227 @@ class Billing:
             )
             _log_minutes(connection, purchase["user_id"], "voided", -purchase["minutes"], purchase["order_id"])
             return purchase["user_id"], purchase["minutes"]
+
+    # --- Subscriptions ---------------------------------------------------------
+
+    def record_subscription(self, user_id: str | None, info: "SubscriptionInfo", email: str | None = None) -> dict:
+        """Save what Google Play reports of a subscription, and start the
+        period of a paid order not seen before: its minutes replace the
+        monthly ones, which expire. One transaction, so a crash leaves the
+        order either given or not, and a repeat gives it once. user_id None
+        refreshes the subscription for the account that has it. Raises
+        SubscriptionOwned when another account has it."""
+        now = int(time.time())
+        subscription_id = subscription_key(info.token)
+        with self._connect() as connection:
+            self._begin_write(connection)
+            existing = connection.execute(
+                "SELECT user_id FROM subscriptions WHERE id = ?", (subscription_id,)
+            ).fetchone()
+            owner = existing["user_id"] if existing else None
+            if user_id is None:
+                if owner is None or owner == DELETED_USER_ID:
+                    return {"status": "unknown", "minutes": 0, "user_id": None}
+                user_id = owner
+            elif info.account_tag and info.account_tag != account_tag(user_id):
+                # Bought while another account of this app was signed in.
+                raise SubscriptionOwned()
+            elif owner is not None and owner != user_id:
+                if owner != DELETED_USER_ID or info.account_tag != account_tag(user_id):
+                    raise SubscriptionOwned()
+                # The same person, whose account was deleted and made again:
+                # the subscription, and its current period, come back.
+                connection.execute(
+                    "UPDATE subscriptions SET user_id = ? WHERE id = ?", (user_id, subscription_id)
+                )
+                connection.execute(
+                    "UPDATE subscription_periods SET user_id = ? WHERE subscription_id = ? AND ends_at > ?",
+                    (user_id, subscription_id, now),
+                )
+            self._ensure_user(connection, user_id, email)
+            connection.execute(
+                """INSERT INTO subscriptions
+                   (id, purchase_token, user_id, product_id, state, expires_at, auto_renewing,
+                    latest_order_id, checked_at, created_at, acknowledged)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (id) DO UPDATE SET
+                       product_id = excluded.product_id, state = excluded.state,
+                       expires_at = excluded.expires_at, auto_renewing = excluded.auto_renewing,
+                       latest_order_id = COALESCE(excluded.latest_order_id, subscriptions.latest_order_id),
+                       checked_at = excluded.checked_at, acknowledged = excluded.acknowledged""",
+                (subscription_id, info.token, user_id, info.product_id, info.state, info.expires_at,
+                 int(info.auto_renewing), info.latest_order_id, now, now,
+                 # A paid one waits to be acknowledged; others need nothing.
+                 int(info.acknowledged or not info.paid)),
+            )
+            subscription = connection.execute(
+                "SELECT revoked_at, replaced_by FROM subscriptions WHERE id = ?", (subscription_id,)
+            ).fetchone()
+            plan = settings.billing.subscriptions.get(info.product_id)
+            known = info.latest_order_id is not None and connection.execute(
+                "SELECT 1 FROM subscription_periods WHERE order_id = ?", (info.latest_order_id,)
+            ).fetchone() is not None
+            given = None
+            if (
+                info.paid
+                and info.expires_at > now
+                and subscription["revoked_at"] is None
+                and subscription["replaced_by"] is None
+                and plan is not None
+                and info.latest_order_id is not None
+                and not known
+            ):
+                if info.linked_token:
+                    # An upgrade or downgrade: the subscription it replaces ends now.
+                    linked = subscription_key(info.linked_token)
+                    connection.execute(
+                        "UPDATE subscriptions SET replaced_by = ? WHERE id = ? AND user_id = ?",
+                        (subscription_id, linked, user_id),
+                    )
+                    connection.execute(
+                        "UPDATE subscription_periods SET ends_at = ? "
+                        "WHERE subscription_id = ? AND user_id = ? AND ends_at > ? AND voided_at IS NULL",
+                        (now, linked, user_id, now),
+                    )
+                given = _start_subscription_period(
+                    connection, user_id, subscription_id, info.product_id, info.latest_order_id,
+                    now, info.expires_at, plan.minutes,
+                )
+            elif known:
+                # A known order: its period follows Google's expiry, kept
+                # through a grace period, ended at once when not entitled.
+                if info.entitled and subscription["revoked_at"] is None:
+                    connection.execute(
+                        "UPDATE subscription_periods SET ends_at = ? "
+                        "WHERE order_id = ? AND subscription_id = ? AND voided_at IS NULL",
+                        (info.expires_at, info.latest_order_id, subscription_id),
+                    )
+                else:
+                    ends_at = min(info.expires_at, now)
+                    connection.execute(
+                        "UPDATE subscription_periods SET ends_at = ? "
+                        "WHERE subscription_id = ? AND voided_at IS NULL AND ends_at > ?",
+                        (ends_at, subscription_id, ends_at),
+                    )
+            return {"status": "started" if given is not None else "recorded",
+                    "minutes": given or 0, "user_id": user_id}
+
+    def subscriptions_to_check(self, now: int | None = None, limit: int = 100) -> list[str]:
+        """Purchase tokens to read from Google Play again: those whose
+        period ends soon or has ended, until they end for good, each read
+        again more rarely the longer ago it expired; and those not yet
+        acknowledged, as after a crash between saving and acknowledging,
+        which Google would refund within three days."""
+        now = int(time.time()) if now is None else now
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT purchase_token, expires_at, checked_at, acknowledged FROM subscriptions
+                   WHERE replaced_by IS NULL AND revoked_at IS NULL AND user_id != ? AND (
+                       acknowledged = 0
+                       OR (state != 'EXPIRED' AND expires_at <= ? AND expires_at > ?))
+                   ORDER BY checked_at LIMIT ?""",
+                (DELETED_USER_ID, now + SUBSCRIPTION_CHECK_AHEAD, now - SUBSCRIPTION_CHECK_FOR, limit * 4),
+            ).fetchall()
+        due = []
+        for row in rows:
+            if not row["acknowledged"]:
+                if now - int(row["checked_at"]) >= SUBSCRIPTION_CHECK_MIN_WAIT:
+                    due.append(row["purchase_token"])
+                continue
+            overdue = max(0, now - int(row["expires_at"]))
+            wait = min(SUBSCRIPTION_CHECK_MAX_WAIT, max(SUBSCRIPTION_CHECK_MIN_WAIT, overdue // 10))
+            if now - int(row["checked_at"]) >= wait:
+                due.append(row["purchase_token"])
+        return due[:limit]
+
+    def subscription_status(self, user_id: str) -> dict:
+        """The user's subscription for the apps: the plan whose period runs
+        now, whether it renews, and for an unlimited one, what is left of
+        its fair-use limit."""
+        empty = {"subscription": None, "unlimited": False, "unlimited_minutes_left": None}
+        if settings.billing.provider == "none":
+            return empty
+        now = int(time.time())
+        with closing(self._connect()) as connection:
+            period = _current_period(connection, user_id, now)
+            if period is None:
+                return empty
+            subscription = connection.execute(
+                "SELECT state, auto_renewing FROM subscriptions WHERE id = ?", (period["subscription_id"],)
+            ).fetchone()
+            used = _unlimited_used(connection, user_id, now) if period["minutes"] is None else 0
+        plan = settings.billing.subscriptions.get(period["product_id"])
+        unlimited = period["minutes"] is None
+        return {
+            "subscription": {
+                "product_id": period["product_id"],
+                "name": plan.name if plan else period["product_id"],
+                "minutes": period["minutes"],
+                "level": settings.billing.subscription_levels().get(period["product_id"], 0),
+                "period_ends_at": int(period["ends_at"]),
+                "auto_renewing": bool(subscription and subscription["auto_renewing"]),
+                "state": subscription["state"] if subscription else None,
+            },
+            "unlimited": unlimited,
+            "unlimited_minutes_left": max(0, settings.billing.unlimited_daily_minutes - used) if unlimited else None,
+        }
+
+    def end_subscription(self, token: str) -> None:
+        """Google no longer knows the subscription: it expired long ago."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE subscriptions SET state = 'EXPIRED', checked_at = ? WHERE purchase_token = ?",
+                (int(time.time()), token),
+            )
+
+    def mark_subscription_acknowledged(self, token: str) -> None:
+        with self._connect() as connection:
+            connection.execute("UPDATE subscriptions SET acknowledged = 1 WHERE purchase_token = ?", (token,))
+
+    def mark_subscription_checked(self, token: str) -> None:
+        """A failed read waits like a successful one, so one subscription
+        Google refuses does not hold back the others."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE subscriptions SET checked_at = ? WHERE purchase_token = ?",
+                (int(time.time()), token),
+            )
+
+    def credit_all(self, minutes: int, reason: str, actor: str, grant_id: str) -> dict:
+        """Add minutes to every account's paid balance, never expiring, with
+        one audit entry, all in one transaction. grant_id makes it once
+        only: a repeat, as after a lost answer, changes nothing and returns
+        the first result."""
+        if minutes <= 0:
+            raise ValueError("Give a positive number of minutes")
+        target = f"grant:{grant_id}"
+        with self._connect() as connection:
+            self._begin_write(connection)
+            done = connection.execute(
+                "SELECT detail FROM admin_actions WHERE action = 'users.credit_all' AND target = ?", (target,)
+            ).fetchone()
+            if done is not None:
+                return {"grant_id": grant_id, "repeated": True, **_credit_all_detail(done["detail"])}
+            now = int(time.time())
+            connection.execute(
+                "INSERT INTO minute_ledger (user_id, kind, minutes, at, note, pool) "
+                "SELECT user_id, 'admin', ?, ?, ?, 'paid' FROM users WHERE user_id != ?",
+                (minutes, now, reason, DELETED_USER_ID),
+            )
+            accounts = connection.execute(
+                "UPDATE users SET minutes = minutes + ? WHERE user_id != ?", (minutes, DELETED_USER_ID)
+            ).rowcount
+            _log_admin_action(
+                connection, actor, "users.credit_all", target, f"+{minutes} minutes to {accounts} accounts", reason
+            )
+        return {"grant_id": grant_id, "repeated": False, "minutes": minutes, "accounts": accounts,
+                "total": minutes * accounts}
+
+    def account_count(self) -> int:
+        with closing(self._connect()) as connection:
+            return int(connection.execute(
+                "SELECT COUNT(*) AS n FROM users WHERE user_id != ?", (DELETED_USER_ID,)
+            ).fetchone()["n"])
 
     def get_state(self, key: str) -> str | None:
         with self._connect() as connection:
@@ -800,10 +1119,13 @@ class Billing:
             connection.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
             connection.execute("DELETE FROM transcription_reservations WHERE user_id = ?", (user_id,))
             connection.execute("DELETE FROM job_diagnostics WHERE user_id = ?", (user_id,))
-            connection.execute(
-                "UPDATE purchases SET user_id = ? WHERE user_id = ?",
-                (DELETED_USER_ID, user_id),
-            )
+            # Kept without the user, like purchases, so that an order is never
+            # given twice; the same person signing up again gets it back.
+            for table in ("purchases", "subscriptions", "subscription_periods", "unlimited_usage"):
+                connection.execute(
+                    f"UPDATE {table} SET user_id = ? WHERE user_id = ?",
+                    (DELETED_USER_ID, user_id),
+                )
             # Totals stay right; whose minutes they were is forgotten.
             connection.execute(
                 "UPDATE minute_ledger SET user_id = ? WHERE user_id = ?",
@@ -1008,6 +1330,8 @@ ADMIN_WEB_WRITES = {
         "users": "UPDATE (minutes, monthly_minutes, developer)",
         "minute_ledger": "INSERT",
         "transcription_reservations": "UPDATE (status, charged_minutes)",
+        # To stop counting the jobs of an unlimited subscription it cancels.
+        "unlimited_usage": "UPDATE (minutes)",
         "job_diagnostics": "INSERT, UPDATE",
     },
 }
@@ -1015,6 +1339,11 @@ ADMIN_WEB_WRITES = {
 SEQUENCES = {"admin_actions", "admin_web_caps", "minute_ledger"}
 # Purchase tokens are never shown, so the page cannot read them.
 PURCHASE_COLUMNS_SHOWN = ("product_id", "user_id", "minutes", "order_id", "voided_at")
+SUBSCRIPTION_COLUMNS_SHOWN = (
+    "id", "user_id", "product_id", "state", "expires_at", "auto_renewing", "latest_order_id",
+    "replaced_by", "revoked_at", "checked_at", "created_at",
+)
+TOKEN_TABLES = {"purchases": PURCHASE_COLUMNS_SHOWN, "subscriptions": SUBSCRIPTION_COLUMNS_SHOWN}
 
 
 def admin_web_password_file(mode: str) -> Path:
@@ -1050,9 +1379,11 @@ def _sync_admin_web_roles(connection) -> None:
         connection.execute(sql.SQL("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {}").format(name))
         connection.execute(sql.SQL("REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM {}").format(name))
         for table in tables:
-            if table == "purchases":
-                columns = sql.SQL(", ").join(sql.Identifier(column) for column in PURCHASE_COLUMNS_SHOWN)
-                connection.execute(sql.SQL("GRANT SELECT ({}) ON purchases TO {}").format(columns, name))
+            if table in TOKEN_TABLES:
+                columns = sql.SQL(", ").join(sql.Identifier(column) for column in TOKEN_TABLES[table])
+                connection.execute(
+                    sql.SQL("GRANT SELECT ({}) ON {} TO {}").format(columns, sql.Identifier(table), name)
+                )
             else:
                 connection.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(sql.Identifier(table), name))
         for table, privileges in ADMIN_WEB_WRITES[mode].items():
@@ -1108,29 +1439,51 @@ def _renew_monthly(connection: sqlite3.Connection, user_id: str) -> int:
     """Start a new monthly period if the user's has ended, in the caller's
     write transaction. Monthly minutes that running jobs hold stay until the
     jobs end (_expire_stale_hold); the others expire. Returns the minutes
-    given."""
+    given. A subscription's period is renewed by its payments instead
+    (Billing.record_subscription); when it ends unrenewed, free periods
+    start again from its end."""
     user = connection.execute(
         "SELECT minutes, monthly_minutes, free_grant_at FROM users WHERE user_id = ?",
         (user_id,),
     ).fetchone()
     now = int(time.time())
-    if user is None or now - user["free_grant_at"] < period_seconds():
+    if user is None or _current_period(connection, user_id, now) is not None:
         return 0
-    if user["minutes"] < 0:
-        # Minutes owed for a refunded purchase are not paid off with
-        # monthly minutes; the renewal waits until the debt is paid.
+    # A subscription period that ended, whose unused minutes have not yet
+    # expired: free periods start again from its end.
+    ended = connection.execute(
+        """SELECT order_id, ends_at FROM subscription_periods
+           WHERE user_id = ? AND voided_at IS NULL AND unused_minutes IS NULL AND ends_at <= ?
+           ORDER BY ends_at DESC LIMIT 1""",
+        (user_id, now),
+    ).fetchone()
+    after_subscription = ended is not None
+    subscription_end = int(ended["ends_at"]) if ended else 0
+    if not after_subscription and now - user["free_grant_at"] < period_seconds():
         return 0
     kept = min(user["monthly_minutes"], _held(connection, user_id)["monthly"])
     expired = user["monthly_minutes"] - kept
     grant = (settings.billing.free_minutes or 0) if _free_minutes_enabled() else 0
-    if not expired and not grant:
+    if user["minutes"] < 0:
+        # Minutes owed for a refunded purchase are not paid off with
+        # monthly minutes; the renewal waits until the debt is paid. A
+        # subscription's minutes still expire with its period.
+        if not after_subscription:
+            return 0
+        grant = 0
+    if not expired and not grant and not after_subscription:
         return 0
-    # Periods follow a fixed schedule from the first, which starts at sign-up:
-    # the new one starts where the last full period ended, however late the
-    # user comes back.
-    start = user["free_grant_at"]
+    # Periods follow a fixed schedule from the first, which starts at sign-up
+    # or when a subscription ends: the new one starts where the last full
+    # period ended, however late the user comes back.
+    start = subscription_end if after_subscription else user["free_grant_at"]
     period = period_seconds()
     period_start = now if start <= 0 else start + (now - start) // period * period
+    if after_subscription:
+        connection.execute(
+            "UPDATE subscription_periods SET unused_minutes = ? WHERE order_id = ?",
+            (expired, ended["order_id"]),
+        )
     connection.execute(
         "UPDATE users SET monthly_minutes = ?, free_grant_at = ? WHERE user_id = ?",
         (kept + grant, period_start, user_id),
@@ -1183,3 +1536,265 @@ def _purge_expired_deleted_users(connection: sqlite3.Connection) -> None:
         "DELETE FROM deleted_users WHERE free_grant_at <= ?",
         (int(time.time()) - period_seconds(),),
     )
+
+
+# --- Subscriptions -------------------------------------------------------------
+
+# Google Play's subscription states, short (SUBSCRIPTION_STATE_ removed). An
+# entitled one gives its plan; a paid one may also start a period, which a
+# grace period, whose payment has not come, may not.
+PAID_STATES = {"ACTIVE", "CANCELED"}
+ENTITLED_STATES = PAID_STATES | {"IN_GRACE_PERIOD"}
+# Subscriptions read again from Google Play: from this long before their
+# period ends, for this long after, at most this often and at least this often.
+SUBSCRIPTION_CHECK_AHEAD = 10 * 60
+SUBSCRIPTION_CHECK_FOR = 90 * 24 * 60 * 60
+SUBSCRIPTION_CHECK_MIN_WAIT = 60
+SUBSCRIPTION_CHECK_MAX_WAIT = 6 * 60 * 60
+UNLIMITED_WINDOW = 24 * 60 * 60
+
+
+@dataclass(frozen=True)
+class SubscriptionInfo:
+    """What Google Play reports of a subscription purchase."""
+
+    token: str
+    product_id: str
+    state: str
+    expires_at: int
+    auto_renewing: bool = False
+    latest_order_id: str | None = None
+    linked_token: str | None = None
+    # The obfuscated account ID the app set at purchase, if any.
+    account_tag: str | None = None
+    acknowledged: bool = True
+
+    @property
+    def paid(self) -> bool:
+        return self.state in PAID_STATES
+
+    @property
+    def entitled(self) -> bool:
+        return self.state in ENTITLED_STATES
+
+
+class SubscriptionOwned(Exception):
+    """The subscription belongs to another account."""
+
+
+class FairUseLimit(Exception):
+    """An unlimited subscription started its fair-use limit of jobs in the
+    last 24 hours."""
+
+    def __init__(self, retry_after: int, limit: int):
+        super().__init__(f"Fair-use limit of {limit} minutes a day reached")
+        self.retry_after = retry_after
+        self.limit = limit
+
+
+def subscription_key(token: str) -> str:
+    """How tables other than subscriptions name a subscription: never by its
+    purchase token, which would let whoever reads them claim it."""
+    return hashlib.sha256(("subscription:" + token).encode()).hexdigest()[:32]
+
+
+def account_tag(user_id: str) -> str:
+    """The obfuscated account ID the apps give Google Play at purchase:
+    the SHA-256 of the user ID, in hex."""
+    return hashlib.sha256(user_id.encode()).hexdigest()
+
+
+def _current_period(connection, user_id: str, now: int | None = None):
+    """The user's subscription period that runs now, if any."""
+    now = int(time.time()) if now is None else now
+    return connection.execute(
+        """SELECT * FROM subscription_periods
+           WHERE user_id = ? AND voided_at IS NULL AND starts_at <= ? AND ends_at > ?
+           ORDER BY starts_at DESC LIMIT 1""",
+        (user_id, now, now),
+    ).fetchone()
+
+
+def _start_subscription_period(
+    connection, user_id: str, subscription_id: str, product_id: str, order_id: str,
+    starts_at: int, ends_at: int, minutes: int | None,
+) -> int:
+    """Start a paid order's period: the monthly minutes that running jobs
+    do not hold expire, and the plan's are given in their place. Returns
+    the minutes given."""
+    user = connection.execute(
+        "SELECT monthly_minutes FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    kept = min(user["monthly_minutes"], _held(connection, user_id)["monthly"])
+    expired = user["monthly_minutes"] - kept
+    # The period these minutes came from, running or just ended, as when
+    # an upgrade ended it: it ends now, and they are its unused ones.
+    previous = connection.execute(
+        """SELECT order_id, ends_at FROM subscription_periods
+           WHERE user_id = ? AND voided_at IS NULL AND unused_minutes IS NULL
+           ORDER BY starts_at DESC LIMIT 1""",
+        (user_id,),
+    ).fetchone()
+    if previous is not None:
+        connection.execute(
+            "UPDATE subscription_periods SET ends_at = ?, unused_minutes = ? WHERE order_id = ?",
+            (min(int(previous["ends_at"]), starts_at), expired, previous["order_id"]),
+        )
+    grant = minutes or 0
+    connection.execute(
+        "UPDATE users SET monthly_minutes = ?, free_grant_at = ? WHERE user_id = ?",
+        (kept + grant, starts_at, user_id),
+    )
+    connection.execute(
+        "UPDATE transcription_reservations SET monthly_ended = 1 "
+        "WHERE user_id = ? AND status = 'reserved' AND monthly_minutes > 0",
+        (user_id,),
+    )
+    connection.execute(
+        """INSERT INTO subscription_periods
+           (order_id, subscription_id, user_id, product_id, minutes, starts_at, ends_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (order_id, subscription_id, user_id, product_id, minutes, starts_at, ends_at),
+    )
+    _log_minutes(connection, user_id, "expired", -expired, order_id, MONTHLY)
+    _log_minutes(connection, user_id, "subscription", grant, order_id, MONTHLY)
+    return grant
+
+
+def _unlimited_used(connection, user_id: str, now: int) -> int:
+    row = connection.execute(
+        "SELECT COALESCE(SUM(minutes), 0) AS used FROM unlimited_usage WHERE user_id = ? AND at > ?",
+        (user_id, now - UNLIMITED_WINDOW),
+    ).fetchone()
+    return int(row["used"])
+
+
+def _use_unlimited(connection, user_id: str, job_id: str, cost: int, order_id: str) -> None:
+    """Count a job of an unlimited subscription, or raise FairUseLimit,
+    saying when it would fit."""
+    now = int(time.time())
+    limit = settings.billing.unlimited_daily_minutes
+    counted = connection.execute(
+        "SELECT user_id, minutes FROM unlimited_usage WHERE job_id = ?", (job_id,)
+    ).fetchone()
+    if counted is not None and (counted["minutes"] > 0 or counted["user_id"] != user_id):
+        raise ValueError(f"Job {job_id} already has a reservation")
+    rows = connection.execute(
+        "SELECT minutes, at FROM unlimited_usage WHERE user_id = ? AND at > ? AND minutes > 0 ORDER BY at",
+        (user_id, now - UNLIMITED_WINDOW),
+    ).fetchall()
+    used = sum(int(row["minutes"]) for row in rows)
+    if used + cost > limit:
+        retry_at = now + UNLIMITED_WINDOW
+        for row in rows:
+            used -= int(row["minutes"])
+            if used + cost <= limit:
+                retry_at = int(row["at"]) + UNLIMITED_WINDOW
+                break
+        raise FairUseLimit(max(1, retry_at - now), limit)
+    counted = connection.execute(
+        """INSERT INTO unlimited_usage (job_id, user_id, order_id, minutes, at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (job_id) DO UPDATE SET order_id = excluded.order_id, minutes = excluded.minutes,
+               at = excluded.at
+           WHERE unlimited_usage.minutes = 0 AND unlimited_usage.user_id = excluded.user_id""",
+        (job_id, user_id, order_id, cost, now),
+    ).rowcount
+    if not counted:
+        raise ValueError(f"Job {job_id} already has a reservation")
+
+
+def _void_subscription_order(connection, token: str, order_id: str | None) -> tuple[str, int] | None:
+    """Take back what a refunded subscription order gave, once: the minutes
+    of its period, those left from the monthly balance and the rest from
+    the paid one, which can go below zero; for an unlimited one, the jobs
+    it ran. The order's period ends, and with the latest order, the
+    subscription."""
+    subscription_id = subscription_key(token)
+    if order_id:
+        period = connection.execute(
+            "SELECT * FROM subscription_periods WHERE order_id = ? AND subscription_id = ? AND voided_at IS NULL",
+            (order_id, subscription_id),
+        ).fetchone()
+    else:
+        period = connection.execute(
+            "SELECT * FROM subscription_periods WHERE subscription_id = ? AND voided_at IS NULL "
+            "ORDER BY starts_at DESC LIMIT 1",
+            (subscription_id,),
+        ).fetchone()
+    subscription = connection.execute(
+        "SELECT latest_order_id FROM subscriptions WHERE id = ?", (subscription_id,)
+    ).fetchone()
+    now = int(time.time())
+    if subscription is not None and (
+        order_id is None or order_id == subscription["latest_order_id"]
+        or (period is not None and period["order_id"] == subscription["latest_order_id"])
+    ):
+        connection.execute(
+            "UPDATE subscriptions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+            (now, subscription_id),
+        )
+    if period is None:
+        return None
+    running = int(period["ends_at"]) > now
+    connection.execute(
+        "UPDATE subscription_periods SET voided_at = ?, ends_at = ? WHERE order_id = ?",
+        (now, min(int(period["ends_at"]), now), period["order_id"]),
+    )
+    user_id = period["user_id"]
+    if user_id == DELETED_USER_ID:
+        return None
+    user = connection.execute(
+        "SELECT monthly_minutes FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    if user is None:
+        return None
+    from_monthly = 0
+    if period["minutes"] is None:
+        from_paid = int(connection.execute(
+            "SELECT COALESCE(SUM(minutes), 0) AS used FROM unlimited_usage WHERE order_id = ?",
+            (period["order_id"],),
+        ).fetchone()["used"])
+    elif running:
+        left = max(0, user["monthly_minutes"] - _held(connection, user_id)["monthly"])
+        from_monthly = min(period["minutes"], left)
+        from_paid = period["minutes"] - from_monthly
+    else:
+        from_paid = max(0, period["minutes"] - (period["unused_minutes"] or 0))
+    connection.execute(
+        "UPDATE users SET minutes = minutes - ?, monthly_minutes = monthly_minutes - ? WHERE user_id = ?",
+        (from_paid, from_monthly, user_id),
+    )
+    _log_minutes(connection, user_id, "voided", -from_monthly, period["order_id"], MONTHLY)
+    _log_minutes(connection, user_id, "voided", -from_paid, period["order_id"])
+    return user_id, from_monthly + from_paid
+
+
+def _credit_all_detail(detail: str | None) -> dict:
+    parts = (detail or "").split()
+    try:
+        minutes, accounts = int(parts[0]), int(parts[3])
+    except (IndexError, ValueError):
+        return {}
+    return {"minutes": minutes, "accounts": accounts, "total": minutes * accounts}
+
+
+# --- Welcome minutes -------------------------------------------------------------
+
+def _welcome_minutes_enabled() -> bool:
+    return settings.billing.provider != "none" and settings.billing.welcome_minutes > 0
+
+
+def _give_welcome_minutes(connection, user_id: str) -> None:
+    """Give a new account WELCOME_MINUTES, once per person: an account
+    deleted and made again is not given them again."""
+    if not _welcome_minutes_enabled():
+        return
+    claimed = connection.execute(
+        "INSERT INTO welcome_claims (user_hash, at) VALUES (?, ?) ON CONFLICT (user_hash) DO NOTHING",
+        (_user_hash(user_id), int(time.time())),
+    ).rowcount
+    if not claimed:
+        return
+    minutes = settings.billing.welcome_minutes
+    connection.execute("UPDATE users SET minutes = minutes + ? WHERE user_id = ?", (minutes, user_id))
+    _log_minutes(connection, user_id, "welcome", minutes)

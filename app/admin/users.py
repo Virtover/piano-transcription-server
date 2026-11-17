@@ -1,6 +1,8 @@
 """`user`: one account's balance and history, credits and debits by hand,
 developer accounts, and account deletion. `users find`: accounts by part of
-their email."""
+their email. `users credit-all`: minutes for every account."""
+
+import uuid
 
 from app import controls
 from app.admin.common import (
@@ -27,6 +29,8 @@ from app.worker import tasks
 RECENT = 10
 FOUND = 20
 SEARCH_LENGTH = 3
+# The most minutes credit-all gives each account at once.
+CREDIT_ALL_LIMIT = 10_000
 
 
 # --- Data ---------------------------------------------------------------------
@@ -61,6 +65,16 @@ def account(who: str) -> dict:
         # Jobs of a developer's account are never charged.
         "developer": bool(user.get("developer")),
         "free_minutes": free,
+        # The plan whose period runs now; its minutes are the monthly ones.
+        **billing.subscription_status(user_id),
+        "subscriptions": [
+            dict(row)
+            for row in billing.read(
+                "SELECT product_id, state, expires_at, auto_renewing, latest_order_id, replaced_by, revoked_at "
+                "FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, RECENT),
+            )
+        ],
         "blocked": {"reason": block.value or None, "expires_in": block.expires_in} if block else None,
         "purchases": [
             dict(row)
@@ -131,6 +145,33 @@ def credit(who: str, minutes: int, actor: str, reason: str | None = None) -> dic
     return {**plan, "balance_after": balance}
 
 
+def credit_all_plan(minutes: int) -> dict:
+    """What giving every account minutes would change. Only adding: taking
+    minutes from everyone is not offered."""
+    if minutes <= 0:
+        raise AdminError("Give a positive number of minutes; minutes are never taken from every account at once")
+    if minutes > CREDIT_ALL_LIMIT:
+        raise AdminError(f"At most {CREDIT_ALL_LIMIT} minutes for each account at once")
+    accounts = tasks.billing.account_count()
+    if not accounts:
+        raise AdminError("There are no accounts yet")
+    return {"minutes": minutes, "accounts": accounts, "total": minutes * accounts}
+
+
+def credit_all(minutes: int, actor: str, reason: str | None, grant_id: str) -> dict:
+    """Add paid minutes, which never expire, to every account, with one
+    audit entry, in one transaction. A repeat of the same grant_id, as after
+    a lost answer, changes nothing."""
+    reason = check_reason(reason, required=True)
+    credit_all_plan(minutes)
+    return tasks.billing.credit_all(minutes, reason, actor, grant_id)
+
+
+def credit_all_phrase(minutes: int) -> str:
+    """What the operator types to confirm credit-all, here and on the web page."""
+    return f"give {minutes} to all"
+
+
 def developer_plan(who: str, developer: bool) -> dict:
     """What making the account a developer's, or ending that, changes."""
     user = find_user(who)
@@ -184,8 +225,18 @@ def run_show(args) -> None:
     )
     if data["minutes"] < 0:
         print("  The paid balance is negative: a refunded purchase's minutes were already used.")
+    subscription = data["subscription"]
+    if subscription is not None:
+        per_period = "unlimited" if subscription["minutes"] is None else f"{subscription['minutes']} minutes"
+        renews = "renews" if subscription["auto_renewing"] else "ends"
+        print(
+            f"  subscription: {subscription['name']} ({per_period} a period), {renews} "
+            f"{when(subscription['period_ends_at'])}, Google Play state {subscription['state'] or '-'}"
+        )
+        if data["unlimited"]:
+            print(f"  unlimited: {data['unlimited_minutes_left']} minutes left of the fair-use limit for 24 hours")
     free = data["free_minutes"]
-    if free is not None:
+    if free is not None and subscription is None:
         next_grant = when(free["next_grant_at"]) if free["next_grant_at"] else "the next request"
         print(f"  monthly minutes last renewed: {when(free['last_grant_at'])}, next from {next_grant}")
     block = data["blocked"]
@@ -273,6 +324,22 @@ def run_credit(args) -> None:
     else:
         text = f"Took {-args.minutes} minutes from {label}; balance {result['balance_after']} minutes"
     finish(args, result, text, ["user", plan["user_id"], "credit", str(-args.minutes), "--reason", "<why>"])
+
+
+def run_credit_all(args) -> None:
+    ask_reason(args)
+    plan = credit_all_plan(args.minutes)
+    say(
+        args,
+        f"Every account, {plan['accounts']} now, gets {plan['minutes']} paid minutes that never expire: "
+        f"{plan['total']} minutes in all. Accounts made later get none.",
+    )
+    question = f"Give {plan['minutes']} minutes to each of {plan['accounts']} accounts?"
+    if not proceed(args, plan, question, typed=credit_all_phrase(args.minutes)):
+        return
+    result = credit_all(args.minutes, args.by, args.reason, uuid.uuid4().hex)
+    text = f"Gave {result['minutes']} minutes to each of {result['accounts']} accounts"
+    finish(args, result, text)
 
 
 def run_developer(args) -> None:

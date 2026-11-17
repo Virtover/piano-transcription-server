@@ -212,6 +212,26 @@ def keep_products_synced(synced: bool) -> None:
         synced = sync_products()
 
 
+# How often subscriptions whose period ends are read again: test purchases
+# renew every few minutes.
+SUBSCRIPTIONS_INTERVAL = 60.0
+
+
+def refresh_subscriptions(leader: Leadership | None = None) -> None:
+    """Start renewed subscriptions' periods, and end those not renewed."""
+    billing = Billing()
+    while True:
+        wait_for_lead(leader)
+        try:
+            google_play.refresh_subscriptions(billing)
+        except Exception as error:
+            if google_play.is_network_error(error):
+                logger.warning("Could not reach Google Play to read subscriptions (%s)", error)
+            else:
+                logger.exception("Could not read Google Play subscriptions")
+        time.sleep(SUBSCRIPTIONS_INTERVAL)
+
+
 def voided_purchases_enabled() -> bool:
     return settings.billing.provider == "google_play" and google_play.is_configured()
 
@@ -319,6 +339,8 @@ def sync_billing_catalog() -> None:
         threading.Thread(target=clean_stored_jobs, args=(leadership,), daemon=True).start()
     if voided_purchases_enabled():
         threading.Thread(target=sync_voided_purchases, args=(leadership,), daemon=True).start()
+        if settings.billing.subscriptions:
+            threading.Thread(target=refresh_subscriptions, args=(leadership,), daemon=True).start()
 
 
 @app.on_event("shutdown")

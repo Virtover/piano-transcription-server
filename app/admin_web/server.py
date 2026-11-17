@@ -37,7 +37,7 @@ from app.admin.common import AdminError, check_reason, parse_duration
 from app.admin.common import audit as log_action
 from app.admin_web import SERVICE_HOST
 from app.admin_web.access import HEADER, AccessVerifier, Denied
-from app.admin_web.actions import ACTIONS, CREDIT_LIMIT
+from app.admin_web.actions import CREDIT_ALL_LIMIT, ACTIONS, CREDIT_LIMIT
 from app.config import settings
 from app.worker import tasks
 
@@ -93,6 +93,8 @@ class ActionRequest(BaseModel):
 
 class ActionConfirmation(BaseModel):
     token: str
+    # For an action that asks it typed, see Action.typed.
+    confirm: str | None = None
 
 
 def digest(value: str) -> str:
@@ -191,6 +193,7 @@ def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.t
             "lower_to": web.lower_modes(state["effective"]),
             "actions": sorted(ACTIONS) if writable else [],
             "credit_limit": CREDIT_LIMIT,
+            "credit_all_limit": CREDIT_ALL_LIMIT,
         }
 
     @app.get("/api/me")
@@ -323,7 +326,8 @@ def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.t
         stored = {"email": email, "action": body.action, "args": args, "reason": reason, "plan": plan_digest(plan)}
         tasks.redis.set(CONFIRM_PREFIX + digest(token), json.dumps(stored), ex=TOKEN_SECONDS)
         return {"action": body.action, "title": action.title, "serious": action.serious, "plan": plan,
-                "reason": reason, "token": token, "expires_in": TOKEN_SECONDS}
+                "reason": reason, "token": token, "expires_in": TOKEN_SECONDS,
+                "type_to_confirm": action.typed(args) if action.typed else None}
 
     @app.post("/api/actions/apply", dependencies=[Depends(same_origin)])
     def apply_action(body: ActionConfirmation, email: str = Depends(writable)):
@@ -335,6 +339,8 @@ def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.t
         if not hmac.compare_digest(stored["email"], email):
             raise HTTPException(403, "This confirmation belongs to another administrator")
         action = ACTIONS[stored["action"]]
+        if action.typed and (body.confirm or "").strip() != action.typed(stored["args"]):
+            raise AdminError(f"Type {action.typed(stored['args'])} to confirm; start again")
         if plan_digest(action.plan(stored["args"])) != stored["plan"]:
             raise HTTPException(409, "Something changed since you reviewed it; review it again")
         count_change(email)

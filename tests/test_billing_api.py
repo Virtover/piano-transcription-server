@@ -17,6 +17,9 @@ def test_none_provider_exposes_balance_and_rejects_google_play(api_context):
         "free_minutes_seconds_until_next_grant": None,
         "free_minutes_next_grant_at": None,
         "developer": False,
+        "subscription": None,
+        "unlimited": False,
+        "unlimited_minutes_left": None,
     }
 
     response = client.post(

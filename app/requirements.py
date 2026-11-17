@@ -433,6 +433,11 @@ def google_sections(config) -> list[Section]:
     package = _or_placeholder(config.google_play.package_name, "GOOGLE_PLAY_PACKAGE_NAME")
     client_count = len([client_id for client_id in config.auth.client_ids if client_id.strip()])
     products = ", ".join(f"{product} ({minutes} min)" for product, minutes in config.billing.products.items())
+    subscriptions = ", ".join(
+        f"{product} (base plan {plan.base_plan or 'any'}, "
+        f"{'unlimited' if plan.minutes is None else f'{plan.minutes} min'} a period)"
+        for product, plan in config.billing.subscriptions.items()
+    )
 
     sign_in = Section(
         "Google sign-in",
@@ -492,9 +497,10 @@ def google_sections(config) -> list[Section]:
             Requirement(
                 "Play Console access",
                 f"the service account invited, with access to {package}: read app information, read orders and "
-                "financial data, manage orders",
-                "To list products, to read and consume purchases, and to read refunds and chargebacks so their minutes "
-                "are taken back. New permissions can take up to 24 hours.",
+                "financial data, manage orders and subscriptions",
+                "To list products, to read and consume purchases, to read and acknowledge subscriptions, which "
+                "Google refunds within three days unless acknowledged, and to read refunds and chargebacks so their "
+                "minutes are taken back. New permissions can take up to 24 hours.",
                 True,
             ),
             Requirement(
@@ -502,6 +508,15 @@ def google_sections(config) -> list[Section]:
                 f"active one-time products: {products}" if products else "<set BILLING_PRODUCTS>",
                 "Only products that exist in Play Console and are listed in BILLING_PRODUCTS are offered.",
                 True,
+            ),
+            Requirement(
+                "Subscriptions",
+                f"subscriptions, each with an active auto-renewing base plan: {subscriptions}"
+                if subscriptions else "none (BILLING_SUBSCRIPTIONS is empty)",
+                "Only subscriptions whose base plan is active in Play Console and that are listed in "
+                "BILLING_SUBSCRIPTIONS are offered. Each paid period gives the plan's minutes, so a period should "
+                "match FREE_MINUTES_PERIOD's length for the minutes to mean the same.",
+                bool(subscriptions),
             ),
             Requirement(
                 "Test purchases",

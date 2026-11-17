@@ -411,6 +411,33 @@ def test_debit_asks_first_and_may_go_negative(billed, capsys, monkeypatch):
     assert balance(billing) == -10
 
 
+def test_credit_all_asks_for_the_typed_phrase(billed, capsys, monkeypatch):
+    _, _, billing = billed
+    before = billing.get_balance("user")
+
+    code, output = admin(capsys, "users", "credit-all", "4", "--reason", "outage", answer="y", monkeypatch=monkeypatch)
+    assert "Nothing changed" in output
+    assert billing.get_balance("user") == before
+
+    code, output = admin(capsys, "users", "credit-all", "4", "--reason", "outage", "--dry-run")
+    assert code == 0 and "Dry run" in output and "4 paid minutes" in output
+    assert billing.get_balance("user") == before
+
+    code, output = admin(
+        capsys, "users", "credit-all", "4", "--reason", "outage", answer="give 4 to all", monkeypatch=monkeypatch
+    )
+    assert code == 0 and "Gave 4 minutes to each of" in output
+    assert billing.get_balance("user") == before + 4
+    [action] = [row for row in audit_rows(billing) if row["action"] == "users.credit_all"]
+    assert action["reason"] == "outage" and action["target"].startswith("grant:")
+
+
+@pytest.mark.parametrize("minutes", ["0", "-3"])
+def test_credit_all_only_adds(billed, capsys, minutes):
+    code, output = admin(capsys, "users", "credit-all", minutes, "--reason", "outage", "--yes")
+    assert code != 0 and "positive" in output
+
+
 def test_credit_rejects_zero(billed, capsys):
     code, output = admin(capsys, "user", "user@example.com", "credit", "0")
 

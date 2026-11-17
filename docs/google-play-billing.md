@@ -66,6 +66,32 @@ A job is paid from the monthly minutes first and from the paid ones for the rest
 
 On upgrading, existing balances become paid minutes, and the current period counts as already given. Each user's first monthly minutes come when that period ends. The server did not record sign-up times before, so an existing user's schedule runs from their last free grant.
 
+## 🔁 Subscriptions
+
+`BILLING_SUBSCRIPTIONS` lists the Google Play subscriptions users can buy, each with a name, the minutes each paid period gives, or `"unlimited"`, and the base plan the app buys:
+
+```shell
+BILLING_SUBSCRIPTIONS={"sub_pro":{"name":"Pro","minutes":100,"base_plan":"pro-monthly"},"sub_unlimited":{"name":"Unlimited","minutes":"unlimited","base_plan":"unlimited-monthly"}}
+```
+
+Plans have levels by their minutes, unlimited highest. Two plans may share neither a name nor minutes; the server refuses to start otherwise.
+
+* **A plan replaces the free minutes.** Each paid order starts a period that lasts until Google's expiry time: the monthly minutes left unused expire, and the plan's minutes become the monthly balance, spent before paid minutes. A subscriber gets no `FREE_MINUTES` while a period runs. When a subscription ends without renewal, the free schedule starts again from the end of its period.
+* **Renewals** are read from Google Play: the API asks for each subscription from 10 minutes before its period ends, every minute, then more rarely, for up to 90 days. The app also sends its subscriptions at start. A renewal's order starts the next period once, however often it is reported.
+* **A grace period**, while Google retries a failed payment, keeps the plan but gives no new minutes until the payment comes. An account hold, a pause, or an expiry ends the period at once.
+* **Upgrades and downgrades** replace the subscription: the new one's first order starts its period, and the replaced one is never renewed again.
+* **Unlimited** plans charge nothing, but each account may start at most `BILLING_UNLIMITED_DAILY_MINUTES` minutes of jobs in any 24 hours; beyond that, a submission is refused with HTTP 429, `error_code` `fair_use_limit`, and `Retry-After`. The per-user job limit applies as for everyone.
+* **One account per subscription.** The app gives Google Play the SHA-256 of the user ID as the obfuscated account ID. A subscription bought for, or first sent by, another account is refused with HTTP 409, `error_code` `subscription_owned`. An account deleted and made again by the same person gets it back.
+* **Acknowledgement.** The server acknowledges each new subscription, which Google refunds within three days otherwise. If that fails, the answer has `acknowledged: false`, and the renewal reads try again.
+
+The app sends a subscription to `POST /api/billing/google-play/subscriptions/verify` with `product_id` and `purchase_token`, as for products. The answer has `status` (`started` when an order's period started now, `recorded` otherwise), `granted_minutes`, `acknowledged`, and the new balance. Each account may ask to verify products and subscriptions 60 times in 10 minutes.
+
+`GET /api/billing/server-info` lists the plans in `subscriptions`, lowest level first, and `GET /api/billing/balance` gives the running plan in `subscription`, with `unlimited` and `unlimited_minutes_left`.
+
+## 🎁 Welcome minutes
+
+`WELCOME_MINUTES` gives each new account that many paid minutes, once. They never expire. A hash of the account's ID is kept, also after the account is deleted, so that deleting and making an account again does not give them twice. Accounts made before the setting was turned on are not given them; `python -m app.admin users credit-all` gives every account minutes; see [Administration](administration.md#-users).
+
 ## 🔄 Purchase flow
 
 The Android client sends the completed purchase's product ID and purchase token to `POST /api/billing/google-play/verify` with the user's Google ID token:
@@ -107,6 +133,7 @@ When a purchase is refunded, charged back, or cancelled, Google Play reports it 
 * A voided purchase stays recorded, so its token can never be credited again.
 * Google keeps voided purchases for 30 days. If the API was stopped for longer, older ones are missed, and the API logs a warning.
 * Purchases of deleted accounts are marked voided without changing any balance.
+* **A refunded subscription order** takes back what its period gave: while the period runs, its unused minutes from the monthly balance and those already used from the paid one; for an ended period, the minutes it used. A refunded unlimited order charges the minutes of the jobs it ran. With the latest order, the subscription ends at once.
 * `python -m app.admin billing` lists the users with a negative balance and when voided purchases were last read; see [Administration](administration.md#-billing).
 
 Reading voided purchases needs the service account's access to orders and financial data, which `requirements` lists and `check --online` verifies.

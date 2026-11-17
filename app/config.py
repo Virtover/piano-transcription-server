@@ -27,7 +27,7 @@ from typing import Annotated, Any, Callable, Literal
 from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
-from pydantic import BeforeValidator, Field, SecretStr, ValidationError, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app import network
@@ -381,13 +381,76 @@ class DatabaseSettings(BaseSettings):
     backup_retention: OptionalDuration = None
 
 
+class SubscriptionPlan(BaseModel):
+    """A Google Play subscription of BILLING_SUBSCRIPTIONS: its name in the
+    apps, and the minutes each paid period gives, None for unlimited."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, max_length=40)
+    minutes: UnlimitedInt
+    # The base plan the apps buy; without it, the subscription's first.
+    base_plan: str | None = Field(default=None, min_length=1, max_length=63)
+
+    @field_validator("name")
+    @classmethod
+    def _name_has_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value.strip()
+
+    @property
+    def unlimited(self) -> bool:
+        return self.minutes is None
+
+
 class BillingSettings(BaseSettings):
     model_config = _group_config("BILLING_")
 
     provider: Literal["none", "google_play"] = "none"
     products: dict[str, int] = Field(default_factory=dict)
+    # Subscription product ID -> plan. Levels follow the minutes, unlimited
+    # highest; two plans may share neither a name nor minutes.
+    subscriptions: dict[str, SubscriptionPlan] = Field(default_factory=dict)
     free_minutes: int | None = Field(default=None, ge=0, validation_alias="FREE_MINUTES")
     free_minutes_period: DurationText = Field(default=None, validation_alias="FREE_MINUTES_PERIOD")
+    # Given once, to each new account, as paid minutes that never expire.
+    welcome_minutes: int = Field(default=0, ge=0, validation_alias="WELCOME_MINUTES")
+    # Fair use of an unlimited subscription: the most minutes of jobs it
+    # starts in any 24 hours.
+    unlimited_daily_minutes: int = Field(default=600, ge=1)
+
+    @model_validator(mode="after")
+    def _distinct_plans(self) -> "BillingSettings":
+        names: dict[str, str] = {}
+        minutes: dict[int | None, str] = {}
+        for product_id, plan in self.subscriptions.items():
+            if product_id in self.products:
+                raise ValueError(f"{product_id} is in both BILLING_PRODUCTS and BILLING_SUBSCRIPTIONS")
+            key = plan.name.casefold()
+            if key in names:
+                raise ValueError(
+                    f"BILLING_SUBSCRIPTIONS: {names[key]} and {product_id} have the same name {plan.name!r}"
+                )
+            if plan.minutes in minutes:
+                amount = "unlimited" if plan.minutes is None else f"{plan.minutes}"
+                raise ValueError(
+                    f"BILLING_SUBSCRIPTIONS: {minutes[plan.minutes]} and {product_id} both give {amount} minutes; "
+                    "each level needs its own"
+                )
+            names[key] = product_id
+            minutes[plan.minutes] = product_id
+        return self
+
+    def subscription_levels(self) -> dict[str, int]:
+        """Each subscription's level, from 1, by its minutes; unlimited is
+        the highest."""
+        ordered = sorted(
+            self.subscriptions,
+            key=lambda product_id: (self.subscriptions[product_id].minutes is None,
+                                    self.subscriptions[product_id].minutes or 0),
+        )
+        return {product_id: level for level, product_id in enumerate(ordered, start=1)}
 
 
 class GooglePlaySettings(BaseSettings):

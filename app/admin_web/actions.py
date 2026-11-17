@@ -9,6 +9,7 @@ writes job files, which the page's service may not, and the second cannot be
 undone.
 """
 
+import secrets
 from dataclasses import dataclass
 from typing import Callable
 
@@ -21,6 +22,8 @@ from app.worker import tasks
 # The most minutes one change from the page may add or take away; more is
 # done on the command line.
 CREDIT_LIMIT = 600
+# The most minutes giving every account minutes may give each from the page.
+CREDIT_ALL_LIMIT = 120
 MESSAGE_LENGTH = 200
 
 
@@ -33,6 +36,8 @@ class Action:
     reason_required: bool = False
     # Shown with a warning: it cannot be undone, or it affects every user.
     serious: bool = False
+    # What the administrator must type to apply it, from its arguments.
+    typed: Callable[[dict], str] | None = None
 
 
 def _text(args: dict, name: str, required: bool = True, length: int = 320) -> str | None:
@@ -66,6 +71,16 @@ def _credit(args: dict) -> dict:
     if abs(minutes) > CREDIT_LIMIT:
         raise AdminError(f"The page changes at most {CREDIT_LIMIT} minutes at once; use the command line for more")
     return {"user": _text(args, "user"), "minutes": minutes}
+
+
+def _credit_all(args: dict) -> dict:
+    minutes = _whole(args, "minutes")
+    if not 0 < minutes <= CREDIT_ALL_LIMIT:
+        raise AdminError(
+            f"The page gives every account 1 to {CREDIT_ALL_LIMIT} minutes at once; use the command line for more"
+        )
+    # Chosen at review, so applying the reviewed change twice gives once.
+    return {"minutes": minutes, "grant_id": secrets.token_hex(16)}
 
 
 def _message(args: dict) -> dict:
@@ -181,6 +196,15 @@ ACTIONS: dict[str, Action] = {
         lambda args: users.credit_plan(args["user"], args["minutes"]),
         lambda args, actor, reason: users.credit(args["user"], args["minutes"], actor, reason),
         reason_required=True,
+    ),
+    "users.credit_all": Action(
+        "Give every account minutes",
+        _credit_all,
+        lambda args: users.credit_all_plan(args["minutes"]),
+        lambda args, actor, reason: users.credit_all(args["minutes"], actor, reason, args["grant_id"]),
+        reason_required=True,
+        serious=True,
+        typed=lambda args: users.credit_all_phrase(args["minutes"]),
     ),
     "user.developer": Action(
         "Make an account a developer's",

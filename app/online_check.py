@@ -363,6 +363,33 @@ def check_google_play(config, service_factory: Callable | None = None) -> Result
             "It needs access to this app's orders and financial data; new permissions can take up to 24 hours.",
         )
 
+    if config.billing.subscriptions:
+        from app.google_play import list_subscriptions
+
+        try:
+            plans = list_subscriptions(service, config.google_play.package_name)
+        except Exception as error:
+            status = getattr(getattr(error, "resp", None), "status", None)
+            return Result(
+                "Google Play",
+                "fail",
+                f"Listing subscriptions: {f'HTTP {status}' if status is not None else type(error).__name__}",
+                PLAY_HINTS.get(int(status)) if status is not None else None,
+            )
+        unavailable = [
+            product_id
+            for product_id, plan in config.billing.subscriptions.items()
+            if not plans.get(product_id) or (plan.base_plan is not None and plan.base_plan not in plans[product_id])
+        ]
+        if unavailable:
+            return Result(
+                "Google Play",
+                "warn",
+                f"subscriptions configured but without that active base plan in Play Console: {', '.join(unavailable)}",
+                "Create the subscription and activate its base plan in Play Console, or correct BILLING_SUBSCRIPTIONS. "
+                "They are not offered to users.",
+            )
+
     configured = set(config.billing.products)
     missing = sorted(configured - products)
     unused = sorted(products - configured)
