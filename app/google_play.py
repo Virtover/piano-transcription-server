@@ -258,18 +258,28 @@ def parse_subscription(token: str, response: dict) -> "SubscriptionInfo":
     items = response.get("lineItems") or []
     configured = [item for item in items if item.get("productId") in settings.billing.subscriptions]
     item = max(configured or items or [{}], key=lambda line: _timestamp(line.get("expiryTime")))
+    # A deferred change of plan: Google names it on the running item, and
+    # lists the coming plan's item without an expiry. After a cancellation
+    # only the second remains.
+    pending = [line.get("productId") for line in items
+               if line is not item and line.get("productId") and not line.get("expiryTime")]
+    next_product = (item.get("deferredItemReplacement") or {}).get("productId") or (pending[0] if pending else None)
+    state_name = (response.get("subscriptionState") or "").removeprefix(STATE_PREFIX)
     state = (response.get("subscriptionState") or "UNSPECIFIED").removeprefix(STATE_PREFIX)
     return SubscriptionInfo(
         token=token,
         product_id=item.get("productId") or "",
         state=state,
         expires_at=_timestamp(item.get("expiryTime")),
-        auto_renewing=bool((item.get("autoRenewingPlan") or {}).get("autoRenewEnabled")),
+        # The running item of a deferred change does not renew itself; the
+        # subscription renews into the coming plan unless it was cancelled.
+        auto_renewing=bool((item.get("autoRenewingPlan") or {}).get("autoRenewEnabled"))
+        or (next_product is not None and state_name == "ACTIVE"),
         # The latest order that was paid: a grace period's is not yet.
         latest_order_id=item.get("latestSuccessfulOrderId") or response.get("latestOrderId") or None,
         linked_token=response.get("linkedPurchaseToken") or None,
         account_tag=(response.get("externalAccountIdentifiers") or {}).get("obfuscatedExternalAccountId") or None,
-        deferred_product_id=(item.get("deferredItemReplacement") or {}).get("productId") or None,
+        deferred_product_id=next_product,
         replaced="replacementCancellation" in (response.get("canceledStateContext") or {}),
         acknowledged=response.get("acknowledgementState") != "ACKNOWLEDGEMENT_STATE_PENDING",
     )

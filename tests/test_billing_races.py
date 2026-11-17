@@ -348,3 +348,24 @@ def test_jobs_submitted_at_once_hold_their_cost_once(google):
     assert len(accepted) == 5
     assert all(response.status_code in (202, 402) for response in responses)
     assert billing.balances(user_id)["minutes"] == 0
+
+
+def test_google_reports_the_coming_plan_also_after_a_cancellation(google):
+    """A deferred change of plan: Google lists the coming plan's item
+    without an expiry; after the user cancels, the marker on the running
+    item is gone but that item stays."""
+    from app import google_play
+
+    response = google_subscription(product="sub_unlimited")
+    response["lineItems"][0]["autoRenewingPlan"] = {}
+    response["lineItems"].insert(0, {"productId": "sub_pro", "autoRenewingPlan": {}})
+    response["lineItems"][1]["deferredItemReplacement"] = {"productId": "sub_pro"}
+
+    scheduled = google_play.parse_subscription("t", response)
+    assert (scheduled.product_id, scheduled.deferred_product_id, scheduled.auto_renewing) == (
+        "sub_unlimited", "sub_pro", True)
+
+    del response["lineItems"][1]["deferredItemReplacement"]
+    response["subscriptionState"] = "SUBSCRIPTION_STATE_CANCELED"
+    cancelled = google_play.parse_subscription("t", response)
+    assert (cancelled.deferred_product_id, cancelled.auto_renewing) == ("sub_pro", False)
