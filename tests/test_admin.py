@@ -430,6 +430,14 @@ def test_credit_all_asks_for_the_typed_phrase(billed, capsys, monkeypatch):
     assert billing.get_balance("user") == before + 4
     [action] = [row for row in audit_rows(billing) if row["action"] == "users.credit_all"]
     assert action["reason"] == "outage" and action["target"].startswith("grant:")
+    assert "credit-all-undo" in output
+
+    grant = action["target"].removeprefix("grant:")
+    code, output = admin(capsys, "users", "grants")
+    assert code == 0 and grant in output
+    code, output = admin(capsys, "users", "credit-all-undo", grant, "--reason", "mistake", "--yes")
+    assert code == 0 and "Took back 4 minutes" in output
+    assert billing.get_balance("user") == before
 
 
 @pytest.mark.parametrize("minutes", ["0", "-3"])

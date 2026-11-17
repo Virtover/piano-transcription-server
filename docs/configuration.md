@@ -133,9 +133,9 @@ Prints what a setting or secret is without reading the code and this page: the f
 | --- | --- | --- |
 | `BILLING_PROVIDER` | `none` | `none` or `google_play`. |
 | `BILLING_PRODUCTS` | `{}` | JSON mapping of Google Play product IDs to transcription minutes. |
-| `FREE_MINUTES` | unset | Each user's monthly minutes: their own balance, renewed to this amount every period and spent before paid minutes. Unused ones expire. Omit to disable. |
-| `FREE_MINUTES_PERIOD` | `30d` | How often monthly minutes are renewed, on a fixed schedule from each user's sign-up. |
-| `BILLING_SUBSCRIPTIONS` | `{}` | JSON mapping of Google Play subscription product IDs to plans: `{"sub_pro": {"name": "Pro", "minutes": 100, "base_plan": "pro-monthly"}}`. Each paid period of a plan gives its `minutes`, or `"unlimited"`, as the user's monthly minutes, in place of `FREE_MINUTES`; unused ones expire when the period ends. Levels follow the minutes, unlimited highest; two plans may share neither a name nor minutes. `base_plan` is the base plan the apps buy, the subscription's first without it. See [Subscriptions](google-play-billing.md#subscriptions). |
+| `FREE_MINUTES` | unset | Each user's free minutes: their own balance, renewed to this amount every `FREE_MINUTES_INTERVAL` and spent before paid minutes. Unused ones expire. Omit to disable. The API calls this balance `monthly_minutes`, whatever the interval. |
+| `FREE_MINUTES_INTERVAL` | `30d` | How often the free minutes are renewed, on a fixed schedule from each user's sign-up: any duration, such as `7d` or `12h`, not necessarily a month. The API gives it as `free_minutes_period`. `FREE_MINUTES_PERIOD` remains accepted as a deprecated alias. |
+| `BILLING_SUBSCRIPTIONS` | `{}` | JSON mapping of Google Play subscription product IDs to plans: `{"sub_pro": {"name": "Pro", "minutes": 100, "base_plan": "pro-monthly"}}`. Each paid period of a plan gives its `minutes`, or `"unlimited"`, as the user's monthly minutes, in place of `FREE_MINUTES`; unused ones expire when the period ends. A plan's period is its billing period in Play Console, from one payment to the next renewal: `FREE_MINUTES_INTERVAL` does not apply to it, and it need not be a month (a weekly or yearly base plan gives its minutes each week or year). Levels follow the minutes, unlimited highest; two plans may share neither a name nor minutes. `base_plan` is the base plan the apps buy, the subscription's first without it. See [Subscriptions](google-play-billing.md#subscriptions). |
 | `WELCOME_MINUTES` | `0` | Minutes given once to each new account, as paid minutes that never expire. An account deleted and made again is not given them again. `0` turns them off. |
 | `BILLING_UNLIMITED_DAILY_MINUTES` | `600` | Fair use of an unlimited subscription: the most minutes of jobs one account starts in any 24 hours. Beyond it, jobs are refused until older ones leave the window. |
 | `DATABASE_BACKUPS` | `server` | Who backs up the billing database. `server`: the API, every `DATABASE_BACKUP_INTERVAL`, as described in [Billing database backups](#-billing-database-backups). `provider`: the provider of a [managed database](architecture.md#managed-redis-and-postgresql), which must then keep point-in-time backups; the server makes none, off-site copies cannot be on, and `check` warns as a reminder. |
@@ -382,6 +382,7 @@ Old names keep working. Each logs one deprecation warning when a service starts.
 | `OUTSOURCE_STORAGE_ENDPOINT` | `STORAGE_ENDPOINT` | The bucket also keeps job files now. The RunPod handler reads the old name too, so an endpoint that has it keeps working; `check --online` refuses an endpoint with both. |
 | `OUTSOURCE_STORAGE_BUCKET` | `STORAGE_BUCKET` | |
 | `OUTSOURCE_STORAGE_REGION` | `STORAGE_REGION` | |
+| `FREE_MINUTES_PERIOD` | `FREE_MINUTES_INTERVAL` | The renewal need not be monthly; the name says how often. |
 | `BILLING_DATABASE_URL` | `DATABASE_URL` | Every server has the database, with or without billing. |
 | `BILLING_DATABASE_PATH` | `DATABASE_PATH` |  |
 | `BILLING_BACKUPS` | `DATABASE_BACKUPS` |  |

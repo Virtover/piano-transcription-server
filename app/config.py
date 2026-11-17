@@ -413,7 +413,9 @@ class BillingSettings(BaseSettings):
     # highest; two plans may share neither a name nor minutes.
     subscriptions: dict[str, SubscriptionPlan] = Field(default_factory=dict)
     free_minutes: int | None = Field(default=None, ge=0, validation_alias="FREE_MINUTES")
-    free_minutes_period: DurationText = Field(default=None, validation_alias="FREE_MINUTES_PERIOD")
+    # How often the free minutes are renewed: any length, not only a month.
+    # The API still calls it free_minutes_period.
+    free_minutes_period: DurationText = Field(default=None, validation_alias="FREE_MINUTES_INTERVAL")
     # Given once, to each new account, as paid minutes that never expire.
     welcome_minutes: int = Field(default=0, ge=0, validation_alias="WELCOME_MINUTES")
     # Fair use of an unlimited subscription: the most minutes of jobs it
@@ -782,6 +784,7 @@ ALIASES: dict[str, Alias] = {
     "OUTSOURCE_STORAGE_BUCKET": Alias("STORAGE_BUCKET", str),
     "OUTSOURCE_STORAGE_REGION": Alias("STORAGE_REGION", str),
     # The database is every server's, with or without billing.
+    "FREE_MINUTES_PERIOD": Alias("FREE_MINUTES_INTERVAL", str),
     "BILLING_DATABASE_URL": Alias("DATABASE_URL", str),
     "BILLING_DATABASE_PATH": Alias("DATABASE_PATH", str),
     "BILLING_BACKUP_DIR": Alias("DATABASE_BACKUP_DIR", str),

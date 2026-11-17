@@ -207,7 +207,7 @@ def test_current_production_style_env_still_loads(tmp_path, caplog):
         "GOOGLE_PLAY_PACKAGE_NAME=com.example.app",
         "GOOGLE_PLAY_SERVICE_ACCOUNT_FILE=account.json",
         "FREE_MINUTES=10",
-        "FREE_MINUTES_PERIOD=30d",
+        "FREE_MINUTES_INTERVAL=30d",
     ]) + "\n"
     with caplog.at_level(logging.WARNING, logger="app.config"):
         settings = load(tmp_path, env, {"account.json": '{"type": "service_account"}'})
@@ -747,3 +747,17 @@ def test_result_retention_is_a_duration(tmp_path):
     assert load(tmp_path, "RESULT_RETENTION=7d\n").limits.result_retention == 7 * 24 * 60 * 60
     with pytest.raises(ConfigError, match="RESULT_RETENTION"):
         load(tmp_path, "RESULT_RETENTION=forever\n")
+
+
+def test_free_minutes_period_is_a_deprecated_name_of_free_minutes_interval(tmp_path, caplog):
+    from app import config
+
+    env = tmp_path / "server.env"
+    env.write_text("FREE_MINUTES_PERIOD=7d\n", encoding="utf-8")
+    loaded = config.load_settings(env_file=str(env), secrets_dir=None)
+    assert loaded.billing.free_minutes_period == "7d"
+    assert "FREE_MINUTES_PERIOD is deprecated; use FREE_MINUTES_INTERVAL instead" in caplog.text
+
+    env.write_text("FREE_MINUTES_PERIOD=7d\nFREE_MINUTES_INTERVAL=1d\n", encoding="utf-8")
+    with pytest.raises(config.ConfigError, match="both set"):
+        config.load_settings(env_file=str(env), secrets_dir=None)

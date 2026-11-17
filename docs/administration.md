@@ -76,6 +76,8 @@ python scripts/admin.py user dev@example.com developer on --reason "tests the ap
 python scripts/admin.py user user@example.com delete --reason "deletion request by email"
 python scripts/admin.py users find example.com
 python scripts/admin.py users credit-all 10 --reason "sorry for the outage"
+python scripts/admin.py users grants
+python scripts/admin.py users credit-all-undo <grant> --reason "given by mistake"
 ```
 
 A user is named by email address or user ID. The email must belong to someone who has signed in at least once. If a name matches two accounts, which happens only when one account's ID is another's email address, the command stops and asks for the user ID.
@@ -84,7 +86,9 @@ A user is named by email address or user ID. The email must belong to someone wh
 * **`credit <minutes>`** adds paid minutes, which never expire, or takes them away with a negative number. It shows the balance before and after, and asks first. The balance can go below zero. The reason is kept with the balance change and in the audit log.
 * **`developer on|off`** makes the account a developer's, or ends that. A developer's jobs are never charged and hold no minutes, and they are not held to the per-user job limit; the total limit still applies. The balance stays as it is and is charged again from `off`. The API tells the apps (`developer` in `GET /api/billing/balance`), which then show unlimited minutes, the developer background, each job's details, and the server's state from `GET /api/developer/server`. A reason is required, and the change is in the audit log as `user.developer`.
 * **`delete`** deletes the account and its data, the same as `DELETE /api/account`, including running jobs and remaining minutes, and cannot be undone. It asks you to type the account's email address, or its user ID if it has none. See **Account deletion** in the [API guide](api.md#-account-deletion) for what is kept. Use it for deletion requests that arrive by email or a web form.
-* **`users credit-all <minutes>`** gives every account that many paid minutes, which never expire, in one transaction with one audit entry, `users.credit_all`. It shows how many accounts there are and the minutes in all, and asks you to type `give <minutes> to all`. It only adds, at most 10000 minutes for each account, and needs a reason. Accounts made later get none. It cannot be undone at once; take minutes back from one account with `credit` and a negative number.
+* **`users credit-all <minutes>`** gives every account that many paid minutes, which never expire, in one transaction with one audit entry, `users.credit_all`. It shows how many accounts there are and the minutes in all, and asks you to type `give <minutes> to all`. It only adds, at most 10000 minutes for each account, and needs a reason. Accounts made later get none. Its answer names the grant and the command that undoes it.
+* **`users grants`** lists the latest grants to every account, with their IDs and whether they were undone.
+* **`users credit-all-undo <grant>`** takes a grant back, once: from each account, the grant's minutes or the paid minutes it has left free of running jobs, whichever is less, so no balance goes below zero. Minutes already used stay used. It shows how many minutes come back and how many stay, asks first, and needs a reason; the audit log has it as `users.credit_all_undo`.
 * **`users find <text>`** lists the accounts whose email address or user ID contains the text, at least 3 characters, for when you know only part of an address. `%` and `_` are matched as written.
 
 ## 💰 Billing
@@ -240,7 +244,7 @@ The charts are drawn from what the server already keeps (balance changes, and jo
 
 * **`disabled`** (the default): the service does not start.
 * **`read-only`**: the page shows everything above. It adds only two kinds of entries to the audit log: who opened which account, and who lowered the page's access.
-* **`read-write`**: the page can also cancel a job, with or without a refund; add or take away minutes, at most 600 at once; give every account minutes, at most 120 each, after typing `give <minutes> to all`; make an account a developer's, or end that; pause and resume submissions; turn video links off and on; accept a video site again; block and unblock a user; change the per-user limit; and publish, replace, and end [announcements](#-announcements), with translations. Each change goes through the same functions as the command line, so it is checked, charged, and written to the audit log the same way. Queueing a job again and deleting an account stay on the command line: the first downloads from a video site and writes job files, which the page's service may not, and the second cannot be undone.
+* **`read-write`**: the page can also cancel a job, with or without a refund; add or take away minutes, at most 600 at once; give every account minutes, at most 120 each, after typing `give <minutes> to all`, and undo such a grant from the list under **Users**; make an account a developer's, or end that; pause and resume submissions; turn video links off and on; accept a video site again; block and unblock a user; change the per-user limit; and publish, replace, and end [announcements](#-announcements), with translations. Each change goes through the same functions as the command line, so it is checked, charged, and written to the audit log the same way. Queueing a job again and deleting an account stay on the command line: the first downloads from a video site and writes job files, which the page's service may not, and the second cannot be undone.
 
 ### Making a change from the page
 

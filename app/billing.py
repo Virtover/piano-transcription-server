@@ -19,7 +19,7 @@ TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 # unused at the end of the period.
 LEDGER_KINDS = ("purchase", "free", "used", "voided", "admin", "expired", "subscription", "welcome")
 # A user's two balances, the minute_ledger pools: monthly minutes, renewed
-# every FREE_MINUTES_PERIOD and spent first, and paid minutes, which never
+# every FREE_MINUTES_INTERVAL and spent first, and paid minutes, which never
 # expire.
 MONTHLY = "monthly"
 PAID = "paid"
@@ -916,10 +916,11 @@ class Billing:
             if done is not None:
                 return {"grant_id": grant_id, "repeated": True, **_credit_all_detail(done["detail"])}
             now = int(time.time())
+            # Tagged with the grant, so that it can be undone account by account.
             connection.execute(
                 "INSERT INTO minute_ledger (user_id, kind, minutes, at, note, pool) "
                 "SELECT user_id, 'admin', ?, ?, ?, 'paid' FROM users WHERE user_id != ?",
-                (minutes, now, reason, DELETED_USER_ID),
+                (minutes, now, f"{grant_note(grant_id)} {reason}", DELETED_USER_ID),
             )
             accounts = connection.execute(
                 "UPDATE users SET minutes = minutes + ? WHERE user_id != ?", (minutes, DELETED_USER_ID)
@@ -929,6 +930,52 @@ class Billing:
             )
         return {"grant_id": grant_id, "repeated": False, "minutes": minutes, "accounts": accounts,
                 "total": minutes * accounts}
+
+    def credit_all_grants(self, limit: int = 10) -> list[dict]:
+        """The latest grants to every account, newest first, and whether
+        each was undone."""
+        rows = self.read(
+            """SELECT given.at, given.actor, given.target, given.detail, given.reason,
+                      undone.at AS undone_at, undone.detail AS undone_detail
+               FROM admin_actions AS given
+               LEFT JOIN admin_actions AS undone
+                 ON undone.action = 'users.credit_all_undo' AND undone.target = given.target
+               WHERE given.action = 'users.credit_all'
+               ORDER BY given.id DESC LIMIT ?""",
+            (limit,),
+        )
+        return [
+            {**dict(row), "grant_id": row["target"].removeprefix("grant:"), **_credit_all_detail(row["detail"])}
+            for row in rows
+        ]
+
+    def undo_credit_all_plan(self, grant_id: str) -> dict:
+        """What undoing a grant would take back, changing nothing."""
+        with closing(self._connect()) as connection:
+            return _undo_amounts(connection, grant_id)
+
+    def undo_credit_all(self, grant_id: str, reason: str, actor: str) -> dict:
+        """Take a grant's minutes back from each account that got them: no
+        more than the paid minutes it has left, so no balance goes below
+        zero. Once only, in one transaction with its audit entry."""
+        target = f"grant:{grant_id}"
+        with self._connect() as connection:
+            self._begin_write(connection)
+            plan = _undo_amounts(connection, grant_id)
+            if plan["undone"]:
+                return {**plan, "repeated": True}
+            for account in plan["take"]:
+                connection.execute(
+                    "UPDATE users SET minutes = minutes - ? WHERE user_id = ?",
+                    (account["minutes"], account["user_id"]),
+                )
+                _log_minutes(connection, account["user_id"], "admin", -account["minutes"], f"undo {grant_note(grant_id)}")
+            _log_admin_action(
+                connection, actor, "users.credit_all_undo", target,
+                f"-{plan['taken']} minutes from {len(plan['take'])} accounts; {plan['kept']} already used",
+                reason,
+            )
+        return {**plan, "repeated": False}
 
     def account_count(self) -> int:
         with closing(self._connect()) as connection:
@@ -1302,7 +1349,7 @@ def _replace_durably(partial: Path, target: Path) -> None:
 
 
 def period_seconds() -> int:
-    return int(parse_duration(settings.billing.free_minutes_period or "30d", "FREE_MINUTES_PERIOD"))
+    return int(parse_duration(settings.billing.free_minutes_period or "30d", "FREE_MINUTES_INTERVAL"))
 
 
 def deleted_user_target(user_id: str) -> str:
@@ -1798,3 +1845,41 @@ def _give_welcome_minutes(connection, user_id: str) -> None:
     minutes = settings.billing.welcome_minutes
     connection.execute("UPDATE users SET minutes = minutes + ? WHERE user_id = ?", (minutes, user_id))
     _log_minutes(connection, user_id, "welcome", minutes)
+
+
+def grant_note(grant_id: str) -> str:
+    """How the ledger names a grant to every account."""
+    return f"[grant:{grant_id}]"
+
+
+def _undo_amounts(connection, grant_id: str) -> dict:
+    """For undoing a grant: each account's minutes to take back, at most
+    the grant and the paid minutes it has free of running jobs."""
+    target = f"grant:{grant_id}"
+    if connection.execute(
+        "SELECT 1 FROM admin_actions WHERE action = 'users.credit_all' AND target = ?", (target,)
+    ).fetchone() is None:
+        raise ValueError(f"No grant {grant_id} to every account")
+    undone = connection.execute(
+        "SELECT 1 FROM admin_actions WHERE action = 'users.credit_all_undo' AND target = ?", (target,)
+    ).fetchone() is not None
+    given = connection.execute(
+        "SELECT user_id, minutes FROM minute_ledger WHERE kind = 'admin' AND minutes > 0 AND user_id != ? "
+        "AND note LIKE ?",
+        (DELETED_USER_ID, grant_note(grant_id) + " %"),
+    ).fetchall()
+    take = []
+    granted = 0
+    for row in given:
+        granted += int(row["minutes"])
+        user = connection.execute("SELECT minutes FROM users WHERE user_id = ?", (row["user_id"],)).fetchone()
+        if user is None:
+            continue
+        held = _held(connection, row["user_id"])
+        free_paid = int(user["minutes"]) - (held["total"] - held["monthly"])
+        minutes = min(int(row["minutes"]), max(0, free_paid))
+        if minutes:
+            take.append({"user_id": row["user_id"], "minutes": minutes})
+    taken = sum(account["minutes"] for account in take)
+    return {"grant_id": grant_id, "undone": undone, "accounts": len(given), "granted": granted,
+            "take": take, "taken": taken, "kept": granted - taken}

@@ -776,6 +776,23 @@ def test_every_account_is_given_minutes_only_with_the_typed_phrase(writable):
     assert (row["actor"], row["action"], row["reason"]) == ("web:chris@example.com", "users.credit_all", "sorry for the outage")
 
 
+def test_a_grant_to_every_account_is_listed_and_undone(writable):
+    client, _, billing = writable
+    planned = act(client, "users.credit_all", {"minutes": 5}, "outage").json()
+    client.post("/api/actions/apply", headers=changing(), json={"token": planned["token"], "confirm": "give 5 to all"})
+    [grant] = client.get("/api/grants", headers=signed_in()).json()
+    assert grant["minutes"] == 5 and grant["undone_at"] is None
+
+    undo = act(client, "users.credit_all_undo", {"grant": grant["grant_id"]}, "given by mistake").json()
+    assert undo["serious"] is True and undo["plan"]["taken"] >= 5
+    assert apply(client, undo).status_code == 200
+
+    assert billing.get_balance("user") == 30
+    assert client.get("/api/grants", headers=signed_in()).json()[0]["undone_at"] is not None
+    assert act(client, "users.credit_all_undo", {"grant": grant["grant_id"]}, "again").status_code == 400
+    assert act(client, "users.credit_all_undo", {"grant": "../x"}, "bad").status_code == 400
+
+
 @pytest.mark.parametrize("args", [{"minutes": 0}, {"minutes": -5}, {"minutes": 121}, {"minutes": "5"}, {}])
 def test_every_account_is_given_a_bounded_amount(writable, args):
     client, _, _ = writable

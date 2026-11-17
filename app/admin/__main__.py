@@ -108,6 +108,14 @@ def parser() -> argparse.ArgumentParser:
     )
     command.add_argument("minutes", type=int)
     command.set_defaults(run=users.run_credit_all)
+    command = user_searches.add_parser(
+        "credit-all-undo", parents=[changes, asks],
+        help="take a grant to every account back, as far as each account has the minutes left",
+    )
+    command.add_argument("grant", help="the grant's ID, from users grants")
+    command.set_defaults(run=users.run_credit_all_undo)
+    command = user_searches.add_parser("grants", parents=[reads], help="the latest grants to every account")
+    command.set_defaults(run=users.run_grants)
 
     command = commands.add_parser("billing", parents=[reads], help="minutes sold, free, and used; negative balances; job time")
     command.add_argument("--per", choices=sorted(report.PERIOD_FORMATS), default="day", help="group per day or month (default: day)")

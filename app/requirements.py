@@ -514,8 +514,8 @@ def google_sections(config) -> list[Section]:
                 f"subscriptions, each with an active auto-renewing base plan: {subscriptions}"
                 if subscriptions else "none (BILLING_SUBSCRIPTIONS is empty)",
                 "Only subscriptions whose base plan is active in Play Console and that are listed in "
-                "BILLING_SUBSCRIPTIONS are offered. Each paid period gives the plan's minutes, so a period should "
-                "match FREE_MINUTES_PERIOD's length for the minutes to mean the same.",
+                "BILLING_SUBSCRIPTIONS are offered. Each billing period set on the base plan gives the plan's "
+                "minutes, whatever its length; FREE_MINUTES_INTERVAL does not apply to plans.",
                 bool(subscriptions),
             ),
             Requirement(

@@ -167,6 +167,29 @@ def credit_all(minutes: int, actor: str, reason: str | None, grant_id: str) -> d
     return tasks.billing.credit_all(minutes, reason, actor, grant_id)
 
 
+def credit_all_undo_plan(grant_id: str) -> dict:
+    """What undoing a grant to every account would take back. Each account
+    gives back at most the paid minutes it has left; none goes below zero."""
+    try:
+        plan = tasks.billing.undo_credit_all_plan(grant_id)
+    except ValueError as error:
+        raise AdminError(str(error)) from error
+    if plan["undone"]:
+        raise AdminError(f"The grant {grant_id} was already undone")
+    return {key: value for key, value in plan.items() if key != "take"} | {"accounts_taken_from": len(plan["take"])}
+
+
+def undo_credit_all(grant_id: str, actor: str, reason: str | None) -> dict:
+    reason = check_reason(reason, required=True)
+    credit_all_undo_plan(grant_id)
+    result = tasks.billing.undo_credit_all(grant_id, reason, actor)
+    return {key: value for key, value in result.items() if key != "take"} | {"accounts_taken_from": len(result["take"])}
+
+
+def grants() -> list[dict]:
+    return tasks.billing.credit_all_grants()
+
+
 def credit_all_phrase(minutes: int) -> str:
     """What the operator types to confirm credit-all, here and on the web page."""
     return f"give {minutes} to all"
@@ -339,7 +362,37 @@ def run_credit_all(args) -> None:
         return
     result = credit_all(args.minutes, args.by, args.reason, uuid.uuid4().hex)
     text = f"Gave {result['minutes']} minutes to each of {result['accounts']} accounts"
-    finish(args, result, text)
+    finish(args, result, text, ["users", "credit-all-undo", result["grant_id"], "--reason", "<why>"])
+
+
+def run_credit_all_undo(args) -> None:
+    ask_reason(args)
+    plan = credit_all_undo_plan(args.grant)
+    say(
+        args,
+        f"The grant gave {plan['granted']} minutes to {plan['accounts']} accounts. Undoing it takes back "
+        f"{plan['taken']} from {plan['accounts_taken_from']} accounts; {plan['kept']} were already used and stay, "
+        "so no balance goes below zero.",
+    )
+    if not proceed(args, plan, f"Take back {plan['taken']} minutes?"):
+        return
+    result = undo_credit_all(args.grant, args.by, args.reason)
+    finish(args, result, f"Took back {result['taken']} minutes from {result['accounts_taken_from']} accounts")
+
+
+def run_grants(args) -> None:
+    rows = grants()
+    if args.json:
+        print_json(rows)
+        return
+    if not rows:
+        print("No grants to every account yet")
+        return
+    print(table(
+        ["When", "Grant", "Each", "Accounts", "By", "Undone"],
+        [[when(row["at"]), row["grant_id"], row.get("minutes", "?"), row.get("accounts", "?"), row["actor"],
+          when(row["undone_at"]) if row["undone_at"] else "-"] for row in rows],
+    ))
 
 
 def run_developer(args) -> None:

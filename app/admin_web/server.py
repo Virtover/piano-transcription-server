@@ -233,6 +233,10 @@ def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.t
         log_action(f"web:{email}", "web.user_search", detail=f"{len(found)} found")
         return found
 
+    @app.get("/api/grants")
+    def get_grants(email: str = Depends(readable)):
+        return users.grants()
+
     @app.get("/api/users/{who}")
     def get_user(who: str, email: str = Depends(readable)):
         account = users.account(who)

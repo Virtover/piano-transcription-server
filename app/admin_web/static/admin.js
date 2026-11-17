@@ -9,7 +9,7 @@ const modalRoot = document.getElementById("modal-root");
 const SVG_NS = document.querySelector(".adm-nav svg").namespaceURI;
 const REFRESH_SECONDS = 30;
 // Changes that need a reason; the server checks this too.
-const REASON_REQUIRED = new Set(["job.cancel", "user.credit", "users.credit_all", "user.developer", "limits.block"]);
+const REASON_REQUIRED = new Set(["job.cancel", "user.credit", "users.credit_all", "users.credit_all_undo", "user.developer", "limits.block"]);
 const STATUS_KIND = {
   queued: "info", processing: "busy", completed: "good", failed: "bad",
   cancelled: "quiet", preparing: "quiet", uploading: "quiet",
@@ -479,6 +479,12 @@ function planSummary(action, plan) {
       facts([["Each account", `+${fmt(plan.minutes)} paid minutes, never expiring`], ["In all", `${fmt(plan.total)} minutes`],
         ["Accounts made later", "get none"]]));
   }
+  if (action === "users.credit_all_undo") {
+    return el("div", { class: "change-summary" },
+      el("div", { class: "delta" }, `−${fmt(plan.taken)} min`, el("span", { class: "arrow", text: "of" }), `${fmt(plan.granted)} given`),
+      facts([["Accounts it gave to", fmt(plan.accounts)], ["Taken back from", `${fmt(plan.accounts_taken_from)} accounts`],
+        ["Already used, kept", `${fmt(plan.kept)} minutes: no balance goes below zero`]]));
+  }
   if (action === "user.developer") {
     return el("div", { class: "change-summary" },
       el("div", { class: "delta" }, plan.developer_now ? "developer" : "regular", el("span", { class: "arrow", text: "→" }), plan.developer ? "developer" : "regular"),
@@ -770,10 +776,12 @@ function users() {
   };
   text.box.addEventListener("keydown", (event) => { if (event.key === "Enter") search(); });
   const giveAll = canChange("users.credit_all") ? qbtn("Give everyone minutes", "c-gold", creditAllDialog) : null;
+  const grantList = el("div");
   fill(main,
     head("Users", "Opening an account is written to the audit log", giveAll),
     el("div", { class: "filters" }, field("Find", text.node), el("div", { class: "pw-field" }, el("button", { type: "button", class: "btn gold", onclick: search }, icon("search"), "Find"))),
-    results);
+    results, grantList);
+  showGrants(grantList);
 }
 
 async function openUser(who) {
@@ -861,6 +869,30 @@ function creditDialog(account) {
       change("user.credit", { user: account.user_id, minutes: direction.value === "add" ? count : -count },
         { title: `${direction.value === "add" ? "Add" : "Take away"} ${count} minutes`, after: () => openUser(account.user_id) });
     } }));
+}
+
+// The latest grants to every account, each with Undo while it can be undone.
+async function showGrants(node) {
+  let rows;
+  try {
+    rows = await api("/api/grants");
+  } catch (error) {
+    return;
+  }
+  if (!rows.length) return;
+  const undo = canChange("users.credit_all_undo");
+  fill(node, el("section", { class: "card" }, el("h2", { text: "Grants to every account" }), table([
+    { label: "When", render: (row) => when(row.at) },
+    { label: "Each", num: true, render: (row) => (row.minutes === undefined ? "–" : `+${fmt(row.minutes)}`) },
+    { label: "Accounts", num: true, render: (row) => (row.accounts === undefined ? "–" : fmt(row.accounts)) },
+    { label: "Reason", render: (row) => row.reason || "–" },
+    { label: "", render: (row) => row.undone_at ? badge("undone")
+      : undo ? qbtn("Undo", "c-grey", () => change("users.credit_all_undo", { grant: row.grant_id }, {
+        title: "Undo a grant to every account",
+        describe: el("p", { class: "secondary", text: "Each account gives back the minutes it still has, at most the grant; minutes already used stay, so no balance goes below zero." }),
+        after: () => open("users"),
+      })) : "–" },
+  ], rows, { empty: "None yet" })));
 }
 
 // Minutes for every account: the amount, then why, then the plan with the

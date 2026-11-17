@@ -38,7 +38,7 @@ See the **Google Play** section of its output: the API, the service account and 
    GOOGLE_PLAY_PACKAGE_NAME=com.example.pianoweave
    BILLING_PRODUCTS={"transcription_25":25,"transcription_60":60,"transcription_300":300}
    FREE_MINUTES=10
-   FREE_MINUTES_PERIOD=30d
+   FREE_MINUTES_INTERVAL=30d
    ```
 
    Only products that exist in Play Console **and** are listed in `BILLING_PRODUCTS` are offered through `/api/server-info`. The API reads the products at startup, so restart it after changes; there is no on-demand synchronization endpoint:
@@ -59,7 +59,7 @@ See the **Google Play** section of its output: the API, the service account and 
 
 Each user has two balances:
 
-* **Monthly minutes**, from `FREE_MINUTES`. Every `FREE_MINUTES_PERIOD`, on a fixed schedule from the user's sign-up, the ones left unused expire and the balance is renewed to `FREE_MINUTES`. Paying users get them too. The renewal is made at the user's first request in a new period, but the schedule stays: a user who comes back late still gets the next renewal when the current period ends, not a full period later.
+* **Monthly minutes**, from `FREE_MINUTES`; "monthly" is their name in the API, but they are renewed every `FREE_MINUTES_INTERVAL`, which need not be a month. Every `FREE_MINUTES_INTERVAL`, on a fixed schedule from the user's sign-up, the ones left unused expire and the balance is renewed to `FREE_MINUTES`. Paying users get them too. The renewal is made at the user's first request in a new period, but the schedule stays: a user who comes back late still gets the next renewal when the current period ends, not a full period later.
 * **Paid minutes**, bought or added by hand. They never expire.
 
 A job is paid from the monthly minutes first and from the paid ones for the rest. A job that is running when the period ends keeps the monthly minutes it holds. When it ends, the ones it did not use expire; they never carry over into the new period. The renewal, each reservation, and each settlement are single database transactions, so a crash or power cut leaves either the state before or the state after, never a mix. The database refuses a negative monthly balance.
@@ -76,7 +76,7 @@ BILLING_SUBSCRIPTIONS={"sub_pro":{"name":"Pro","minutes":100,"base_plan":"pro-mo
 
 Plans have levels by their minutes, unlimited highest. Two plans may share neither a name nor minutes; the server refuses to start otherwise.
 
-* **A plan replaces the free minutes.** Each paid order starts a period that lasts until Google's expiry time: the monthly minutes left unused expire, and the plan's minutes become the monthly balance, spent before paid minutes. A subscriber gets no `FREE_MINUTES` while a period runs. When a subscription ends without renewal, the free schedule starts again from the end of its period.
+* **A plan replaces the free minutes.** Each paid order starts a period that lasts until Google's expiry time, that is, the base plan's billing period set in Play Console. `FREE_MINUTES_INTERVAL` plays no part in it, and the period need not be a month: a weekly or yearly base plan gives its minutes each week or year. Each paid order starts its period: the monthly minutes left unused expire, and the plan's minutes become the monthly balance, spent before paid minutes. A subscriber gets no `FREE_MINUTES` while a period runs. When a subscription ends without renewal, the free schedule starts again from the end of its period.
 * **Renewals** are read from Google Play: the API asks for each subscription from 10 minutes before its period ends, every minute, then more rarely, for up to 90 days. The app also sends its subscriptions at start. A renewal's order starts the next period once, however often it is reported.
 * **A grace period**, while Google retries a failed payment, keeps the plan but gives no new minutes until the payment comes. An account hold, a pause, or an expiry ends the period at once.
 * **Upgrades and downgrades** replace the subscription: the new one's first order starts its period, and the replaced one is never renewed again.

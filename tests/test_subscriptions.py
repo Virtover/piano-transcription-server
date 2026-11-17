@@ -111,27 +111,27 @@ def end_subscription_period(billing, user_id="user"):
 
 def test_plans_need_distinct_names_and_minutes():
     with pytest.raises(ValidationError, match="same name"):
-        BillingSettings(subscriptions={"a": {"name": "Pro", "minutes": 100}, "b": {"name": " pro ", "minutes": 200}})
+        BillingSettings(_env_file=None, subscriptions={"a": {"name": "Pro", "minutes": 100}, "b": {"name": " pro ", "minutes": 200}})
     with pytest.raises(ValidationError, match="both give 100 minutes"):
-        BillingSettings(subscriptions={"a": {"name": "Pro", "minutes": 100}, "b": {"name": "Max", "minutes": 100}})
+        BillingSettings(_env_file=None, subscriptions={"a": {"name": "Pro", "minutes": 100}, "b": {"name": "Max", "minutes": 100}})
     with pytest.raises(ValidationError, match="both give unlimited minutes"):
-        BillingSettings(
+        BillingSettings(_env_file=None,
             subscriptions={"a": {"name": "Pro", "minutes": "unlimited"}, "b": {"name": "Max", "minutes": "unlimited"}}
         )
     with pytest.raises(ValidationError, match="in both BILLING_PRODUCTS and BILLING_SUBSCRIPTIONS"):
-        BillingSettings(products={"a": 10}, subscriptions={"a": {"name": "Pro", "minutes": 100}})
+        BillingSettings(_env_file=None, products={"a": 10}, subscriptions={"a": {"name": "Pro", "minutes": 100}})
     with pytest.raises(ValidationError):
-        BillingSettings(subscriptions={"a": {"name": "Pro"}})
+        BillingSettings(_env_file=None, subscriptions={"a": {"name": "Pro"}})
     with pytest.raises(ValidationError):
-        BillingSettings(subscriptions={"a": {"name": "Pro", "minutes": 0}})
+        BillingSettings(_env_file=None, subscriptions={"a": {"name": "Pro", "minutes": 0}})
     with pytest.raises(ValidationError):
-        BillingSettings(subscriptions={"a": {"name": "  ", "minutes": 5}})
+        BillingSettings(_env_file=None, subscriptions={"a": {"name": "  ", "minutes": 5}})
     with pytest.raises(ValidationError):
-        BillingSettings(subscriptions={"a": {"name": "Pro", "minutes": 5, "price": 3}})
+        BillingSettings(_env_file=None, subscriptions={"a": {"name": "Pro", "minutes": 5, "price": 3}})
 
 
 def test_levels_follow_minutes_with_unlimited_highest():
-    settings = BillingSettings(subscriptions={
+    settings = BillingSettings(_env_file=None, subscriptions={
         "max": {"name": "Max", "minutes": "unlimited"},
         "big": {"name": "Big", "minutes": 300},
         "small": {"name": "Small", "minutes": 50},
@@ -1015,7 +1015,8 @@ def test_the_admin_web_role_gives_minutes_to_all_and_never_reads_tokens(subs, mo
     settings.database.url = role_url
     page = Billing(create_schema=False)
 
-    assert page.credit_all(3, "outage", "web:admin", "grant-1")["accounts"] == 1
+    assert page.credit_all(3, "outage", "web:admin", "grant1")["accounts"] == 1
+    assert page.undo_credit_all("grant1", "mistake", "web:admin")["taken"] == 3
     page.release("job-1")
     assert owner.subscription_status("user")["unlimited_minutes_left"] == 60
     with psycopg.connect(role_url) as connection:
@@ -1026,3 +1027,57 @@ def test_the_admin_web_role_gives_minutes_to_all_and_never_reads_tokens(subs, mo
             connection.execute("DELETE FROM unlimited_usage")
     with psycopg.connect(role_url) as connection:
         assert connection.execute("SELECT product_id FROM subscriptions").fetchall() == [("sub_unlimited",)]
+
+
+def test_undoing_a_grant_never_makes_a_balance_negative(subs):
+    _, settings, billing = subs
+    settings.billing.free_minutes = None
+    for user in ("keeps", "spent", "partly", "running"):
+        billing.credit_purchase(user, "starter", f"token-{user}", f"GPA.{user}")
+    billing.credit_all(20, "outage", "admin", "grant1")
+    # spent used everything; partly used 25 of its 30; running holds 28.
+    billing.reserve("spent", "job-spent", 30)
+    billing.settle_success("job-spent")
+    billing.reserve("partly", "job-partly", 25)
+    billing.settle_success("job-partly")
+    billing.reserve("running", "job-running", 28)
+
+    plan = billing.undo_credit_all_plan("grant1")
+    assert (plan["accounts"], plan["granted"], plan["taken"], plan["kept"]) == (4, 80, 27, 53)
+
+    result = billing.undo_credit_all("grant1", "given by mistake", "admin")
+
+    assert result["taken"] == 27 and result["repeated"] is False
+    assert {user: billing.balances(user)["paid_minutes"] for user in ("keeps", "spent", "partly", "running")} == {
+        "keeps": 10, "spent": 0, "partly": 0, "running": 0,
+    }
+    billing.settle_success("job-running")
+    assert billing.balances("running")["paid_minutes"] == 0
+    for user in ("keeps", "spent", "partly", "running"):
+        assert_ledger_adds_up(billing, user)
+    # Once only.
+    assert billing.undo_credit_all("grant1", "again", "admin")["repeated"] is True
+    assert billing.balances("keeps")["paid_minutes"] == 10
+    [grant] = billing.credit_all_grants()
+    assert grant["grant_id"] == "grant1" and grant["undone_at"] is not None and grant["minutes"] == 20
+    with pytest.raises(ValueError):
+        billing.undo_credit_all_plan("unknown")
+
+
+def test_admin_undo_of_a_grant(subs):
+    from app.admin import users
+    from app.admin.common import AdminError
+
+    _, _, billing = subs
+    billing.renew_monthly_minutes("a")
+    given = users.credit_all(5, "admin", "outage", "g1")
+
+    plan = users.credit_all_undo_plan(given["grant_id"])
+    assert plan["taken"] == 5 and "take" not in plan
+    with pytest.raises(AdminError, match="reason"):
+        users.undo_credit_all("g1", "admin", None)
+    assert users.undo_credit_all("g1", "admin", "mistake")["taken"] == 5
+    with pytest.raises(AdminError, match="already undone"):
+        users.credit_all_undo_plan("g1")
+    with pytest.raises(AdminError, match="No grant"):
+        users.credit_all_undo_plan("nope")

@@ -230,7 +230,7 @@ FEATURES: tuple[Feature, ...] = (
         turn_on={"BILLING_PROVIDER": "google_play"},
         turn_off={"BILLING_PROVIDER": "none"},
         settings=("GOOGLE_PLAY_PACKAGE_NAME", "GOOGLE_OAUTH_CLIENT_IDS", "BILLING_PRODUCTS", "FREE_MINUTES",
-                  "FREE_MINUTES_PERIOD", "BILLING_SUBSCRIPTIONS", "WELCOME_MINUTES",
+                  "FREE_MINUTES_INTERVAL", "BILLING_SUBSCRIPTIONS", "WELCOME_MINUTES",
                   "BILLING_UNLIMITED_DAILY_MINUTES", "GOOGLE_PLAY_VOIDED_PURCHASES_INTERVAL"),
         required=("GOOGLE_PLAY_PACKAGE_NAME", "GOOGLE_OAUTH_CLIENT_IDS"),
         secrets=(Secret("google_play_service_account.json", "The service account's JSON key", kind="file",

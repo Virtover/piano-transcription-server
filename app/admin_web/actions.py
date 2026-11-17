@@ -83,6 +83,13 @@ def _credit_all(args: dict) -> dict:
     return {"minutes": minutes, "grant_id": secrets.token_hex(16)}
 
 
+def _grant(args: dict) -> dict:
+    grant = _text(args, "grant", length=64)
+    if not grant.isalnum():
+        raise AdminError("grant must be a grant's ID")
+    return {"grant": grant}
+
+
 def _message(args: dict) -> dict:
     return {"message": _text(args, "message", required=False, length=MESSAGE_LENGTH), "for": _duration(args)}
 
@@ -205,6 +212,14 @@ ACTIONS: dict[str, Action] = {
         reason_required=True,
         serious=True,
         typed=lambda args: users.credit_all_phrase(args["minutes"]),
+    ),
+    "users.credit_all_undo": Action(
+        "Undo a grant to every account",
+        _grant,
+        lambda args: users.credit_all_undo_plan(args["grant"]),
+        lambda args, actor, reason: users.undo_credit_all(args["grant"], actor, reason),
+        reason_required=True,
+        serious=True,
     ),
     "user.developer": Action(
         "Make an account a developer's",
