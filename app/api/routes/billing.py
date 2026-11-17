@@ -85,6 +85,10 @@ class SubscriptionResponse(BaseModel):
     # Google Play's state, as ACTIVE, CANCELED (ends at period_ends_at), or
     # IN_GRACE_PERIOD (a payment failed; it is retried).
     state: str | None = None
+    # The plan it turns into at period_ends_at, after a change of plan the
+    # user deferred to the renewal, as a downgrade; None when it stays.
+    next_product_id: str | None = None
+    next_name: str | None = None
 
 
 class ServerInfoResponse(BaseModel):

@@ -1071,3 +1071,72 @@ def test_admin_undo_of_a_grant(subs):
         users.credit_all_undo_plan("g1")
     with pytest.raises(AdminError, match="No grant"):
         users.credit_all_undo_plan("nope")
+
+
+# --- Deferred changes of plan -------------------------------------------------------------
+
+def test_a_deferred_downgrade_carries_the_period_on_and_gives_nothing_twice(subs):
+    _, settings, billing = subs
+    settings.billing.subscriptions = {**plans(), "sub_max": SubscriptionPlan(name="Max", minutes=300)}
+    billing.record_subscription("user", sub(token="old", product="sub_max", order="GPA.1"))
+    billing.reserve("user", "job-1", 100)
+    billing.settle_success("job-1")
+
+    # Google gives the change a new token at once, with an unpaid order
+    # that carries Max on until the renewal into Pro.
+    carried = billing.record_subscription("user", sub(
+        token="new", product="sub_max", order="GPA.2", linked_token="old", deferred_product_id="sub_pro",
+    ))
+
+    assert carried["status"] == "recorded" and carried["minutes"] == 0
+    assert balances(billing)["monthly_minutes"] == 200
+    status = billing.subscription_status("user")["subscription"]
+    assert (status["name"], status["next_product_id"], status["next_name"]) == ("Max", "sub_pro", "Pro")
+    # Reported again, still nothing.
+    billing.record_subscription("user", sub(
+        token="new", product="sub_max", order="GPA.2", linked_token="old", deferred_product_id="sub_pro",
+    ))
+    assert balances(billing)["monthly_minutes"] == 200
+    assert billing.renew_monthly_minutes("user") == 0
+
+    # The renewal is paid as Pro: its period starts, Max's minutes expire.
+    renewed = billing.record_subscription("user", sub(token="new", product="sub_pro", order="GPA.2..0",
+                                                      linked_token="old"))
+    assert renewed["minutes"] == 100
+    status = billing.subscription_status("user")["subscription"]
+    assert (status["name"], status["next_product_id"]) == ("Pro", None)
+    assert balances(billing)["monthly_minutes"] == 100
+    assert_ledger_adds_up(billing)
+
+
+def test_refunding_an_order_takes_back_its_carried_period_too(subs):
+    _, _, billing = subs
+    billing.record_subscription("user", sub(token="old", product="sub_unlimited", order="GPA.1"))
+    billing.reserve("user", "job-1", 20)
+    billing.settle_success("job-1")
+    billing.record_subscription("user", sub(
+        token="new", product="sub_unlimited", order="GPA.2", linked_token="old", deferred_product_id="sub_pro",
+    ))
+    billing.reserve("user", "job-2", 15)
+    billing.settle_success("job-2")
+    assert billing.subscription_status("user")["unlimited"] is True
+
+    # The unpaid carrying order has nothing to give back.
+    assert billing.void_purchase("new", "GPA.2") is None
+    assert billing.subscription_status("user")["unlimited"] is False
+    # The paid one charges every job of the plan it paid for.
+    assert billing.void_purchase("old", "GPA.1") == ("user", 35)
+    assert balances(billing)["paid_minutes"] == -35
+    assert_ledger_adds_up(billing)
+
+
+def test_google_reports_the_deferred_plan(google):
+    from app import google_play
+
+    response = google_subscription(product="sub_unlimited")
+    response["lineItems"].insert(0, {"productId": "sub_pro", "offerDetails": {"basePlanId": "pro-monthly"}})
+    response["lineItems"][1]["deferredItemReplacement"] = {"productId": "sub_pro"}
+
+    info = google_play.parse_subscription("token", response)
+
+    assert (info.product_id, info.deferred_product_id) == ("sub_unlimited", "sub_pro")

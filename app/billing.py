@@ -184,6 +184,11 @@ class Billing:
                     CREATE INDEX IF NOT EXISTS subscription_periods_subscription_index ON subscription_periods (subscription_id);
                     CREATE INDEX IF NOT EXISTS unlimited_usage_user_index ON unlimited_usage (user_id, at);
                     CREATE INDEX IF NOT EXISTS unlimited_usage_order_index ON unlimited_usage (order_id);
+                    -- Added with deferred plan changes: the plan a subscription
+                    -- turns into at its renewal, and the period an unpaid order
+                    -- carries on from.
+                    ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS next_product_id TEXT;
+                    ALTER TABLE subscription_periods ADD COLUMN IF NOT EXISTS carried_from TEXT;
                     INSERT INTO billing_state (key, value) VALUES ('minute_ledger_since', '{ledger_since}')
                     ON CONFLICT (key) DO NOTHING
                     ;
@@ -363,6 +368,12 @@ class Billing:
                 connection.execute(
                     "ALTER TABLE transcription_reservations ADD COLUMN monthly_ended INTEGER NOT NULL DEFAULT 0"
                 )
+            subscription_columns = {row[1] for row in connection.execute("PRAGMA table_info(subscriptions)")}
+            if "next_product_id" not in subscription_columns:
+                connection.execute("ALTER TABLE subscriptions ADD COLUMN next_product_id TEXT")
+            period_columns = {row[1] for row in connection.execute("PRAGMA table_info(subscription_periods)")}
+            if "carried_from" not in period_columns:
+                connection.execute("ALTER TABLE subscription_periods ADD COLUMN carried_from TEXT")
             ledger_columns = {row[1] for row in connection.execute("PRAGMA table_info(minute_ledger)")}
             if "pool" not in ledger_columns:
                 connection.execute(
@@ -755,17 +766,18 @@ class Billing:
             connection.execute(
                 """INSERT INTO subscriptions
                    (id, purchase_token, user_id, product_id, state, expires_at, auto_renewing,
-                    latest_order_id, checked_at, created_at, acknowledged)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    latest_order_id, checked_at, created_at, acknowledged, next_product_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT (id) DO UPDATE SET
                        product_id = excluded.product_id, state = excluded.state,
                        expires_at = excluded.expires_at, auto_renewing = excluded.auto_renewing,
                        latest_order_id = COALESCE(excluded.latest_order_id, subscriptions.latest_order_id),
-                       checked_at = excluded.checked_at, acknowledged = excluded.acknowledged""",
+                       checked_at = excluded.checked_at, acknowledged = excluded.acknowledged,
+                       next_product_id = excluded.next_product_id""",
                 (subscription_id, info.token, user_id, info.product_id, info.state, info.expires_at,
                  int(info.auto_renewing), info.latest_order_id, now, now,
                  # A paid one waits to be acknowledged; others need nothing.
-                 int(info.acknowledged or not info.paid)),
+                 int(info.acknowledged or not info.paid), info.deferred_product_id),
             )
             subscription = connection.execute(
                 "SELECT revoked_at, replaced_by FROM subscriptions WHERE id = ?", (subscription_id,)
@@ -775,6 +787,21 @@ class Billing:
                 "SELECT 1 FROM subscription_periods WHERE order_id = ?", (info.latest_order_id,)
             ).fetchone() is not None
             given = None
+            if (
+                info.deferred_product_id
+                and info.linked_token
+                and info.latest_order_id is not None
+                and not known
+                and subscription["revoked_at"] is None
+            ):
+                # A change of plan deferred to the renewal: Google gives the
+                # subscription a new token and an order at once, unpaid, that
+                # carries the running plan until it renews into the new one.
+                # Its period carries on; nothing is given again.
+                _carry_period(
+                    connection, user_id, subscription_id, subscription_key(info.linked_token), info, now
+                )
+                known = True
             if (
                 info.paid
                 and info.expires_at > now
@@ -860,11 +887,16 @@ class Billing:
             if period is None:
                 return empty
             subscription = connection.execute(
-                "SELECT state, auto_renewing FROM subscriptions WHERE id = ?", (period["subscription_id"],)
+                "SELECT state, auto_renewing, next_product_id FROM subscriptions WHERE id = ?",
+                (period["subscription_id"],),
             ).fetchone()
             used = _unlimited_used(connection, user_id, now) if period["minutes"] is None else 0
         plan = settings.billing.subscriptions.get(period["product_id"])
         unlimited = period["minutes"] is None
+        next_product = subscription["next_product_id"] if subscription else None
+        if next_product == period["product_id"]:
+            next_product = None
+        next_plan = settings.billing.subscriptions.get(next_product) if next_product else None
         return {
             "subscription": {
                 "product_id": period["product_id"],
@@ -874,6 +906,9 @@ class Billing:
                 "period_ends_at": int(period["ends_at"]),
                 "auto_renewing": bool(subscription and subscription["auto_renewing"]),
                 "state": subscription["state"] if subscription else None,
+                # A change of plan Google makes at the renewal, as a downgrade.
+                "next_product_id": next_product,
+                "next_name": next_plan.name if next_plan else next_product,
             },
             "unlimited": unlimited,
             "unlimited_heavy_use": unlimited and used >= settings.billing.unlimited_heavy_use_minutes,
@@ -1629,6 +1664,8 @@ class SubscriptionInfo:
     linked_token: str | None = None
     # The obfuscated account ID the app set at purchase, if any.
     account_tag: str | None = None
+    # The plan it turns into at its renewal, after a deferred change.
+    deferred_product_id: str | None = None
     acknowledged: bool = True
 
     @property
@@ -1772,11 +1809,29 @@ def _void_subscription_order(connection, token: str, order_id: str | None) -> tu
         )
     if period is None:
         return None
-    running = int(period["ends_at"]) > now
-    connection.execute(
-        "UPDATE subscription_periods SET voided_at = ?, ends_at = ? WHERE order_id = ?",
-        (now, min(int(period["ends_at"]), now), period["order_id"]),
-    )
+    if period["carried_from"]:
+        # An unpaid order that only carried a period on: the order it
+        # carries on from has what to take back.
+        connection.execute(
+            "UPDATE subscription_periods SET voided_at = ?, ends_at = ? WHERE order_id = ?",
+            (now, min(int(period["ends_at"]), now), period["order_id"]),
+        )
+        return None
+    carried = connection.execute(
+        "SELECT order_id, ends_at FROM subscription_periods WHERE carried_from = ?",
+        (period["order_id"],),
+    ).fetchall()
+    running = int(period["ends_at"]) > now or any(int(row["ends_at"]) > now for row in carried)
+    orders = [period["order_id"]] + [row["order_id"] for row in carried]
+    for order in orders:
+        connection.execute(
+            "UPDATE subscription_periods SET voided_at = COALESCE(voided_at, ?), ends_at = MIN(ends_at, ?) "
+            "WHERE order_id = ?"
+            if not isinstance(connection, _PostgresConnection) else
+            "UPDATE subscription_periods SET voided_at = COALESCE(voided_at, ?), ends_at = LEAST(ends_at, ?) "
+            "WHERE order_id = ?",
+            (now, now, order),
+        )
     user_id = period["user_id"]
     if user_id == DELETED_USER_ID:
         return None
@@ -1787,10 +1842,12 @@ def _void_subscription_order(connection, token: str, order_id: str | None) -> tu
         return None
     from_monthly = 0
     if period["minutes"] is None:
-        from_paid = int(connection.execute(
-            "SELECT COALESCE(SUM(minutes), 0) AS used FROM unlimited_usage WHERE order_id = ?",
-            (period["order_id"],),
-        ).fetchone()["used"])
+        from_paid = sum(
+            int(connection.execute(
+                "SELECT COALESCE(SUM(minutes), 0) AS used FROM unlimited_usage WHERE order_id = ?", (order,)
+            ).fetchone()["used"])
+            for order in orders
+        )
     elif running:
         left = max(0, user["monthly_minutes"] - _held(connection, user_id)["monthly"])
         from_monthly = min(period["minutes"], left)
@@ -1873,3 +1930,33 @@ def _undo_amounts(connection, grant_id: str) -> dict:
     taken = sum(account["minutes"] for account in take)
     return {"grant_id": grant_id, "undone": undone, "accounts": len(given), "granted": granted,
             "take": take, "taken": taken, "kept": granted - taken}
+
+
+def _carry_period(connection, user_id: str, subscription_id: str, linked_id: str, info, now: int) -> None:
+    """The new token of a deferred change of plan carries the replaced one's
+    running period on, under its own order, until the renewal: the old
+    period ends now, its minutes stay, and the replaced token is never
+    renewed again."""
+    connection.execute(
+        "UPDATE subscriptions SET replaced_by = ? WHERE id = ? AND user_id = ?",
+        (subscription_id, linked_id, user_id),
+    )
+    previous = connection.execute(
+        """SELECT * FROM subscription_periods
+           WHERE subscription_id = ? AND user_id = ? AND voided_at IS NULL AND ends_at > ?
+           ORDER BY starts_at DESC LIMIT 1""",
+        (linked_id, user_id, now),
+    ).fetchone()
+    if previous is None:
+        return
+    connection.execute(
+        "UPDATE subscription_periods SET ends_at = ?, unused_minutes = 0 WHERE order_id = ?",
+        (now, previous["order_id"]),
+    )
+    connection.execute(
+        """INSERT INTO subscription_periods
+           (order_id, subscription_id, user_id, product_id, minutes, starts_at, ends_at, carried_from)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (info.latest_order_id, subscription_id, user_id, previous["product_id"], previous["minutes"], now,
+         max(info.expires_at, now + 1), previous["order_id"]),
+    )

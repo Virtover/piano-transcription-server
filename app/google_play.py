@@ -269,6 +269,7 @@ def parse_subscription(token: str, response: dict) -> "SubscriptionInfo":
         latest_order_id=item.get("latestSuccessfulOrderId") or response.get("latestOrderId") or None,
         linked_token=response.get("linkedPurchaseToken") or None,
         account_tag=(response.get("externalAccountIdentifiers") or {}).get("obfuscatedExternalAccountId") or None,
+        deferred_product_id=(item.get("deferredItemReplacement") or {}).get("productId") or None,
         acknowledged=response.get("acknowledgementState") != "ACKNOWLEDGEMENT_STATE_PENDING",
     )
 
