@@ -270,6 +270,7 @@ def parse_subscription(token: str, response: dict) -> "SubscriptionInfo":
         linked_token=response.get("linkedPurchaseToken") or None,
         account_tag=(response.get("externalAccountIdentifiers") or {}).get("obfuscatedExternalAccountId") or None,
         deferred_product_id=(item.get("deferredItemReplacement") or {}).get("productId") or None,
+        replaced="replacementCancellation" in (response.get("canceledStateContext") or {}),
         acknowledged=response.get("acknowledgementState") != "ACKNOWLEDGEMENT_STATE_PENDING",
     )
 

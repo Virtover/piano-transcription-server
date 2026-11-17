@@ -836,6 +836,11 @@ class Billing:
                         "WHERE order_id = ? AND subscription_id = ? AND voided_at IS NULL",
                         (info.expires_at, info.latest_order_id, subscription_id),
                     )
+                elif info.replaced:
+                    # Expired because another token replaced it, as for a
+                    # change of plan: that token carries the period on or
+                    # ends it, whichever of the two is reported first.
+                    pass
                 else:
                     ends_at = min(info.expires_at, now)
                     connection.execute(
@@ -1666,6 +1671,8 @@ class SubscriptionInfo:
     account_tag: str | None = None
     # The plan it turns into at its renewal, after a deferred change.
     deferred_product_id: str | None = None
+    # Ended because another purchase token replaced it (a change of plan).
+    replaced: bool = False
     acknowledged: bool = True
 
     @property
