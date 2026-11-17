@@ -18,7 +18,8 @@ while the hub speaks another protocol version. When the hub's settings
 change, it lets its children finish their jobs and starts again with them.
 
 `python -m app.worker.supervisor drain` (scripts/server.py stop on a node)
-lets the children finish and keeps them stopped until the container stops.
+lets the children finish and keeps them stopped until the container stops,
+or, if nothing stops or replaces it, until a while after the drain's timeout.
 """
 
 import os
@@ -43,8 +44,14 @@ SERVICE_NAMES = {"local": "worker", "remote": "remote-worker", "node": "worker"}
 # What each role's service can do, before the switches.
 OFFERED = {"local": ("transcribe", "arrange"), "remote": ("dispatch",), "node": cluster.TASKS}
 # Created by `drain`, removed when the supervisor starts: in the container's
-# own file system, so a restarted container takes work again.
+# own file system, so a restarted container takes work again. It holds the
+# time it lapses: a restart cut off between the drain and the new container
+# (Ctrl+C, a lost connection, a power cut, `up` failing) must not leave the
+# device idle for good. An empty one, from before, never lapses.
 DRAIN_FILE = Path("/tmp/worker-drain")
+# How long a drain is kept after its own timeout, for the container to be
+# stopped or replaced.
+DRAIN_HOLD = 5 * 60
 CHECK_THREADS = 2
 RESTART_BACKOFF = (5, 15, 30, 60)
 HUB_WAIT_REPORT = 60
@@ -245,7 +252,8 @@ class Supervisor:
             # Keep doing what was allowed while Redis is away; Dramatiq
             # reconnects by itself.
             self.state = f"cannot reach Redis ({type(error).__name__})"
-        if DRAIN_FILE.exists():
+        # Wall-clock time, as the drain command wrote it from another process
+        if draining(time.time()):
             self.allowed = []
             self.state = "drained"
 
@@ -347,10 +355,32 @@ class Supervisor:
             self.stop_child(child)
 
 
-def drain(timeout: float, sleep=time.sleep) -> int:
+def draining(now: float) -> bool:
+    """Whether a drain holds: its mark exists and has not lapsed. A lapsed
+    mark is removed, and the workers take work again."""
+    try:
+        text = DRAIN_FILE.read_text().strip()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        until = float(text)
+    except ValueError:
+        return True
+    if now < until:
+        return True
+    DRAIN_FILE.unlink(missing_ok=True)
+    say("the drain lapsed without this container being stopped or replaced: taking work again")
+    return False
+
+
+def drain(timeout: float, sleep=time.sleep, clock=time.time) -> int:
     """Let this container's workers finish their jobs and take no more; used
-    before a node is stopped. Returns 0 once they have, 1 if timeout passed."""
-    DRAIN_FILE.touch()
+    before a node is stopped. Returns 0 once they have, 1 if timeout passed.
+    The drain lapses DRAIN_HOLD after the timeout if nothing stopped the
+    container by then."""
+    DRAIN_FILE.write_text(f"{clock() + timeout + DRAIN_HOLD:.0f}\n")
     redis = redis_client()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

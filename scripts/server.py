@@ -798,7 +798,9 @@ def node_stop(args, stack: "NodeStack", clock: Clock) -> int:
 
 def node_restart(args, stack: "NodeStack", clock: Clock) -> int:
     node_drain(args, stack)
-    return node_start(args, stack, clock)
+    # Always a new container: draining marked this one to take no work, and
+    # `up` keeps a container whose image did not change, so it stayed drained.
+    return node_start(args, stack, clock, recreate=True)
 
 
 def node_status(args, stack: "NodeStack", clock: Clock) -> int:

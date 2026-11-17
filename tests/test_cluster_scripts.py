@@ -613,6 +613,14 @@ def test_node_restart_and_update_drain_then_start(tmp_path, action):
     stack = node(tmp_path)
     assert server.main([action], stack, FakeClock()) == 0
     assert names(stack) == ["drain", "remove_stale", "up"]
+    # A new container, also when the image did not change: the drained one would take no work.
+    assert stack.calls[-1] == ("up", True, True)
+
+
+def test_node_start_keeps_a_running_container(tmp_path):
+    stack = node(tmp_path)
+    assert server.main(["start"], stack, FakeClock()) == 0
+    # Nothing drained it, so a start leaves an unchanged worker running its jobs.
     assert stack.calls[-1] == ("up", True)
 
 

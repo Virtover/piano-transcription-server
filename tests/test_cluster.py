@@ -6,6 +6,7 @@ import json
 import re
 import signal
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -870,6 +871,42 @@ def test_a_drained_worker_takes_no_more_jobs(monkeypatch, tmp_path):
 
     assert started[0].signals == [signal.SIGTERM]
     assert cluster.statuses(redis)[0]["state"] == "drained"
+
+
+def test_a_drain_that_nothing_ended_lapses_and_the_worker_takes_work_again(monkeypatch, tmp_path):
+    # A restart cut off after the drain (Ctrl+C, a lost connection, `up` failing) left the mark behind.
+    instance, redis, started, _ = make_supervisor(monkeypatch)
+    drain = tmp_path / "drain"
+    monkeypatch.setattr(supervisor, "DRAIN_FILE", drain)
+    drain.write_text(f"{time.time() + 60:.0f}\n")
+    instance.step()
+    assert started == [] and cluster.statuses(redis)[0]["state"] == "drained"
+
+    drain.write_text(f"{time.time() - 1:.0f}\n")
+    instance.step()
+
+    assert started and cluster.statuses(redis)[0]["state"] == "running"
+    assert not drain.exists()
+
+
+def test_an_empty_drain_mark_from_before_never_lapses(monkeypatch, tmp_path):
+    drain = tmp_path / "drain"
+    monkeypatch.setattr(supervisor, "DRAIN_FILE", drain)
+    drain.touch()
+
+    assert supervisor.draining(time.time() + 10 ** 9)
+    assert drain.exists()
+
+
+def test_the_drain_command_writes_when_it_lapses(monkeypatch, tmp_path):
+    drain = tmp_path / "drain"
+    monkeypatch.setattr(supervisor, "DRAIN_FILE", drain)
+    monkeypatch.setattr(supervisor, "redis_client", lambda: fakeredis.FakeRedis(decode_responses=True))
+
+    # No time to wait: it gives up at once, and the mark stays until it lapses.
+    assert supervisor.drain(0, sleep=lambda seconds: None, clock=lambda: 1000.0) == 1
+
+    assert float(drain.read_text()) == 1000 + supervisor.DRAIN_HOLD
 
 
 def test_a_node_of_another_protocol_waits_for_an_update(monkeypatch):
