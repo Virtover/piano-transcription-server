@@ -222,6 +222,10 @@ Announcements are rows of the `announcements` table in the billing database, eac
 * **A clock set back**, as after a power cut on a machine that did not sync its time, never hides an announcement as not started yet: the API takes the time as at least that of the latest change to an announcement, and logs that the clock is behind. A clock running ahead ends announcements early; keep the server's time synchronized.
 * A change from the admin web page that seems to fail after **Confirm**, for example because the connection dropped, may have been made: check the list before making it again.
 
+## 🧪 End-to-end checks
+
+`python scripts/admin.py e2e` runs real, unbilled test jobs on the server's workers, nodes, or RunPod (`--backend`) and checks what their MIDI holds. It exits with code 1 when a check fails. See [End-to-end checks on a running server](testing.md#-end-to-end-checks-on-a-running-server).
+
 ## 📜 Audit log
 
 ```shell

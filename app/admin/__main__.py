@@ -6,6 +6,7 @@ billing database:
     docker compose exec api python -m app.admin user user@example.com
     docker compose exec api python -m app.admin billing --per month
     docker compose exec api python -m app.admin limits
+    docker compose exec api python -m app.admin e2e --backend remote
 
 On the host, `python scripts/admin.py` runs them in the container for you.
 
@@ -22,7 +23,7 @@ import sys
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from app import announcements
+from app import announcements, e2e
 from app.admin import announce, audit, jobs, limits, nodes, report, status, users, web
 from app.admin.common import AdminError, default_actor
 
@@ -198,6 +199,17 @@ def parser() -> argparse.ArgumentParser:
     command = node_actions.add_parser("forget", parents=[changes], help=argparse.SUPPRESS)
     command.add_argument("node")
     command.set_defaults(run=nodes.run_forget)
+
+    command = commands.add_parser(
+        "e2e", parents=[reads], help="run real test jobs end to end and check their MIDI; unbilled (docs/testing.md)"
+    )
+    command.add_argument("--case", choices=sorted(e2e.CASES), help="one case only (default: all)")
+    command.add_argument("--mode", choices=e2e.MODES, help="one mode only (default: both, arrangement when it is on)")
+    command.add_argument("--backend", choices=("auto", "local", "remote"), default="auto",
+                         help="where the jobs run: as the server places them (default), its own workers, or RunPod")
+    command.add_argument("--timeout", type=float, default=900, help="seconds to wait for all jobs (default: 900)")
+    command.add_argument("--keep", action="store_true", help="keep the jobs and their files afterwards")
+    command.set_defaults(run=e2e.run)
 
     command = commands.add_parser("audit", parents=[reads], help="recent admin actions")
     command.add_argument("--limit", type=int, default=30, help="most actions to list (default: 30)")

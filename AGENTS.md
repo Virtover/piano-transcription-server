@@ -16,6 +16,7 @@ docker compose up -d --build                                     # the stack; OU
 python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start (also first start), status, cancel
 python scripts/server.py restore 2                               # billing database from a backup: latest, a name, or Nth newest; --from local, --fallback
 python scripts/admin.py status                                  # live picture; also jobs, user, users find, billing, limits, nodes, audit
+python scripts/admin.py e2e --backend remote                  # real unbilled test jobs end to end, checked by their MIDI; --backend local, auto
 python scripts/admin.py nodes invite laptop                     # home cluster hub: nodes hub <tailnet ip>, invite, revoke, on/off, allow/deny
 python scripts/server.py join laptop.json                       # on a device: become a node; then start, stop, restart, update, status
 python scripts/kube.py local up                                 # Kubernetes: a test cluster on this PC; up, update, status, down for a real one

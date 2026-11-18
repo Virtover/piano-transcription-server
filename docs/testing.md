@@ -126,6 +126,24 @@ On that machine and recording, GPU steady-state inference was approximately
 performance: the result changes with the CPU, GPU, PyTorch version, audio
 duration, and worker settings.
 
+## 🧪 End-to-end checks on a running server
+
+The tests above use fakes. To check a running server end to end, with its real workers, GPUs, nodes, and RunPod, run real jobs and check their MIDI:
+
+```shell
+python scripts/admin.py e2e                       # every case, placed as the server places jobs
+python scripts/admin.py e2e --backend local       # only this server's workers, and its nodes
+python scripts/admin.py e2e --backend remote      # only RunPod; needs outsourcing on
+python scripts/admin.py e2e --case clip --mode arrangement
+python scripts/kube.py admin e2e                  # the same on Kubernetes
+```
+
+Each case uploads a generated 40-second test file and queues it as an unbilled job: no user, nothing charged. The file has four 10-second sections of plucked notes, C4, E4, G4, then A4, so a part cut in the wrong place shows in the notes. The cases are the whole file, `clip` (10 to 20 seconds), and `clip-to-end` (from 20 seconds), each as a transcription and, when arrangements are on, as an arrangement. A case passes when the job completes, is charged for the part's length, and its MIDI has notes only within that length, of the part's sections, and none of the others. An arrangement only needs the part's pitches to lead. Each line says which backend and device ran the job. The command exits with code 1 when a check fails. The jobs and their files are removed afterwards (`--keep` keeps them), and the job list keeps them, titled "e2e check".
+
+* **One device of a home cluster:** stop the others taking work, for example `python scripts/admin.py nodes deny hub transcribe arrange`, run `e2e --backend local`, then `nodes allow hub transcribe arrange`.
+* **A crash or power cut:** run `e2e --backend local --case clip --mode transcription --timeout 1800` in one terminal. While it runs, make the device's worker exit without warning. On a node, `docker kill -s KILL piano-node-worker-1` and then `docker start piano-node-worker-1`. With Compose, `docker compose kill -s KILL worker` and then `docker compose up -d worker`. The check must still pass: the job runs again, the same part, charged once.
+* The first notes of a part, at 0 seconds, may be missing: the model can miss notes at the very start of any audio. The checks allow for it.
+
 ## 🤖 Continuous integration
 
 GitHub Actions runs the tests on every push to `main` and every pull request ([.github/workflows/tests.yml](../.github/workflows/tests.yml)), on Linux with Python 3.12 and ffmpeg, from a clean checkout: no `.env` or `server.env`, no secrets. The model tests, which need the worker requirements and PyTorch, are skipped there. Run them locally after installing `requirements.worker.txt`. If a push did not start a run, start one on the repository's Actions tab: **Tests**, then **Run workflow**.
@@ -139,6 +157,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | File | Covers |
 | --- | --- |
 | `test_arrangement.py`, `test_arrangement_api.py`, `test_arrangement_tasks.py` | Piano arrangements: the arrangement batcher and styles, the `mode` and `style` request fields and their refusals, and the arrangement job lifecycle and routing. The first needs the worker's packages. |
+| `test_e2e.py` | The end-to-end checks of `admin e2e`: reading MIDI, what passes and fails, and a run against fake workers. |
 | `test_clips.py` | Transcribing a part of a video or file: the checks of `start_seconds` and `end_seconds` and hostile values, the job's stored part, billing only its length, the cost, the cut ffmpeg makes, the RunPod dispatcher, a job run again after its worker stopped, and an administrator's requeue. |
 | `test_budget.py`, `test_amt_apc.py` | The shared per-device memory budget, and the vendored AMT-APC inference. Both need the worker's packages. |
 | `test_cluster.py` | A [home cluster](cluster.md): attempt tokens, so a device that lost its job writes nothing; jobs queued again after an interruption, and once only refunded; billing the hub settles from the job's state; jobs handed to another device; rate limits per public address; link checks by a node; the settings nodes take from the hub; switches and status; the supervisor; the shape of a node's Redis rules. |
