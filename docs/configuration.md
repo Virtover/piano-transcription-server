@@ -437,7 +437,7 @@ budget now = free VRAM + the worker's own memory - WORKER_GPU_RESERVE_GIB - 0.25
 a job starts when: memory of the jobs holding places + this job's memory <= budget now
 ```
 
-A job's memory is `WORKER_MEMORY_PER_JOB_GIB`, or `WORKER_ARRANGEMENT_MEMORY_GIB` for an arrangement. The worker's own memory is what PyTorch holds and its CUDA context: running jobs and the memory PyTorch keeps after a step are the worker's, so they never shut out its next job. A job counts from the moment it takes its place, while it still downloads, because it needs its memory soon after.
+A job's memory is `WORKER_MEMORY_PER_JOB_GIB`, or `WORKER_ARRANGEMENT_MEMORY_GIB` for an arrangement. The worker's own memory is what PyTorch holds, and its CUDA context and kernels, measured once its models are loaded (the worker log shows `GPU 0: the worker's memory beside PyTorch's is 0.28 GiB`): running jobs and the memory PyTorch keeps after a step are the worker's, so they never shut out its next job. A job counts from the moment it takes its place, while it still downloads, because it needs its memory soon after.
 
 `WORKER_GPU_RESERVE_GIB` is what is loaded once: all models, GPU kernels, and library handles. Its `auto` value is 1.25 GiB, or 1.0 GiB with `WORKER_ARRANGEMENT=false`, because AMT-APC's weights and kernels measured 0.17 to 0.23 GiB more. The 0.25 GiB is the beat tracker of the [tempo map](architecture.md#-tempo-map), which runs on the job's GPU, one job at a time; it peaked at 170 MiB allocated on an RTX 3060 Ti. With `WORKER_TEMPO_MAP=false` nothing is reserved for it. If another program takes that memory, beat tracking falls back to the CPU for that job.
 
