@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.clips import Clip
 from app.config import settings
 from app.outsource.capacity import record_jobs_per_worker
 from app.outsource.provider import RemoteFailed, RemoteProvider, get_provider
@@ -106,6 +107,7 @@ def transcribe_remotely(
     storage: AudioStorage | None = None,
     max_seconds: float | None = None,
     arrangement_style: str | None = None,
+    clip: Clip | None = None,
 ) -> Path:
     """Fetch and convert audio, transcribe it remotely, and write the MIDI.
     With arrangement_style, the endpoint arranges it for piano instead.
@@ -123,6 +125,8 @@ def transcribe_remotely(
         metadata_callback=context.metadata,
         cancellation_callback=context.is_cancelled,
         max_seconds=max_seconds,
+        # Cut here: the endpoint receives only the clip's audio.
+        clip=clip,
     )
     context.progress(0.07)
     flac = convert_to_flac(audio.path, output_dir, context.is_cancelled)

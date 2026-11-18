@@ -11,12 +11,12 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
 
-from app import job_limits, job_storage, maintenance, video_check, video_info
+from app import clips, job_limits, job_storage, maintenance, video_check, video_info
 from app.job_storage import StorageUnavailable, delete_job_files
 from app.maintenance import NoticeResponse
 from app.config import settings
 from app.billing import Billing, transcription_cost, InsufficientMinutes
-from app.api.routes.billing import check_video, ensure_accepting, ensure_allowed_length
+from app.api.routes.billing import check_video, checked_clip, ensure_accepting, ensure_allowed_length
 from app.auth import AuthenticatedUser, current_user
 from app.media import UnsupportedMedia, probe_audio
 from app.outsource import routing
@@ -71,6 +71,10 @@ class CreateTranscriptionRequest(BaseModel):
     # its piano; style from sparse (level1) to dense (level3).
     mode: Mode = "transcription"
     style: Style | None = None
+    # Only this part of the video, in seconds from its start; see app.clips.
+    # Either may be left out: from the start, or to the end.
+    start_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    end_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
 class CreateTranscriptionResponse(BaseModel):
@@ -122,6 +126,10 @@ class TranscriptionStatusResponse(BaseModel):
     mode: Mode = "transcription"
     # Set for an arrangement.
     style: str | None = None
+    # The part transcribed, when the request asked for one; end_seconds is
+    # None for "to the end".
+    start_seconds: float | None = None
+    end_seconds: float | None = None
     # A planned server restart or shutdown, if one is pending.
     maintenance: NoticeResponse | None = None
     # Only for a developer's account.
@@ -344,6 +352,14 @@ def mode_fields(mode: str, style: str | None) -> dict[str, str]:
     return {"mode": ARRANGEMENT, "style": style or DEFAULT_STYLE}
 
 
+def clip_job(duration: float, clip: clips.Clip | None, fields: dict[str, str]) -> tuple[float, dict[str, str]]:
+    """The duration a job is charged for and transcribes, and its fields,
+    with a clip: only the clip's length, and where it lies."""
+    if clip is None:
+        return duration, fields
+    return clip.length(duration), {**fields, **clip.fields(), "source_duration": str(duration)}
+
+
 def current_notice() -> NoticeResponse | None:
     notice = maintenance.current(redis)
     return notice.as_response() if notice else None
@@ -448,7 +464,9 @@ def create_transcription(
     if earlier is not None:
         return earlier
     try:
-        return submit_link(job_id, str(request.source_url), user, fields=modes)
+        return submit_link(
+            job_id, str(request.source_url), user, fields=modes, clip=(request.start_seconds, request.end_seconds)
+        )
     except BaseException:
         give_back_place(job_id, user_id)
         delete_job_files(job_id)
@@ -472,10 +490,13 @@ def submit_link(
     user: AuthenticatedUser | None,
     backend: routing.Backend | None = None,
     fields: dict[str, str] | None = None,
+    clip: tuple[float | None, float | None] = (None, None),
 ) -> CreateTranscriptionResponse:
     """Check a video link and queue it, for a job whose place is held, with
-    fields such as its mode."""
+    fields such as its mode, and only the clip's part of it if one is given."""
     video = check_video(source_url, user.user_id if user else None)
+    # Checked against the video's length before anything is saved.
+    duration, fields = clip_job(video.duration, checked_clip(*clip, video.duration), fields or {})
     # The worker downloads with this info instead of asking the site again;
     # not with a node's answer, which holds only the length and metadata.
     if not video.info.get(video_check.DELEGATED_MARK):
@@ -486,12 +507,12 @@ def submit_link(
             # Freed before the job is queued, so it cannot remove what a
             # worker on this machine fetched.
             job_storage.storage().release(folder)
-    fields = {**(fields or {}), "source_url": source_url}
+    fields = {**fields, "source_url": source_url}
     # Clients see the title while the job waits; the download updates it.
     metadata = video_info.video_metadata(video.info, source_url)
     if metadata["title"]:
         fields.update(title=metadata["title"], metadata=json.dumps(metadata))
-    return queue_job(job_id, user, video.duration, fields, (source_url,), backend=backend)
+    return queue_job(job_id, user, duration, fields, (source_url,), backend=backend)
 
 
 def title_from_filename(filename: str) -> str:
@@ -515,10 +536,17 @@ async def upload_transcription(
     ),
     mode: Mode = Query("transcription", description="arrangement: a piano cover instead of a transcription."),
     style: Style | None = Query(None, description="Arrangement style, from sparse (level1) to dense (level3)."),
+    start_seconds: float | None = Query(
+        None, ge=0, allow_inf_nan=False, description="Transcribe only from here, in seconds from the start."
+    ),
+    end_seconds: float | None = Query(
+        None, gt=0, allow_inf_nan=False, description="Transcribe only up to here, in seconds from the start."
+    ),
     user: AuthenticatedUser | None = Depends(current_user),
     idempotency_key: str | None = IDEMPOTENCY_KEY,
 ):
-    """Transcribe an audio or video file sent as the raw request body."""
+    """Transcribe an audio or video file sent as the raw request body, or
+    only a part of it."""
     ensure_submissions_enabled()
     user_id = user.user_id if user else "anonymous"
     job_id = submission_job_id(user_id, idempotency_key)
@@ -575,6 +603,11 @@ async def upload_transcription(
         except UnsupportedMedia as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         ensure_allowed_length(duration, uploader)
+        duration, fields = clip_job(
+            duration,
+            checked_clip(start_seconds, end_seconds, duration),
+            {**modes, "source": "upload", "title": title, "upload_title": title},
+        )
         await run_in_threadpool(keep_job_file, job_id, upload_path)
         # Before the job is queued, as for a link.
         job_storage.storage().release(job_dir)
@@ -584,7 +617,7 @@ async def upload_transcription(
             job_id,
             user,
             duration,
-            {**modes, "source": "upload", "title": title, "upload_title": title},
+            fields,
             (),
             {"upload_title": title},
         )
@@ -636,6 +669,7 @@ def get_transcription(
         backend=job.get("backend"),
         mode="arrangement" if job.get("mode") == ARRANGEMENT else "transcription",
         style=arrangement_style(job),
+        **clip_times(job),
         maintenance=current_notice(),
         developer=developer_details(job_id, job) if billing.is_developer(job.get("user_id")) else None,
     )
@@ -753,6 +787,11 @@ def get_midi(
         media_type="audio/midi",
         filename=result_filename(job),
     )
+
+
+def clip_times(job: dict[str, str]) -> dict[str, float | None]:
+    clip = clips.stored_clip(job)
+    return {} if clip is None else {"start_seconds": clip.start, "end_seconds": clip.end}
 
 
 def result_filename(job: dict[str, str]) -> str:

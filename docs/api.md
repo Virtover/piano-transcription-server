@@ -43,6 +43,23 @@ curl -X POST http://localhost:8000/api/transcriptions   -H 'Content-Type: applic
 * An arrangement costs the same minutes as a transcription of that length, and its minutes are given back when it fails.
 * `GET /api/server-info` has `arrangement`: `true` when arrangements are on, so an app can offer the option. `409` with `error_code` `arrangement_unavailable` means they are off on this server. `503` with the same code means no live worker of this server has room for them and outsourcing is off; try again later. With no live worker at all the job is queued, as a transcription is.
 
+### 🎬 Only a part of a video or file
+
+Add `start_seconds`, `end_seconds`, or both, to transcribe or arrange only that part:
+
+```shell
+curl -X POST http://localhost:8000/api/transcriptions   -H 'Content-Type: application/json'   -d '{"source_url":"https://example.com/video","start_seconds":30,"end_seconds":95.5}'
+```
+
+* Both are seconds from the start of the video or file. Leave out `start_seconds` to start at the beginning, or `end_seconds` to go to the end.
+* The part must lie within the audio and be at least 1 second long. The server checks it against the length it measured. An end up to 2 seconds past that length means "to the end", because a device reads a file's length a little differently. A part outside the audio is refused with `422` and `error_code` `invalid_clip`, and nothing is held or charged.
+* The job is charged for the part's length only, and only the part is transcribed. The MIDI starts at the part's start, at 0 seconds.
+* The video length limit (`MAX_VIDEO_LENGTH_MINUTES`) still applies to the whole video or file, which is downloaded or uploaded in full.
+* An upload takes the same two as query parameters: `POST /api/transcriptions/upload?filename=Song.mp3&start_seconds=30&end_seconds=95.5`.
+* The status response has `start_seconds` and `end_seconds` for a job of a part; `end_seconds` is `null` for "to the end". Both are `null` for a whole video.
+* `GET /api/billing/cost` takes the same two: its `cost_minutes` is then the part's cost, `clip_seconds` its length, and `duration_seconds` stays the whole video's or file's length.
+* `GET /api/server-info` has `trimming`: `true`. Older servers ignore both fields and transcribe the whole video, so send them only when `trimming` is `true`.
+
 ### 📁 Uploading a file
 
 Send an audio or video file as the raw request body, and its original name as `filename`:
@@ -300,6 +317,7 @@ A failed job has an `error_code` next to its `error`. Refusals of a link, and `4
 | `insufficient_minutes` | `402` | Not enough minutes; `required_minutes` says how many the job needs. | Offer to buy minutes. |
 | `video_too_long` | `413` | The video is longer than this user may send: `max_video_length_minutes`, the general limit or a longer one of their plan. | Say the limit; plans with longer videos say so in `server-info`. |
 | `subscription_owned` | `409`, from verifying a subscription | Another account of the app has this subscription. | Tell the user to sign in with the account that bought it. Do not retry. |
+| `invalid_clip` | `422` | `start_seconds` or `end_seconds` lie outside the video or file, or the part is shorter than 1 second; see [Only a part](#-only-a-part-of-a-video-or-file). | Let the user choose the part again, within the length. |
 | `arrangement_unavailable` | `409`, or `503` | Piano arrangements are off on this server (`409`), or no live worker has room for them and outsourcing is off (`503`). | Hide or disable the arrangement option; on `503`, retry later. |
 | `transcription_failed` | a failed job | Converting, transcribing, or arranging the audio failed. | Show the message. |
 | `transcription_interrupted` | a failed job | A restart or a stopped worker interrupted the job. | Submit it again. |
@@ -308,8 +326,8 @@ A failed job's minutes are always given back. A request the API cannot parse get
 
 ## 💳 Billing endpoints
 
-* `GET /api/server-info` returns billing provider, available offers, how long finished jobs and their MIDI files can be retrieved (`result_retention_seconds`), the cleanup interval, free-minute policy, maximum video length, the upload size limit (`max_upload_size_mb`), whether piano arrangements are on (`arrangement`), and a pending restart or shutdown (`maintenance`, see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns)).
-* `GET /api/billing/cost?source_url=...` reads video duration and returns the transcription cost before submission. For a file, use `?duration_seconds=...` instead. Pass exactly one of the two. When billing is enabled, it needs the `Authorization` header like other requests.
+* `GET /api/server-info` returns billing provider, available offers, how long finished jobs and their MIDI files can be retrieved (`result_retention_seconds`), the cleanup interval, free-minute policy, maximum video length, the upload size limit (`max_upload_size_mb`), whether piano arrangements are on (`arrangement`), whether a part of a video can be asked for (`trimming`), and a pending restart or shutdown (`maintenance`, see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns)).
+* `GET /api/billing/cost?source_url=...` reads video duration and returns the transcription cost before submission. For a file, use `?duration_seconds=...` instead. Pass exactly one of the two. With `start_seconds` or `end_seconds`, the cost is of only that part; see [Only a part](#-only-a-part-of-a-video-or-file). When billing is enabled, it needs the `Authorization` header like other requests.
 * `GET /api/billing/balance` returns the authenticated user's balance and free-minute timing. Each user has two balances: `monthly_minutes`, renewed to `FREE_MINUTES` every `free_minutes_period` (the unused ones expire) and spent first, and `paid_minutes`, bought or given by hand, which never expire. `minutes` is what is available in all, their sum; both leave out what running jobs hold. `free_minutes_next_grant_at` is when the monthly minutes are next renewed. `minutes` and `paid_minutes` are negative when a refunded purchase's minutes were already used; see [Refunds and chargebacks](google-play-billing.md#-refunds-and-chargebacks). Show the user that they owe minutes, and offer to buy more. `developer` is `true` for an account an administrator made a developer's: its jobs are never charged, so show its minutes as unlimited and offer no purchases.
 * `GET /api/developer/server`, only for a developer's account (`403` otherwise), returns the server's live state: jobs waiting or running against the limit (`active_jobs`, `max_active_jobs`), each backend's waiting and running jobs and oldest wait (`backends`), the local workers (`workers`), whether outsourcing and arrangements are on, whether submissions are paused or video links are off, and a pending restart or shutdown. For a developer's job, `GET /api/transcriptions/{job_id}` also returns `developer`: its length, what it would have cost, whether it was outsourced and why, and when it was queued, started, and finished.
 * `POST /api/billing/google-play/verify` verifies and credits a completed Google Play purchase.

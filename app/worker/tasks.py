@@ -13,7 +13,7 @@ from dramatiq.brokers.redis import RedisBroker
 from redis import Redis
 from redis.exceptions import WatchError
 
-from app import cluster, error_report, job_limits
+from app import clips, cluster, error_report, job_limits
 from app.job_storage import WORK_FOLDER, bucket, delete_job_files, job_dir, stored_result, storage, uses_bucket
 from app.job_storage import workspace_job_id
 from app.config import settings
@@ -676,6 +676,7 @@ class JobContext:
         arrangement_style: str | None = None,
         token: str | None = None,
         model_done: Callable[[], None] | None = None,
+        clip: clips.Clip | None = None,
     ):
         self.job_id = job_id
         self.output_dir = output_dir
@@ -684,6 +685,8 @@ class JobContext:
         self.max_seconds = max_seconds
         # Set for an arrangement job, which runs AMT-APC instead of Transkun.
         self.arrangement_style = arrangement_style
+        # The part of the audio the job transcribes; max_seconds is its length.
+        self.clip = clip
         # This attempt's token: it stops once another attempt owns the job.
         self.token = token
         # Called once the job's model step has ended: it gives back the
@@ -896,7 +899,7 @@ def run_job(
         except ValueError:
             max_seconds = None
         context = JobContext(job_id, output_dir, floor, max_seconds, arrangement_style(stored), lease.token,
-                             place.release if place is not None else None)
+                             place.release if place is not None else None, clips.stored_clip(stored))
 
         midi_path = transcribe(context)
 
@@ -1219,6 +1222,7 @@ def run_local_job(job_id: str, source_url: str | None, upload_title: str | None)
             metadata_callback=context.metadata,
             cancellation_callback=context.is_cancelled,
             max_seconds=context.max_seconds,
+            clip=context.clip,
             arrangement_style=context.arrangement_style,
             model_done_callback=context.model_done,
         )
@@ -1273,6 +1277,7 @@ def transcribe_remote_job(
                 upload_path=None if source_url else context.output_dir / UPLOAD_FILE_NAME,
                 upload_title=upload_title,
                 max_seconds=context.max_seconds,
+                clip=context.clip,
                 arrangement_style=context.arrangement_style,
             )
         finally:

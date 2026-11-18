@@ -1,4 +1,5 @@
 import hmac
+import math
 import logging
 import threading
 import time
@@ -6,6 +7,8 @@ import time
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, PlainTextResponse
 from redis import Redis
@@ -247,6 +250,24 @@ app.include_router(account_router, prefix="/api")
 app.include_router(announcements_router, prefix="/api")
 app.include_router(developer_router, prefix="/api")
 app.add_api_route("/api/server-info", server_info, methods=["GET"], include_in_schema=False)
+
+
+def finite_json(value):
+    """value with NaN and infinities as text: JSON has no such numbers."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: finite_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [finite_json(item) for item in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, error: RequestValidationError):
+    """FastAPI's own 422, whose detail repeats the input: a body with NaN
+    in it could not be answered, and became a 500."""
+    return JSONResponse(status_code=422, content={"detail": finite_json(jsonable_encoder(error.errors()))})
 
 
 @app.middleware("http")

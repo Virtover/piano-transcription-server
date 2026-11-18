@@ -139,6 +139,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | File | Covers |
 | --- | --- |
 | `test_arrangement.py`, `test_arrangement_api.py`, `test_arrangement_tasks.py` | Piano arrangements: the arrangement batcher and styles, the `mode` and `style` request fields and their refusals, and the arrangement job lifecycle and routing. The first needs the worker's packages. |
+| `test_clips.py` | Transcribing a part of a video or file: the checks of `start_seconds` and `end_seconds` and hostile values, the job's stored part, billing only its length, the cost, the cut ffmpeg makes, the RunPod dispatcher, a job run again after its worker stopped, and an administrator's requeue. |
 | `test_budget.py`, `test_amt_apc.py` | The shared per-device memory budget, and the vendored AMT-APC inference. Both need the worker's packages. |
 | `test_cluster.py` | A [home cluster](cluster.md): attempt tokens, so a device that lost its job writes nothing; jobs queued again after an interruption, and once only refunded; billing the hub settles from the job's state; jobs handed to another device; rate limits per public address; link checks by a node; the settings nodes take from the hub; switches and status; the supervisor; the shape of a node's Redis rules. |
 | `test_load_placement.py` | Placing jobs by load: a busy GPU, or one without VRAM, leaves a job to a less busy device with room; GPU and CPU sampling. |

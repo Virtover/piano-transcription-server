@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
 
 # Raised when what the hub and the nodes exchange changes, so a node of
 # another version waits for an update instead of running jobs wrongly.
-PROTOCOL = 1
+# 2: jobs may carry a clip (app.clips), which older workers would ignore.
+PROTOCOL = 2
 
 HUB = "hub"
 HUB_KEY = "cluster:hub"

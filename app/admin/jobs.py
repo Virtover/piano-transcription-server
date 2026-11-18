@@ -7,7 +7,7 @@ import time
 
 from fastapi import HTTPException
 
-from app import job_limits, job_storage
+from app import clips, job_limits, job_storage
 from app.admin.common import (
     AdminError,
     ask_reason,
@@ -212,7 +212,11 @@ def requeue(job: str, backend: routing.Backend | None, actor: str, reason: str |
     try:
         job_limits.acquire(tasks.redis, job_id, user_id, tasks.job_key)
         tasks.billing.reopen_job_record(job_id, f"requeued by {actor}" + (f": {reason}" if reason else ""))
-        response = transcription_routes.submit_link(job_id, fields["source_url"], user, backend)
+        # The same part of the video, charged again for only its length.
+        clip = clips.stored_clip(fields)
+        response = transcription_routes.submit_link(
+            job_id, fields["source_url"], user, backend, clip=(clip.start, clip.end) if clip else (None, None)
+        )
     except (HTTPException, job_limits.TooManyJobs, ValueError) as error:
         restore(job_id, fields, user_id)
         raise AdminError(f"Could not queue the job: {refusal_text(error)}") from error

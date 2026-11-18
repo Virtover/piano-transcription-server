@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app import video_sites
+from app.clips import Clip
 from app.errors import SourceError, UserFacingError
 from app.transcription.cancellation import TranscriptionCancelled
 from app.transcription.device import cpu_thread_count
@@ -71,6 +72,7 @@ def download_audio(
     output_dir: Path,
     cancellation_callback: CancellationCallback | None = None,
     max_seconds: float | None = None,
+    clip: Clip | None = None,
 ) -> DownloadedAudio:
     """Download with the info the API saved when it checked the video, so
     the site is asked once per job. Without recent info, or if its links no
@@ -138,6 +140,7 @@ def download_audio(
         output_dir,
         cancellation_callback,
         max_seconds,
+        clip=clip,
     )
 
     downloaded_path.unlink()
@@ -210,11 +213,14 @@ def convert_to_wav(
     cancellation_callback: CancellationCallback | None = None,
     max_seconds: float | None = None,
     upload: bool = False,
+    clip: Clip | None = None,
 ) -> Path:
     """Convert to 44.1 kHz mono WAV, stopping DURATION_TOLERANCE past
-    max_seconds, the duration the job was charged for. An upload may only
-    be read by the demuxers of the formats uploads may have; a download
-    can be in any format a site serves."""
+    max_seconds, the duration the job was charged for. With a clip, only
+    its part: from its start, max_seconds long, and exactly that long when
+    it has an end, which the API checked against the audio's length. An
+    upload may only be read by the demuxers of the formats uploads may
+    have; a download can be in any format a site serves."""
     wav_path = output_dir / "audio.wav"
 
     ffmpeg_threads = ffmpeg_thread_count()
@@ -224,6 +230,8 @@ def convert_to_wav(
         "-nostdin",
         # Uploaded files are untrusted: never let ffmpeg open URLs.
         *(UPLOAD_INPUT_OPTIONS if upload else ["-protocol_whitelist", "file"]),
+        # Before -i: ffmpeg seeks in the input, and the output starts at 0.
+        *(["-ss", f"{clip.start:.3f}"] if clip is not None and clip.start > 0 else []),
         "-i",
         str(input_path),
         "-vn",
@@ -235,7 +243,8 @@ def convert_to_wav(
     if ffmpeg_threads is not None:
         ffmpeg_command.extend(["-threads", str(ffmpeg_threads)])
     if max_seconds is not None:
-        ffmpeg_command.extend(["-t", f"{max_seconds + DURATION_TOLERANCE:.3f}"])
+        tolerance = 0.0 if clip is not None and clip.end is not None else DURATION_TOLERANCE
+        ffmpeg_command.extend(["-t", f"{max_seconds + tolerance:.3f}"])
     ffmpeg_command.append(str(wav_path))
 
     run_process(
@@ -251,10 +260,13 @@ def prepare_upload(
     output_dir: Path,
     cancellation_callback: CancellationCallback | None = None,
     max_seconds: float | None = None,
+    clip: Clip | None = None,
 ) -> DownloadedAudio:
     # The format is checked again here because the worker runs ffmpeg on the
     # file. The API already measured its length; conversion stops there.
     duration = probe_audio(upload_path, measure=False)
+    if clip is not None:
+        duration = clip.length(duration)
     if max_seconds is not None:
         duration = min(duration, max_seconds)
     wav_path = convert_to_wav(
@@ -263,6 +275,7 @@ def prepare_upload(
         cancellation_callback,
         max_seconds,
         upload=True,
+        clip=clip,
     )
     # The upload is kept until the job ends, so a job moved between local
     # and remote can be converted again.
@@ -376,9 +389,11 @@ def fetch_audio(
     metadata_callback: MetadataCallback | None = None,
     cancellation_callback: CancellationCallback | None = None,
     max_seconds: float | None = None,
+    clip: Clip | None = None,
 ) -> DownloadedAudio:
     """Download source_url, or convert upload_path, to 44.1 kHz mono WAV,
     at most about max_seconds long: the duration the job was charged for.
+    With clip, only that part of it.
 
     Progress range: 0.03 - 0.05 before the download starts.
     """
@@ -402,6 +417,7 @@ def fetch_audio(
             output_dir,
             cancellation_callback=cancellation_callback,
             max_seconds=max_seconds,
+            clip=clip,
         )
     else:
         downloaded = download_audio(
@@ -409,6 +425,7 @@ def fetch_audio(
             output_dir,
             cancellation_callback=cancellation_callback,
             max_seconds=max_seconds,
+            clip=clip,
         )
 
     if metadata_callback:

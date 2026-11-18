@@ -11,7 +11,7 @@ from redis import Redis
 
 from app.billing import Billing, SubscriptionOwned, transcription_cost
 from app.config import settings
-from app import controls, google_play, maintenance, video_check, video_sites
+from app import clips, controls, google_play, maintenance, video_check, video_sites
 from app.errors import SourceBusy, SourceError, SourceTimedOut, SourceUnsupported, SourceVideoUnavailable
 from app.maintenance import NoticeResponse
 from app.slots import VIDEO_CHECKS_KEY, LeasedSlot
@@ -41,8 +41,12 @@ CHECKING_TTL = 90
 
 
 class CostResponse(BaseModel):
+    # The whole video's or file's length, also when a part is asked for.
     duration_seconds: float
     cost_minutes: int
+    # The part's length, when start_seconds or end_seconds asked for one;
+    # cost_minutes is then its cost.
+    clip_seconds: float | None = None
 
 
 class GooglePurchaseRequest(BaseModel):
@@ -106,6 +110,9 @@ class ServerInfoResponse(BaseModel):
     max_upload_size_mb: float | None
     # Whether piano arrangements are on (WORKER_ARRANGEMENT), so an app can offer them.
     arrangement: bool = False
+    # Whether a submission may ask for only a part of its video or file
+    # (start_seconds, end_seconds); older servers would transcribe it all.
+    trimming: bool = False
     # Subscription plans, lowest level first; only when billing is enabled.
     subscriptions: list[SubscriptionOffer] | None = None
     # Given once to each new account; only when billing is enabled.
@@ -336,6 +343,7 @@ def server_info() -> ServerInfoResponse:
         max_video_length_minutes=settings.limits.max_video_length_minutes,
         max_upload_size_mb=settings.limits.max_upload_size_mb,
         arrangement=settings.worker.arrangement,
+        trimming=True,
     )
     # Always present, null when nothing is planned.
     notice = maintenance.current(redis)
@@ -396,14 +404,17 @@ def balance_of(user_id: str) -> BalanceResponse:
     )
 
 
-@router.get("/cost", response_model=CostResponse)
+@router.get("/cost", response_model=CostResponse, response_model_exclude_none=True)
 def cost(
     source_url: HttpUrl | None = None,
     duration_seconds: float | None = Query(default=None, gt=0),
+    start_seconds: float | None = Query(default=None, ge=0, allow_inf_nan=False),
+    end_seconds: float | None = Query(default=None, gt=0, allow_inf_nan=False),
     # Only to require sign-in when billing is on: checking a URL runs yt-dlp.
     user: AuthenticatedUser | None = Depends(current_user),
 ) -> CostResponse:
-    """Cost of a video URL, or of a file of the given duration before it is uploaded."""
+    """Cost of a video URL, or of a file of the given duration before it is
+    uploaded; with start_seconds or end_seconds, of only that part of it."""
     if (source_url is None) == (duration_seconds is None):
         raise HTTPException(status_code=422, detail="Provide either source_url or duration_seconds")
     ensure_accepting(
@@ -417,7 +428,22 @@ def cost(
         duration = video_duration(source_url, user_id)
     else:
         duration = ensure_allowed_length(duration_seconds, user_id)
-    return CostResponse(duration_seconds=duration, cost_minutes=transcription_cost(duration))
+    clip = checked_clip(start_seconds, end_seconds, duration)
+    if clip is None:
+        return CostResponse(duration_seconds=duration, cost_minutes=transcription_cost(duration))
+    length = clip.length(duration)
+    return CostResponse(duration_seconds=duration, cost_minutes=transcription_cost(length), clip_seconds=length)
+
+
+def checked_clip(start: float | None, end: float | None, duration: float) -> clips.Clip | None:
+    """The part of audio of duration seconds a request asks for; 422 with
+    error_code invalid_clip for one outside it."""
+    try:
+        return clips.check_clip(start, end, duration)
+    except clips.InvalidClip as error:
+        raise HTTPException(
+            status_code=422, detail={"message": str(error), "error_code": clips.INVALID_CLIP}
+        ) from error
 
 
 def purchase_summary(response: dict) -> str:
