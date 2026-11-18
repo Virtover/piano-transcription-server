@@ -426,7 +426,7 @@ The worker sizes everything by each GPU's total VRAM, as if no other program use
 When the worker starts, it calculates the most jobs each GPU holds:
 
 ```text
-budget = total VRAM - 0.25 GiB (CUDA context) - WORKER_GPU_RESERVE_GIB - 0.25 GiB (tempo map)
+budget = total VRAM - 0.2 GiB (CUDA context) - WORKER_GPU_RESERVE_GIB - 0.25 GiB (tempo map)
 transcription jobs per GPU = floor(budget / WORKER_MEMORY_PER_JOB_GIB)
 ```
 
@@ -458,7 +458,7 @@ Measured on an RTX 3060 Ti (8 GB) with the worker image, Transkun 2.0, AMT-APC, 
 | What | VRAM |
 | --- | --- |
 | Transkun 2.0 model: 13.6 M parameters, fp32 | 0.06 GiB |
-| CUDA context (the 0.25 GiB taken from total VRAM, with what the driver keeps) | ~0.13 GiB |
+| CUDA context (0.2 GiB is taken from total VRAM for it; what the driver keeps is not in the total) | ~0.13 GiB |
 | Transkun, GPU kernels, and library handles after the context | ~0.14 GiB |
 | AMT-APC weights and kernels, in addition | ~0.17 to 0.23 GiB |
 | One transcription job, allocated | ~0.75 GiB |

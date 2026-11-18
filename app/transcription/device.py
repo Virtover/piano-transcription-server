@@ -19,11 +19,12 @@ logger = logging.getLogger(__name__)
 # it instead of measuring again beside its own CUDA context.
 MEASURED_VARIABLE = "MODEL_GPU_MEMORY"
 
-# VRAM of a GPU that no process can use for its own memory: the worker's CUDA
-# context (~0.13 GiB measured) and what the driver keeps. A GPU's job
-# capacity is counted from its total VRAM less this, as if no other program
-# used it; the room for jobs at any moment is read live (GpuRoom).
-GPU_CONTEXT_GIB = 0.25
+# VRAM of a GPU that the worker's jobs never get: its CUDA context (~0.13 GiB
+# measured), with some headroom. What the driver keeps (~0.38 GiB of a 12 GB
+# card) is already missing from the total CUDA reports. A GPU's job capacity
+# is counted from its total VRAM less this, as if no other program used it;
+# the room for jobs at any moment is read live (GpuRoom).
+GPU_CONTEXT_GIB = 0.2
 # The worker's own CUDA context (measured ~0.13 GiB), and that with the GPU
 # kernels it loads (~0.14 GiB more with lazy loading): memory of the worker
 # outside PyTorch's, which a live reading of free VRAM counts as used. GpuRoom

@@ -63,7 +63,7 @@ def test_lower_nvidia_smi_free_memory_is_used(gpus):
     [(index, capacity, free, total)] = device.cuda_job_capacities()
 
     assert free == 5812 * MiB
-    # The capacity is the total's: floor((8 - 0.25 context - 1.0 - 0.25 tempo map) / 1.1) = 5.
+    # The capacity is the total's: floor((8 - 0.2 context - 1.0 - 0.25 tempo map) / 1.1) = 5.
     assert (index, capacity, total) == (0, 5, 8 * GiB)
 
 

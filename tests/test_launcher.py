@@ -174,9 +174,9 @@ def test_a_gpu_with_room_takes_the_arrangement_queue(default_settings, cores):
     assert "arrangements" in plan.summary
 
 
-# A GPU of 2.5 GiB: its context and 1.5 GiB of reserves leave 0.75, under the
+# A GPU of 2.4 GiB: its context and 1.5 GiB of reserves leave 0.7, under the
 # 0.8 one arrangement needs, however little other programs use.
-SMALL_GPU = [(0, 1, 2 * GiB, int(2.5 * GiB))]
+SMALL_GPU = [(0, 1, 2 * GiB, int(2.4 * GiB))]
 
 
 def test_a_gpu_without_room_for_one_arrangement_warns_and_skips_the_queue(default_settings, cores):
