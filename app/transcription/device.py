@@ -342,10 +342,11 @@ class GpuRoom:
 
     def measure_own_memory(self) -> None:
         """Measure the worker's memory outside PyTorch's, once its models are
-        loaded: the free memory before the worker used CUDA, less the free
-        memory now and PyTorch's. Kept between the context alone and the
-        context with the whole model reserve, so another program that took
-        or freed memory meanwhile changes little."""
+        loaded: the launcher's free memory, less the free memory now and
+        PyTorch's, and the CUDA context, which the launcher's process had as
+        it measured. Kept between the context alone and the context with the
+        whole model reserve, so another program that took or freed memory
+        meanwhile changes little."""
         import torch
 
         worker = (self.config or settings).worker
@@ -357,7 +358,7 @@ class GpuRoom:
                 if index not in self.free_at_start:
                     continue
                 reserved, free_memory, _ = self._reading(torch, index, smi_free_memory)
-                measured = self.free_at_start[index] - free_memory - reserved
+                measured = self.free_at_start[index] - free_memory - reserved + lowest
                 self.own_memory[index] = min(highest, max(lowest, measured))
                 logger.info("GPU %s: the worker's memory beside PyTorch's is %.2f GiB (measured %.2f GiB)",
                             index, self.own_memory[index] / 1024**3, measured / 1024**3)

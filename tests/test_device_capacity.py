@@ -304,17 +304,19 @@ def test_without_any_reading_the_room_is_what_the_gpu_holds(gpus, monkeypatch):
 
 
 def test_the_workers_memory_beside_pytorchs_is_measured_once_its_models_are_loaded(gpus):
-    # 7 GiB free before the worker; its models (0.25 GiB in PyTorch) and
-    # 0.4 GiB of context and kernels leave 6.35.
-    gpus["devices"] = [("aaaa-1", int(6.35 * GiB), 8 * GiB)]
+    # The launcher's process, with its own context, read 7 GiB free; the
+    # worker's models (0.25 GiB in PyTorch) and 0.27 GiB of kernels leave 6.48.
+    gpus["devices"] = [("aaaa-1", int(6.48 * GiB), 8 * GiB)]
     gpus["reserved"] = {0: int(0.25 * GiB)}
     room = device.GpuRoom({0: 8 * GiB}, clock=Clock(), free_at_start={0: 7 * GiB})
     before = room.budget_gib()
 
     room.measure_own_memory()
 
-    assert room.own_memory[0] == pytest.approx(0.4 * GiB, abs=1024)
-    assert room.budget_gib() == pytest.approx(room_budget(6.35, 0.25, 0.4))
+    # The kernels and the context.
+    own = 0.27 + device.OWN_CONTEXT_GIB
+    assert room.own_memory[0] == pytest.approx(own * GiB, abs=1024)
+    assert room.budget_gib() == pytest.approx(room_budget(6.48, 0.25, own))
     assert room.budget_gib() > before
 
 
