@@ -421,22 +421,33 @@ An existing `.env` keeps working without changes; you only see deprecation warni
 
 ### How capacity is calculated
 
-When the worker starts, it reads the free VRAM of each GPU and calculates:
+The worker sizes everything by each GPU's total VRAM, as if no other program used it, and then takes a job only while the VRAM other programs leave holds it. So it uses all of a GPU that nothing else uses, and shares one with a desktop, a browser, or a game without a restart: as they free VRAM it takes more jobs, and as they use more it takes fewer.
+
+When the worker starts, it calculates the most jobs each GPU holds:
 
 ```text
-budget = free VRAM - WORKER_GPU_RESERVE_GIB - 0.25 GiB
+budget = total VRAM - 0.25 GiB (CUDA context) - WORKER_GPU_RESERVE_GIB - 0.25 GiB (tempo map)
 transcription jobs per GPU = floor(budget / WORKER_MEMORY_PER_JOB_GIB)
 ```
 
+Before each job, it reads the budget again, from the VRAM free now (a reading at most a second old) plus what the worker itself uses, and the job takes its place only if its memory fits beside the jobs that hold places:
+
+```text
+budget now = free VRAM + the worker's own memory - WORKER_GPU_RESERVE_GIB - 0.25 GiB (tempo map)
+a job starts when: memory of the jobs holding places + this job's memory <= budget now
+```
+
+A job's memory is `WORKER_MEMORY_PER_JOB_GIB`, or `WORKER_ARRANGEMENT_MEMORY_GIB` for an arrangement. The worker's own memory is what PyTorch holds and its CUDA context: running jobs and the memory PyTorch keeps after a step are the worker's, so they never shut out its next job. A job counts from the moment it takes its place, while it still downloads, because it needs its memory soon after.
+
 `WORKER_GPU_RESERVE_GIB` is what is loaded once: all models, GPU kernels, and library handles. Its `auto` value is 1.25 GiB, or 1.0 GiB with `WORKER_ARRANGEMENT=false`, because AMT-APC's weights and kernels measured 0.17 to 0.23 GiB more. The 0.25 GiB is the beat tracker of the [tempo map](architecture.md#-tempo-map), which runs on the job's GPU, one job at a time; it peaked at 170 MiB allocated on an RTX 3060 Ti. With `WORKER_TEMPO_MAP=false` nothing is reserved for it. If another program takes that memory, beat tracking falls back to the CPU for that job.
 
-The number of transcription jobs, optionally capped by `WORKER_MAX_CONCURRENCY`, becomes the number of places on the models: jobs that may be before or in their model step at the same time. A job takes a place before it starts and gives it back as soon as its model step ends; its tempo map, MIDI file, and upload then run beside the next job's model step. So the worker starts twice as many threads as places, and never has more jobs on the GPU than fit in VRAM. The free VRAM is measured once, at start, in a short-lived process: a process that used CUDA keeps about 100 MiB of VRAM until it exits. The worker sizes its batches and memory budget by that same measurement. A job that finds no free place stays queued: in a [home cluster](cluster.md) it goes to a device with a free place as soon as there is one, and otherwise starts here once a place is free. With `WORKER_ARRANGEMENT` on, the worker also takes [piano arrangements](architecture.md#-piano-arrangements) when the budget is at least `WORKER_ARRANGEMENT_MEMORY_GIB`; they run in the same threads. If no GPU has room for one job, the worker runs on the CPU. The worker log prints the result, for example `up to 4 job(s) by VRAM (GPU 0: 4 job(s), arrangements, 5.68 GiB free)`; `arrangements,` appears when that GPU takes them.
+The most transcription jobs, optionally capped by `WORKER_MAX_CONCURRENCY`, becomes the number of places on the models: jobs that may be before or in their model step at the same time. A job takes a place before it starts and gives it back as soon as its model step ends; its tempo map, MIDI file, and upload then run beside the next job's model step. So the worker starts twice as many threads as places. A job that finds no free place, or no room for its memory, stays queued: in a [home cluster](cluster.md) it goes to a device with a free place and room as soon as there is one, and otherwise starts here once there is. The worker's heartbeat reports the places that fit now, every 5 seconds and whenever they change, so the API outsources (with `local_first`) and other devices pass jobs on when another program uses this GPU. With `WORKER_ARRANGEMENT` on, the worker also takes [piano arrangements](architecture.md#-piano-arrangements) when the GPU's budget, as above, is at least `WORKER_ARRANGEMENT_MEMORY_GIB`; they run in the same threads. Only if a GPU is too small for one job does the worker run on the CPU. The worker log prints the result, for example `up to 5 job(s) by total VRAM, as other programs leave room (GPU 0: up to 5 job(s), batch 5, arrangements, 8.00 GiB, 5.68 GiB free now)`; `arrangements,` appears when that GPU takes them.
 
 At run time, every model step on a device runs in one shared memory budget, so transcriptions and arrangements share a GPU without running out of memory. A Transkun step takes its jobs times `WORKER_MEMORY_PER_JOB_GIB`; an arrangement step takes `WORKER_ARRANGEMENT_MEMORY_GIB`. A step waits for memory instead of running out of it, steps are served in the order they arrived so none starves, and a step larger than the whole budget runs alone. AMT-APC runs one window at a time, taking each job's next window in turn, so all arrangements progress together.
 
 Free VRAM is the lower of two readings: CUDA's (`cudaMemGetInfo`) and `nvidia-smi`'s. They normally agree. Under Windows with Docker Desktop or WSL, CUDA does not count memory used by Windows programs, such as the desktop, browsers, or games, and reported 1.3 GiB too much free memory on an 8 GB card. `nvidia-smi` sees that usage. If `nvidia-smi` is unavailable, CUDA's reading is used.
 
-Free VRAM is read once at startup, so memory used by other programs at that moment is taken into account. Programs that start using the GPU later are not. On a machine with a desktop, leave headroom with `WORKER_GPU_RESERVE_GIB` or `WORKER_MAX_CONCURRENCY`.
+Free VRAM is read again before every job, so programs that use the GPU after the worker started are taken into account. A program that takes VRAM while a batch runs can still make that batch run out of memory; see below. To keep VRAM for such programs at all times, lower `WORKER_MAX_CONCURRENCY` or raise `WORKER_GPU_RESERVE_GIB`.
 
 The CUDA context, about 0.13 GiB, is created before free memory is read, so it is already excluded. `WORKER_GPU_RESERVE_GIB` covers only what the worker loads after that.
 
@@ -447,7 +458,7 @@ Measured on an RTX 3060 Ti (8 GB) with the worker image, Transkun 2.0, AMT-APC, 
 | What | VRAM |
 | --- | --- |
 | Transkun 2.0 model: 13.6 M parameters, fp32 | 0.06 GiB |
-| CUDA context (already excluded from free VRAM) | ~0.13 GiB |
+| CUDA context (the 0.25 GiB taken from total VRAM, with what the driver keeps) | ~0.13 GiB |
 | Transkun, GPU kernels, and library handles after the context | ~0.14 GiB |
 | AMT-APC weights and kernels, in addition | ~0.17 to 0.23 GiB |
 | One transcription job, allocated | ~0.75 GiB |
@@ -478,7 +489,7 @@ The worker also uses system RAM for audio: about 20 MiB per minute of video for 
 
 Example capacities with the default values (arrangements on), and with `WORKER_ARRANGEMENT=false`:
 
-| GPU memory free at startup | Transcription jobs at the same time, by default | With `WORKER_ARRANGEMENT=false` |
+| GPU memory that other programs leave | Transcription jobs at the same time, by default | With `WORKER_ARRANGEMENT=false` |
 | --- | --- | --- |
 | 4 GiB | 2, and arrangements | 2 |
 | 6 GiB | 4, and arrangements | 4 |
@@ -509,17 +520,17 @@ Without a usable GPU, or with `WORKER_ENFORCE_CPU=true`, the batch size is the n
 
 **`WORKER_BATCH_SIZE`** (default `auto`)
 
-* `auto` on GPU: each GPU's batch size is its job capacity from the startup calculation, capped by `WORKER_MAX_CONCURRENCY` if set, and at least 1. A GPU that fits 4 jobs batches up to 4; a GPU that fits 20 batches up to 20.
+* `auto` on GPU: each GPU's batch size is the most jobs it holds, from its total VRAM, capped by `WORKER_MAX_CONCURRENCY` if set, and at least 1. A GPU that holds 4 jobs batches up to 4; a GPU that holds 20 batches up to 20. While other programs use the GPU, fewer jobs hold places, so batches are smaller.
 * A number on GPU is used as given, but never above that GPU's capacity. When it is lowered, the worker logs a warning at startup, for example `GPU 0: WORKER_BATCH_SIZE=6 is more than this GPU's capacity of 4 job(s); using 4`.
 * On CPU, `auto` is the lower of the resolved CPU thread count and the RAM capacity estimate, and the batch size is also the number of worker threads. The estimate uses `WORKER_CPU_RESERVE_GIB` as the model reserve and `WORKER_CPU_MEMORY_PER_JOB_GIB` (with arrangements on, at least `WORKER_CPU_ARRANGEMENT_MEMORY_GIB`) for each additional request, using currently available system memory. It is recalculated when the worker starts. A large value means many simultaneous downloads and much more RAM.
 * `WORKER_CPU_RESERVE_GIB`, `WORKER_CPU_MEMORY_PER_JOB_GIB`, and `WORKER_CPU_ARRANGEMENT_MEMORY_GIB` control only that CPU RAM estimate. They are separate from `WORKER_GPU_RESERVE_GIB` and `WORKER_MEMORY_PER_JOB_GIB`, which describe GPU VRAM. For example, with 14 GiB available RAM, a 2 GiB model reserve, and 2 GiB per job, the RAM estimate is 6 jobs; the CPU thread limit may lower it further.
-* The worker log shows the result at startup, for example `GPU 0: 4 job(s), batch 4, 5.84 GiB free`. `python -m app.config check` shows `auto` because the capacity is only known on the worker.
+* The worker log shows the result at startup, for example `GPU 0: up to 5 job(s), batch 5, 8.00 GiB, 5.84 GiB free now`. `python -m app.config check` shows `auto` because the capacity is only known on the worker.
 * Values below the capacity leave capacity unused: jobs that arrive while a batch runs wait until the whole batch finishes.
 * Larger batches give more total throughput, with diminishing returns. In the table above, going from 4 to 6 jobs saves only about 5% time per job. Each job also progresses more slowly, because every step processes one segment for every job in the batch.
 * A batch starts early only when it is full, so with a large value each batch waits the full `WORKER_BATCH_TIMEOUT`.
 * `WORKER_BATCH_SIZE=6` gives the behavior of earlier versions.
 
-**Running out of GPU memory.** Free VRAM is measured once at startup, so another program can take memory later, which is common under WSL. When a batch runs out of GPU memory, the worker frees memory, splits the unfinished jobs in half, and retries each half from the start. Progress shown to users does not go backwards during a retry. The GPU's batch size is then lowered to the size that was retried, and the worker logs `cuda:0 ran out of memory; batch size lowered from 4 to 2`. A single job that still does not fit fails with `The GPU ran out of memory for this transcription`. Restart the worker to measure the capacity again.
+**Running out of GPU memory.** Another program can take VRAM while a batch runs, which is common on a desktop or under WSL. When a batch runs out of GPU memory, the worker frees memory, splits the unfinished jobs in half, and retries each half from the start. Progress shown to users does not go backwards during a retry. The GPU's batch size is then lowered to the size that was retried for 10 minutes, and the worker logs `cuda:0 ran out of memory; batch size lowered from 4 to 2 for 10 minutes`. A single job that still does not fit fails with `The GPU ran out of memory for this transcription`, or goes to RunPod once if outsourcing is on. No restart is needed.
 
 **`WORKER_BATCH_TIMEOUT`** (default `2s`)
 

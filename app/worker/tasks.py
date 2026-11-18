@@ -738,30 +738,39 @@ worker_stopping = threading.Event()
 load_monitor = None
 
 
-def job_memory_mib(job: dict[str, str]) -> float:
+def job_memory_gib(job: dict[str, str]) -> float:
     """VRAM one more job of this kind needs, as the worker plans it."""
     worker = settings.worker
-    gib = worker.arrangement_memory_gib if job.get("mode") == ARRANGEMENT else worker.memory_per_job_gib
-    return gib * 1024
+    return worker.arrangement_memory_gib if job.get("mode") == ARRANGEMENT else worker.memory_per_job_gib
+
+
+def place_memory_gib(job: dict[str, str]) -> float:
+    """The memory a place holds for the job: its VRAM on a GPU; nothing on
+    the CPU, whose places are only a count."""
+    return job_memory_gib(job) if model_places is not None and model_places.room is not None else 0.0
 
 
 def busy_here(job: dict[str, str]) -> bool:
     """Whether this device is too busy for one more job: its GPU or CPU at
-    WORKER_BUSY_UTILIZATION or more, by any program, or its GPU without the
-    VRAM the job needs."""
+    WORKER_BUSY_UTILIZATION or more, by any program, or no room on its GPU
+    for the job beside the jobs that hold places, as other programs use it."""
     if load_monitor is None:
         return False
     load = load_monitor.current()
     if load.utilization is not None and load.utilization >= settings.worker.busy_utilization:
         return True
-    return load.gpu and load.free_mib is not None and load.free_mib < job_memory_mib(job)
+    places = model_places
+    if places is None or places.room is None:
+        return False
+    return places.usable(job_memory_gib(job)) <= places.in_use
 
 
 def roomier_device(job: dict[str, str], task: str) -> str | None:
-    """Another device whose worker for task has a free place, is less busy
-    than WORKER_BUSY_UTILIZATION, and has the VRAM the job needs."""
+    """Another device whose worker for task has a free place, with room for
+    a job in the VRAM other programs leave it, and is less busy than
+    WORKER_BUSY_UTILIZATION. Its heartbeat counts only the places that fit
+    now, so a device whose GPU another program uses is passed over."""
     node = cluster.node_name()
-    need = job_memory_mib(job)
     # A busy GPU is still faster than an idle CPU: a GPU device hands jobs
     # to GPU devices only.
     on_gpu = load_monitor is not None and load_monitor.current().gpu
@@ -773,8 +782,6 @@ def roomier_device(job: dict[str, str], task: str) -> str | None:
         if worker["running"] >= worker["capacity"] or worker["utilization"] is None:
             continue
         if worker["utilization"] >= settings.worker.busy_utilization:
-            continue
-        if worker["gpu"] and worker["free_mib"] is not None and worker["free_mib"] < need:
             continue
         return worker["node"]
     return None
@@ -797,6 +804,11 @@ def wait_for_place(job_id: str) -> tuple[Place | None, bool]:
     device as soon as that one has a free place; it is queued again if this
     worker stops. (the place, None) or (None, whether the job was sent on)."""
     reasons: list[str] = []
+    try:
+        memory_gib = place_memory_gib(redis.hgetall(job_key(job_id)))
+    except Exception:
+        logger.exception("Could not read job %s; planning a transcription's memory", job_id)
+        memory_gib = place_memory_gib({})
 
     def give_up() -> bool:
         if worker_stopping.is_set():
@@ -818,7 +830,7 @@ def wait_for_place(job_id: str) -> tuple[Place | None, bool]:
             logger.exception("Could not look for another device for job %s", job_id)
         return False
 
-    place = model_places.take(give_up, PLACE_CHECK_INTERVAL)
+    place = model_places.take(give_up, PLACE_CHECK_INTERVAL, memory_gib)
     if place is not None:
         restart_time_limit()
         return place, False
@@ -1275,6 +1287,15 @@ def check_video_link(request: str, safe_url: str):
     video_check.answer(redis, request, safe_url)
 
 
+def gpu_room():
+    """The room for jobs on this worker's GPUs (GpuRoom), from the launcher's
+    measurement, or None on the CPU."""
+    from app.transcription.device import GpuRoom, launcher_capacities
+
+    totals = {index: total for index, capacity, _, total in launcher_capacities() or [] if capacity > 0}
+    return GpuRoom(totals) if totals else None
+
+
 def consumes(worker, queue: str) -> bool:
     """Whether a Dramatiq worker consumes queue: every queue without --queues."""
     queues = worker.consumer_whitelist
@@ -1284,9 +1305,15 @@ def consumes(worker, queue: str) -> bool:
 class LocalWorkerHeartbeat(dramatiq.Middleware):
     """Publishes the worker's capacity and average job duration while it
     consumes a local queue, so the API can estimate the local wait. A worker
-    a cluster switch keeps to arrangements says it takes no transcriptions."""
+    a cluster switch keeps to arrangements says it takes no transcriptions.
+
+    On a GPU, the capacity is the places that can be held now, in the VRAM
+    other programs leave: the API and other devices then see a GPU that
+    another program uses as full, and send jobs elsewhere. It is read every
+    ROOM_CHECK_INTERVAL seconds and published as soon as it changes."""
 
     interval = 15
+    room_check_interval = 5
 
     def __init__(self):
         self._stop: threading.Event | None = None
@@ -1303,22 +1330,31 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
         global load_monitor, model_places
         from app.worker import load
 
-        places = model_places = Places(configured_places(worker.worker_threads), on_change=changed.set)
+        room = gpu_room()
+        places = model_places = Places(configured_places(worker.worker_threads), on_change=changed.set,
+                                       room=room.budget_gib if room is not None else None)
         monitor = load_monitor = load.LoadMonitor(gpu=not settings.worker.enforce_cpu and load.sample_gpus() is not None)
         monitor.start()
+        job_memory = settings.worker.memory_per_job_gib
 
         def beat():
+            published = None
+            published_at = 0.0
             while not stop.is_set():
                 changed.clear()
                 try:
-                    current = monitor.current()
-                    routing.publish_heartbeat(redis, places.capacity, local_job_duration.value, arrangement=arranges,
-                                              transcription=transcribes, node=cluster.node_name(),
-                                              running=places.in_use, utilization=current.utilization,
-                                              free_mib=current.free_mib, gpu=current.gpu)
+                    capacity = places.usable(job_memory)
+                    running = places.in_use
+                    if (capacity, running) != published or time.monotonic() - published_at >= self.interval:
+                        current = monitor.current()
+                        routing.publish_heartbeat(redis, capacity, local_job_duration.value, arrangement=arranges,
+                                                  transcription=transcribes, node=cluster.node_name(),
+                                                  running=running, utilization=current.utilization,
+                                                  free_mib=current.free_mib, gpu=current.gpu)
+                        published, published_at = (capacity, running), time.monotonic()
                 except Exception:
                     logger.exception("Could not publish the worker heartbeat")
-                changed.wait(self.interval)
+                changed.wait(self.room_check_interval if room is not None else self.interval)
 
         threading.Thread(target=beat, name="worker-heartbeat", daemon=True).start()
 

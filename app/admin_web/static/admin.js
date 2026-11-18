@@ -1105,7 +1105,7 @@ function hardwareLines(hardware) {
   const gib = (mib) => typeof mib === "number" ? `${(mib / 1024).toFixed(1)} GiB` : "?";
   if (hardware.kind === "gpu") {
     return (hardware.gpus || []).map((gpu) => [`GPU ${gpu.index}`,
-      `${gpu.name || "name unknown"} · ${gib(gpu.vram_mib)} VRAM, ${gib(gpu.free_mib)} free at start · ${gpu.jobs} jobs fit`]);
+      `${gpu.name || "name unknown"} · ${gib(gpu.vram_mib)} VRAM, ${gib(gpu.free_mib)} free at start · up to ${gpu.jobs} jobs`]);
   }
   return [["CPU", `${hardware.name || "name unknown"} · ${hardware.cores} cores, ${hardware.threads} for the models`
     + (hardware.ram_mib ? ` · ${gib(hardware.ram_mib)} RAM` : "")]];

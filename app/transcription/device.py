@@ -1,6 +1,8 @@
 import logging
 import os
 import subprocess
+import threading
+import time
 
 from app.config import gpu_reserve_gib, settings
 
@@ -12,10 +14,19 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# The launcher's measurement of each GPU's free VRAM, "index=bytes,...", in
+# The launcher's measurement of each GPU, "index=free:total,..." in bytes, in
 # Dramatiq's environment: the worker sizes its batches and memory budget by
 # it instead of measuring again beside its own CUDA context.
-MEASURED_FREE_VARIABLE = "MODEL_GPU_FREE_MEMORY"
+MEASURED_VARIABLE = "MODEL_GPU_MEMORY"
+
+# VRAM of a GPU that no process can use for its own memory: the worker's CUDA
+# context (~0.13 GiB measured) and what the driver keeps. A GPU's job
+# capacity is counted from its total VRAM less this, as if no other program
+# used it; the room for jobs at any moment is read live (GpuRoom).
+GPU_CONTEXT_GIB = 0.25
+# The worker's own CUDA context, which a live reading of free VRAM counts as
+# used: it is the worker's own, so it is added back (measured ~0.13 GiB).
+OWN_CONTEXT_GIB = 0.13
 
 # VRAM of the tempo map's beat tracker (app/transcription/tempo.py), which
 # runs on the job's GPU one job at a time. Only its weights and one 30 s
@@ -144,6 +155,7 @@ def device_free_memory(
     torch,
     device_index: int,
     smi_free_memory: dict[str, int],
+    log: bool = True,
 ) -> tuple[int, int]:
     """Free and total memory of a CUDA device.
 
@@ -155,12 +167,13 @@ def device_free_memory(
     uuid = str(torch.cuda.get_device_properties(device_index).uuid).lower()
     device_smi_free_memory = smi_free_memory.get(uuid)
     if device_smi_free_memory is not None and device_smi_free_memory < free_memory:
-        logger.info(
-            "GPU %s: using nvidia-smi free memory %.2f GiB instead of CUDA's %.2f GiB",
-            device_index,
-            device_smi_free_memory / 1024**3,
-            free_memory / 1024**3,
-        )
+        if log:
+            logger.info(
+                "GPU %s: using nvidia-smi free memory %.2f GiB instead of CUDA's %.2f GiB",
+                device_index,
+                device_smi_free_memory / 1024**3,
+                free_memory / 1024**3,
+            )
         free_memory = device_smi_free_memory
     return free_memory, total_memory
 
@@ -181,6 +194,18 @@ def job_capacity(free_memory: float, config=None) -> int:
     return int(round(gpu_budget_gib(free_memory, config) / worker.memory_per_job_gib, 9))
 
 
+def usable_memory(total_memory: float) -> float:
+    """Bytes of a GPU with total_memory bytes that the worker could ever use:
+    all of it but its CUDA context."""
+    return max(0.0, total_memory - GPU_CONTEXT_GIB * 1024**3)
+
+
+def most_jobs(total_memory: float, config=None) -> int:
+    """Transcription jobs a GPU with total_memory bytes holds when no other
+    program uses it: its places and batch size."""
+    return job_capacity(usable_memory(total_memory), config)
+
+
 def arrangement_fits(free_memory: float, config=None) -> bool:
     """Whether a GPU with free_memory bytes free takes arrangement jobs: the
     feature is on and one arrangement step fits in its budget."""
@@ -196,30 +221,33 @@ def cpu_budget_gib() -> float:
     return max(0.0, psutil.virtual_memory().available / 1024**3 - settings.worker.cpu_reserve_gib)
 
 
-def measured_free_text(capacities: list[tuple[int, int, int, int]]) -> str:
-    return ",".join(f"{index}={free_memory}" for index, _, free_memory, _ in capacities)
+def measured_text(capacities: list[tuple[int, int, int, int]]) -> str:
+    return ",".join(f"{index}={free_memory}:{total_memory}" for index, _, free_memory, total_memory in capacities)
 
 
 def launcher_capacities() -> list[tuple[int, int, int, int]] | None:
     """The job capacities of the launcher's measurement, as
-    cuda_job_capacities gives them (total memory unknown: 0), or None
-    without one."""
-    text = os.environ.get(MEASURED_FREE_VARIABLE)
+    cuda_job_capacities gives them, or None without one."""
+    text = os.environ.get(MEASURED_VARIABLE)
     if not text or settings.worker.enforce_cpu:
         return None
     capacities = []
     try:
         for item in text.split(","):
-            index, free_memory = (int(value) for value in item.split("="))
-            if index < 0 or free_memory < 0:
+            index, memory = item.split("=")
+            free_memory, total_memory = memory.split(":")
+            index, free_memory, total_memory = int(index), int(free_memory), int(total_memory)
+            if index < 0 or free_memory < 0 or total_memory < 0:
                 return None
-            capacities.append((index, job_capacity(free_memory), free_memory, 0))
+            capacities.append((index, most_jobs(total_memory), free_memory, total_memory))
     except ValueError:
         return None
     return capacities or None
 
 
 def cuda_job_capacities() -> list[tuple[int, int, int, int]] | None:
+    """(index, the most jobs it holds, free bytes now, total bytes) of each
+    CUDA device, or None without CUDA."""
     if settings.worker.enforce_cpu:
         return None
     try:
@@ -236,11 +264,10 @@ def cuda_job_capacities() -> list[tuple[int, int, int, int]] | None:
                 device_index,
                 smi_free_memory,
             )
-            capacity = job_capacity(free_memory)
             capacities.append(
                 (
                     device_index,
-                    capacity,
+                    most_jobs(total_memory),
                     free_memory,
                     total_memory,
                 )
@@ -249,3 +276,69 @@ def cuda_job_capacities() -> list[tuple[int, int, int, int]] | None:
         return capacities
     except (ImportError, RuntimeError):
         return None
+
+
+class GpuRoom:
+    """The VRAM this worker's jobs may use now on its GPUs, in GiB: what no
+    other program uses, less the reserves. Read live, so the worker takes
+    jobs as other programs free VRAM and stops taking them as they use more,
+    without a restart.
+
+    The worker's own memory counts as its own: PyTorch's reserved memory and
+    the CUDA context are added back to the free memory, so running jobs and the memory PyTorch
+    keeps after a step never shut out the next job. app.worker.places then
+    subtracts what the jobs holding places will use.
+
+    Readings are at most max_age seconds old; the GPUs are read by one
+    caller at a time. If a reading fails, the last one is used, and without
+    one the most the GPUs hold, as if no other program used them.
+    """
+
+    def __init__(self, totals: dict[int, int], max_age: float = 1.0, clock=time.monotonic, config=None):
+        # GPU index -> total bytes.
+        self.totals = dict(totals)
+        self.max_age = max_age
+        self.clock = clock
+        self.config = config
+        self._budget: float | None = None
+        self._read_at = 0.0
+        self._lock = threading.Lock()
+        self._failed = False
+
+    def most_gib(self) -> float:
+        """The budget when no other program uses the GPUs."""
+        return sum(gpu_budget_gib(usable_memory(total), self.config) for total in self.totals.values())
+
+    def budget_gib(self) -> float:
+        with self._lock:
+            if self._budget is None or self.clock() - self._read_at >= self.max_age:
+                try:
+                    self._budget = self._read()
+                    self._failed = False
+                except Exception:
+                    if not self._failed:
+                        logger.exception("Could not read the GPUs' free memory; using the last reading")
+                    self._failed = True
+                    if self._budget is None:
+                        self._budget = self.most_gib()
+                self._read_at = self.clock()
+            return self._budget
+
+    def _read(self) -> float:
+        import torch
+
+        smi_free_memory = nvidia_smi_free_memory()
+        budget = 0.0
+        for index, total in self.totals.items():
+            # Reserved before and after the free memory, and the lower of the
+            # two: memory PyTorch takes or gives back meanwhile then never
+            # counts twice.
+            before = torch.cuda.memory_reserved(index)
+            free_memory, _ = device_free_memory(torch, index, smi_free_memory, log=False)
+            after = torch.cuda.memory_reserved(index)
+            own = min(before, after) + OWN_CONTEXT_GIB * 1024**3
+            budget += min(
+                gpu_budget_gib(free_memory + own, self.config),
+                gpu_budget_gib(usable_memory(total), self.config),
+            )
+        return budget

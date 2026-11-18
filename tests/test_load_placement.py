@@ -8,7 +8,7 @@ import fakeredis
 import pytest
 
 from app import cluster
-from app.worker import load, tasks
+from app.worker import load, places, tasks
 
 
 @pytest.fixture
@@ -26,6 +26,7 @@ def placing(api_context, monkeypatch):
     monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments, **options: sent.append(options))
     yield settings, sent
     monkeypatch.setattr(tasks, "load_monitor", None)
+    monkeypatch.setattr(tasks, "model_places", None)
     cluster.forget_egress_cache()
 
 
@@ -50,10 +51,23 @@ def test_a_saturated_gpu_leaves_the_job_to_an_idle_device(placing, monkeypatch):
 
 def test_a_gpu_without_vram_for_one_more_job_leaves_it_to_one_with_room(placing, monkeypatch):
     settings, sent = placing
-    here(monkeypatch, utilization=20.0, free_mib=settings.worker.memory_per_job_gib * 1024 - 1)
+    here(monkeypatch, utilization=20.0)
+    # Another program leaves this GPU less than one job's memory.
+    room = settings.worker.memory_per_job_gib - 0.01
+    monkeypatch.setattr(tasks, "model_places", places.Places(4, room=lambda: room))
     other()
 
     assert tasks.pass_job("job", "local")
+
+
+def test_the_workers_own_memory_does_not_make_its_gpu_look_full(placing, monkeypatch):
+    # nvidia-smi counts what this worker's PyTorch keeps as used; the room
+    # for jobs does not, so the device keeps its job.
+    here(monkeypatch, utilization=20.0, free_mib=100.0)
+    monkeypatch.setattr(tasks, "model_places", places.Places(4, room=lambda: 4.0))
+    other()
+
+    assert not tasks.pass_job("job", "local")
 
 
 def test_a_device_with_room_runs_the_job_itself(placing, monkeypatch):
@@ -66,7 +80,7 @@ def test_a_device_with_room_runs_the_job_itself(placing, monkeypatch):
 @pytest.mark.parametrize("options", [
     {"utilization": 95.0},          # as busy
     {"running": 4},                 # every place taken
-    {"free_mib": 500.0},            # no VRAM for the job
+    {"capacity": 0},                # no VRAM for a job now
     {"utilization": None},          # load unknown
     {"node": "hub"},                # this device itself
     {"transcription": False},       # takes no transcriptions

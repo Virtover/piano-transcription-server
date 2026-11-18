@@ -171,7 +171,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_pipeline_upload.py` | Converting uploaded audio and video to the WAV format the model needs. Needs the worker image. |
 | `test_config.py` | Settings parsing, durations, deprecated names, unknown-name warnings, secrets, startup validation, the `check` and `describe` commands, and drift guards against `.env.example` and these docs. |
 | `test_launcher.py` | Worker resources resolved at startup: places, threads, CPU threads, and the values passed to Dramatiq. |
-| `test_places.py` | Places on a device's models: in order of arrival, given back when the model step ends or the job fails; a job without a place stays queued, goes to a device with a free one, or is queued again when the worker stops; the heartbeat reports places. |
+| `test_places.py` | Places on a device's models: in order of arrival, given back when the model step ends or the job fails; on a GPU, room for each job's memory in the VRAM other programs leave, waiting while they hold it, one winner of a race for the last room; a job without a place stays queued, goes to a device with a free one, or is queued again when the worker stops; the heartbeat reports the places that fit now. |
 | `test_job_storage.py` | `JOB_STORAGE=s3` with an in-memory bucket: submissions kept only in the bucket, workers' scratch folders, results and signed download links, cleanup, account deletion, settings, requirements, and the online check. |
 | `test_managed_services.py` | Redis and PostgreSQL outside the stack: TLS options, warnings about unencrypted connections, the online check without `CONFIG`, backups turned off, and their requirements. |
 | `test_metrics.py` | `GET /metrics`: its token, waiting and running jobs per queue, the oldest wait, worker capacity, the text format, and the requests in flight. |
@@ -198,7 +198,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_subscriptions.py` | Subscriptions (plans' settings and levels, periods replacing free minutes, renewals, grace, hold, upgrades, one account per subscription, the refresh from Google Play, acknowledgement), unlimited plans and their fair-use limit, refunded orders, crashes mid-transaction, welcome minutes, and minutes for every account. With `PIANO_TEST_POSTGRES_URL`, also on PostgreSQL, with the admin web page's role. |
 | `test_voided_purchases.py` | Refunds and chargebacks: minutes taken back once, negative balances, free minutes, and reading every page from Google Play. |
 | `test_deployment.py` | The images: pinned requirements and deno, services not running as root, and the startup check for root-owned volumes. |
-| `test_device_capacity.py` | GPU capacity calculation, including the `nvidia-smi` free memory check used under WSL. |
+| `test_device_capacity.py` | GPU capacity calculation from total VRAM, the live room for jobs (`GpuRoom`: the worker's own memory, caching, failed readings), and the `nvidia-smi` free memory check used under WSL. |
 | `test_device_selection.py` | GPU and CPU device selection for transcription jobs. Needs the worker dependencies, so it is skipped in the API test environment. |
 
 Some tests need PyTorch, Transkun, or `ffmpeg`, which are only in the worker image. They are skipped in the API test environment. Run them in the worker image:

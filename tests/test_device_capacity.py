@@ -19,11 +19,13 @@ def gpus(monkeypatch, default_settings):
     default_settings.worker.arrangement = False
     state = {"devices": [], "smi": "", "smi_error": None}
 
+    state["reserved"] = {}
     cuda = types.SimpleNamespace(
         is_available=lambda: bool(state["devices"]),
         device_count=lambda: len(state["devices"]),
         mem_get_info=lambda index: state["devices"][index][1:],
         get_device_properties=lambda index: types.SimpleNamespace(uuid=state["devices"][index][0]),
+        memory_reserved=lambda index: state["reserved"].get(index, 0),
     )
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=cuda))
 
@@ -61,22 +63,22 @@ def test_lower_nvidia_smi_free_memory_is_used(gpus):
     [(index, capacity, free, total)] = device.cuda_job_capacities()
 
     assert free == 5812 * MiB
-    # floor((5.68 - 1.0) / 1.1) = 4 jobs instead of 5
-    assert (index, capacity, total) == (0, 4, 8 * GiB)
+    # The capacity is the total's: floor((8 - 0.25 context - 1.0 - 0.25 tempo map) / 1.1) = 5.
+    assert (index, capacity, total) == (0, 5, 8 * GiB)
 
 
 def test_cuda_free_memory_is_used_when_lower(gpus):
     gpus["devices"] = [("aaaa-1", 5 * GiB, 8 * GiB)]
     gpus["smi"] = "GPU-aaaa-1, 6000\n"
 
-    assert device.cuda_job_capacities()[0][1:3] == (3, 5 * GiB)
+    assert device.cuda_job_capacities()[0][2] == 5 * GiB
 
 
 def test_cuda_free_memory_is_used_without_nvidia_smi(gpus):
     gpus["devices"] = [("aaaa-1", 7126 * MiB, 8 * GiB)]
     gpus["smi_error"] = FileNotFoundError("nvidia-smi")
 
-    assert device.cuda_job_capacities()[0][1:3] == (5, 7126 * MiB)
+    assert device.cuda_job_capacities()[0][2] == 7126 * MiB
 
 
 def test_gpus_are_matched_by_uuid_not_index(gpus):
@@ -85,7 +87,16 @@ def test_gpus_are_matched_by_uuid_not_index(gpus):
 
     capacities = device.cuda_job_capacities()
 
-    assert [(free, capacity) for _, capacity, free, _ in capacities] == [(9 * GiB, 7), (2 * GiB, 0)]
+    assert [free for _, _, free, _ in capacities] == [9 * GiB, 2 * GiB]
+
+
+def test_the_capacity_is_the_total_vrams_whatever_is_free_at_start(gpus):
+    # Another program uses nearly all of the GPU as the worker starts.
+    gpus["devices"] = [("aaaa-1", 1 * GiB, 12 * GiB)]
+    gpus["smi"] = "GPU-aaaa-1, 1024\n"
+
+    # floor((12 - 0.25 - 1.0 - 0.25) / 1.1) = 9
+    assert device.cuda_job_capacities()[0][1] == 9
 
 
 def test_no_cuda(gpus):
@@ -99,16 +110,17 @@ def test_enforce_cpu_ignores_cuda(default_settings, gpus):
     assert device.cuda_job_capacities() is None
 
 
-def test_launcher_summary_shows_free_memory(gpus, monkeypatch):
+def test_launcher_summary_shows_total_and_free_memory(gpus, monkeypatch):
     gpus["devices"] = [("aaaa-1", 7126 * MiB, 8 * GiB)]
     gpus["smi"] = "GPU-aaaa-1, 5812\n"
 
-    assert launcher.gpu_capacity(device.cuda_job_capacities()) == (1, 4, "GPU 0: 4 job(s), batch 4, 5.68 GiB free")
+    assert launcher.gpu_capacity(device.cuda_job_capacities()) == (
+        1, 5, "GPU 0: up to 5 job(s), batch 5, 8.00 GiB, 5.68 GiB free now")
 
 
-def test_launcher_uses_cpu_when_no_job_fits(gpus, monkeypatch):
-    gpus["devices"] = [("aaaa-1", 2 * GiB, 4 * GiB)]
-    gpus["smi"] = "GPU-aaaa-1, 1500\n"
+def test_launcher_uses_cpu_when_the_gpu_is_too_small_for_one_job(gpus, monkeypatch):
+    gpus["devices"] = [("aaaa-1", 1 * GiB, 2 * GiB)]
+    gpus["smi"] = "GPU-aaaa-1, 1000\n"
 
     assert launcher.gpu_capacity(device.cuda_job_capacities()) is None
 
@@ -159,35 +171,132 @@ def test_job_capacity_counts_whole_jobs_in_the_budget(default_settings):
 
 # --- The launcher's measurement, handed to Dramatiq ---------------------------------------
 
-@pytest.mark.parametrize("text", [None, "", "x", "0=", "0=-5", "=1"])
+@pytest.mark.parametrize("text", [None, "", "x", "0=", "0=5", "0=-5:8", "0=5:-8", "=1:2", "0=1:2:3"])
 def test_launcher_capacities_without_a_usable_measurement(default_settings, monkeypatch, text):
     if text is None:
-        monkeypatch.delenv(device.MEASURED_FREE_VARIABLE, raising=False)
+        monkeypatch.delenv(device.MEASURED_VARIABLE, raising=False)
     else:
-        monkeypatch.setenv(device.MEASURED_FREE_VARIABLE, text)
+        monkeypatch.setenv(device.MEASURED_VARIABLE, text)
 
     # The worker then measures itself, as before.
     assert device.launcher_capacities() is None
 
 
-def test_launcher_capacities_give_each_gpus_jobs(default_settings, monkeypatch):
+def test_launcher_capacities_give_each_gpus_most_jobs(default_settings, monkeypatch):
     worker = default_settings.worker
-    free = int((device.gpu_reserve_gib(worker) + device.TEMPO_MAP_MEMORY_GIB + 3 * worker.memory_per_job_gib)
-               * 1024**3) + 1
-    monkeypatch.setenv(device.MEASURED_FREE_VARIABLE, f"0={free},1=0")
+    total = int((device.GPU_CONTEXT_GIB + device.gpu_reserve_gib(worker) + device.TEMPO_MAP_MEMORY_GIB
+                 + 3 * worker.memory_per_job_gib) * 1024**3) + 1
+    monkeypatch.setenv(device.MEASURED_VARIABLE, f"0={GiB}:{total},1=0:0")
 
-    assert device.launcher_capacities() == [(0, 3, free, 0), (1, 0, 0, 0)]
+    assert device.launcher_capacities() == [(0, 3, GiB, total), (1, 0, 0, 0)]
 
 
 def test_launcher_capacities_round_trip(default_settings, monkeypatch):
-    measured = [(0, device.job_capacity(11 * 1024**3), 11 * 1024**3, 12 * 1024**3)]
-    monkeypatch.setenv(device.MEASURED_FREE_VARIABLE, device.measured_free_text(measured))
+    measured = [(0, device.most_jobs(12 * 1024**3), 11 * 1024**3, 12 * 1024**3)]
+    monkeypatch.setenv(device.MEASURED_VARIABLE, device.measured_text(measured))
 
-    assert device.launcher_capacities() == [(0, measured[0][1], 11 * 1024**3, 0)]
+    assert device.launcher_capacities() == measured
 
 
 def test_launcher_capacities_ignored_with_enforce_cpu(default_settings, monkeypatch):
     default_settings.worker.enforce_cpu = True
-    monkeypatch.setenv(device.MEASURED_FREE_VARIABLE, "0=12000000000")
+    monkeypatch.setenv(device.MEASURED_VARIABLE, "0=12000000000:12000000000")
 
     assert device.launcher_capacities() is None
+
+
+# --- The room for jobs, read live -----------------------------------------------------------
+
+class Clock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+def room_budget(free_gib, reserved_gib=0.0):
+    """What GpuRoom should read: free VRAM and the worker's own memory, less the reserves."""
+    return free_gib + reserved_gib + device.OWN_CONTEXT_GIB - 1.0 - device.TEMPO_MAP_MEMORY_GIB
+
+
+def test_the_room_is_what_other_programs_leave(gpus):
+    gpus["devices"] = [("aaaa-1", 6 * GiB, 8 * GiB)]
+    gpus["smi"] = "GPU-aaaa-1, 4096\n"
+
+    room = device.GpuRoom({0: 8 * GiB}, clock=Clock())
+
+    # nvidia-smi's lower reading: programs on Windows use 2 GiB more.
+    assert room.budget_gib() == pytest.approx(room_budget(4))
+
+
+def test_the_workers_own_memory_is_room_for_its_jobs(gpus):
+    # The worker's PyTorch holds 3 GiB, of running jobs and memory it keeps
+    # after a step: counted as the worker's, not as another program's.
+    gpus["devices"] = [("aaaa-1", 2 * GiB, 8 * GiB)]
+    gpus["reserved"] = {0: 3 * GiB}
+
+    room = device.GpuRoom({0: 8 * GiB}, clock=Clock())
+
+    assert room.budget_gib() == pytest.approx(room_budget(2, 3))
+
+
+def test_the_room_is_never_more_than_the_gpu_holds(gpus):
+    gpus["devices"] = [("aaaa-1", 8 * GiB, 8 * GiB)]
+    gpus["reserved"] = {0: 2 * GiB}
+
+    room = device.GpuRoom({0: 8 * GiB}, clock=Clock())
+
+    assert room.budget_gib() == pytest.approx(room.most_gib())
+    assert room.most_gib() == pytest.approx(8 - device.GPU_CONTEXT_GIB - 1.0 - device.TEMPO_MAP_MEMORY_GIB)
+
+
+def test_the_room_of_several_gpus_is_their_sum(gpus):
+    gpus["devices"] = [("aaaa-1", 4 * GiB, 8 * GiB), ("bbbb-2", 3 * GiB, 8 * GiB)]
+
+    room = device.GpuRoom({0: 8 * GiB, 1: 8 * GiB}, clock=Clock())
+
+    assert room.budget_gib() == pytest.approx(room_budget(4) + room_budget(3))
+
+
+def test_a_full_gpu_leaves_no_room(gpus):
+    gpus["devices"] = [("aaaa-1", 0, 8 * GiB)]
+
+    assert device.GpuRoom({0: 8 * GiB}, clock=Clock()).budget_gib() == 0.0
+
+
+def test_the_room_is_read_again_once_its_reading_is_old(gpus):
+    clock = Clock()
+    gpus["devices"] = [("aaaa-1", 6 * GiB, 8 * GiB)]
+    room = device.GpuRoom({0: 8 * GiB}, max_age=1.0, clock=clock)
+    first = room.budget_gib()
+
+    # Another program takes 3 GiB: unseen within max_age, seen after it.
+    gpus["devices"] = [("aaaa-1", 3 * GiB, 8 * GiB)]
+    clock.now += 0.5
+    assert room.budget_gib() == first
+    clock.now += 0.5
+    assert room.budget_gib() == pytest.approx(first - 3)
+
+
+def broken(index):
+    raise RuntimeError("CUDA error")
+
+
+def test_a_failed_reading_keeps_the_last_one(gpus, monkeypatch):
+    clock = Clock()
+    gpus["devices"] = [("aaaa-1", 6 * GiB, 8 * GiB)]
+    room = device.GpuRoom({0: 8 * GiB}, clock=clock)
+    first = room.budget_gib()
+
+    monkeypatch.setattr(sys.modules["torch"].cuda, "mem_get_info", broken)
+    clock.now += 5
+
+    assert room.budget_gib() == first
+
+
+def test_without_any_reading_the_room_is_what_the_gpu_holds(gpus, monkeypatch):
+    monkeypatch.setattr(sys.modules["torch"].cuda, "mem_get_info", broken)
+    room = device.GpuRoom({0: 8 * GiB}, clock=Clock())
+
+    assert room.budget_gib() == pytest.approx(room.most_gib())

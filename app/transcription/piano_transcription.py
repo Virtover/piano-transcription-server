@@ -46,10 +46,14 @@ from app.transcription.device import (
     launcher_capacities,
     gpu_batch_size,
     gpu_budget_gib,
+    usable_memory,
 )
 
 
 logger = logging.getLogger(__name__)
+
+# How long a batch size lowered after running out of GPU memory stays lowered.
+LOWERED_BATCH_SECONDS = 10 * 60
 
 
 ProgressCallback = Callable[[float], None]
@@ -140,11 +144,11 @@ def load_model(device: str):
     return model
 
 
-# Usable GPU index -> job capacity, measured once before this process loads
-# a model, like the launcher does.
+# Usable GPU index -> the most jobs it holds, from its total VRAM, read once
+# before this process loads a model, like the launcher does.
 _cuda_capacities: dict[int, int] | None = None
-# GPU index -> free VRAM in bytes at that measurement, for the device budget.
-_cuda_free_memory: dict[int, int] = {}
+# GPU index -> total VRAM in bytes, for the device budget and the room for jobs.
+_cuda_total_memory: dict[int, int] = {}
 # The first job and the preload at start select a device at the same time;
 # one measures while the other waits, so that no measurement counts a model
 # the other has begun to load.
@@ -154,10 +158,9 @@ _cuda_capacities_lock = threading.Lock()
 def select_device() -> str:
     global _cuda_capacities
 
-    # Decide once which GPUs have capacity, before this process loads a model.
-    # Checking capacity again later would count the loaded model and running
-    # jobs against it and send new jobs to the CPU whenever the GPU is busy.
-    # Concurrency is already limited by the worker thread count.
+    # Decide once which GPUs have capacity, from their total VRAM: how much
+    # other programs leave at any moment decides when a job takes a place
+    # (app.worker.places), never whether the worker uses the GPU.
     with _cuda_capacities_lock:
         if _cuda_capacities is None:
             # The launcher measured before any process of the worker held
@@ -166,7 +169,7 @@ def select_device() -> str:
                 capacity for capacity in launcher_capacities() or []
                 if capacity[0] < torch.cuda.device_count()
             ] or cuda_job_capacities() or []
-            _cuda_free_memory.update({index: free for index, _, free, _ in measured})
+            _cuda_total_memory.update({index: total for index, _, _, total in measured})
             _cuda_capacities = {
                 device_index: capacity
                 for device_index, capacity, _, _ in measured
@@ -187,9 +190,16 @@ def select_device() -> str:
     return f"cuda:{device_index}"
 
 
+def gpu_totals() -> dict[int, int]:
+    """GPU index -> total VRAM in bytes of the GPUs this worker uses."""
+    select_device()
+    with _cuda_capacities_lock:
+        return {index: _cuda_total_memory[index] for index in _cuda_capacities or {} if index in _cuda_total_memory}
+
+
 def batch_size_for_device(device: str) -> int:
-    """WORKER_BATCH_SIZE resolved for one device: on a GPU, `auto` is its
-    startup job capacity, and a fixed value is lowered to that capacity."""
+    """WORKER_BATCH_SIZE resolved for one device: on a GPU, `auto` is the
+    most jobs it holds, and a fixed value is lowered to that."""
     if not device.startswith("cuda:"):
         return cpu_batch_size()
     capacity = (_cuda_capacities or {}).get(int(device.split(":", 1)[1]), 1)
@@ -201,26 +211,28 @@ def batch_size_for_device(device: str) -> int:
 
 def budget_for_device(device: str) -> DeviceBudget:
     """The memory budget every model step on device shares: on a GPU, its
-    VRAM free at the startup measurement less the reserves; on the CPU,
-    available RAM, one step at a time."""
+    total VRAM less its context and the reserves, as the jobs that hold
+    places never use more than other programs leave; on the CPU, available
+    RAM, one step at a time."""
 
     def total() -> float:
         if not device.startswith("cuda:"):
             return cpu_budget_gib()
-        return gpu_budget_gib(_cuda_free_memory.get(int(device.split(":", 1)[1]), 0))
+        return gpu_budget_gib(usable_memory(_cuda_total_memory.get(int(device.split(":", 1)[1]), 0)))
 
     return device_budget(device, total)
 
 
 def arrangement_offered(device: str) -> bool:
     """Whether arrangement jobs run on device: the feature is on, and on a
-    GPU, one arrangement step fits in its budget. The launcher decides the
-    same, from the same measurement, to consume the arrangement queue."""
+    GPU, one arrangement step fits in its budget when no other program uses
+    it. The launcher decides the same, from the same measurement, to consume
+    the arrangement queue."""
     if not settings.worker.arrangement:
         return False
     if not device.startswith("cuda:"):
         return True
-    return arrangement_fits(_cuda_free_memory.get(int(device.split(":", 1)[1]), 0))
+    return arrangement_fits(usable_memory(_cuda_total_memory.get(int(device.split(":", 1)[1]), 0)))
 
 
 def is_cuda_out_of_memory(error: BaseException) -> bool:
@@ -440,7 +452,10 @@ class _GpuBatcher:
         self.device = device
         self.model = load_model(device)
         self.requests: queue.Queue[_BatchRequest] = queue.Queue()
-        self.batch_size = batch_size_for_device(device)
+        self.batch_size = self.full_batch_size = batch_size_for_device(device)
+        # When an out-of-memory error lowered the batch size, as another
+        # program took VRAM in the middle of a batch.
+        self.lowered_at: float | None = None
         self.budget = budget_for_device(device)
         worker = settings.worker
         self.job_memory_gib = worker.memory_per_job_gib if device.startswith("cuda:") else worker.cpu_memory_per_job_gib
@@ -473,6 +488,7 @@ class _GpuBatcher:
     def _run(self) -> None:
         while True:
             batch = [self.requests.get()]
+            self._restore_batch_size()
             end_time = time.monotonic() + self.timeout
             while len(batch) < self.batch_size:
                 remaining = end_time - time.monotonic()
@@ -504,14 +520,27 @@ class _GpuBatcher:
             torch.cuda.empty_cache()
 
     def _lower_batch_size(self, size: int) -> None:
+        self.lowered_at = time.monotonic()
         if size < self.batch_size:
             logger.warning(
-                "%s ran out of memory; batch size lowered from %d to %d",
+                "%s ran out of memory; batch size lowered from %d to %d for %d minutes",
                 self.device,
                 self.batch_size,
                 size,
+                LOWERED_BATCH_SECONDS // 60,
             )
             self.batch_size = size
+
+    def _restore_batch_size(self) -> None:
+        """The full batch size again, once LOWERED_BATCH_SECONDS passed
+        without running out of memory: what fits is decided by the places,
+        from the VRAM other programs leave now."""
+        if self.lowered_at is None or time.monotonic() - self.lowered_at < LOWERED_BATCH_SECONDS:
+            return
+        self.lowered_at = None
+        if self.batch_size < self.full_batch_size:
+            logger.info("%s: batch size back to %d", self.device, self.full_batch_size)
+            self.batch_size = self.full_batch_size
 
 
 _gpu_batchers: dict[str, _GpuBatcher] = {}

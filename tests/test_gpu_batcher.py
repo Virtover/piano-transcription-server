@@ -116,6 +116,24 @@ def test_batcher_splits_on_out_of_memory_and_lowers_batch_size(batcher):
         assert values[-1] == 1.0
 
 
+def test_a_lowered_batch_size_comes_back_after_a_while(batcher, monkeypatch):
+    # Another program took VRAM during a batch; once it is gone, the places
+    # decide again how many jobs run, not a restart.
+    gpu_batcher, _ = batcher(limit=2, batch_size=4)
+    submit_all(gpu_batcher, 4)
+    assert gpu_batcher.batch_size == 2
+    now = piano_transcription.time.monotonic()
+
+    monkeypatch.setattr(piano_transcription.time, "monotonic", lambda: now + 60)
+    gpu_batcher._restore_batch_size()
+    assert gpu_batcher.batch_size == 2
+
+    later = now + piano_transcription.LOWERED_BATCH_SECONDS + 1
+    monkeypatch.setattr(piano_transcription.time, "monotonic", lambda: later)
+    gpu_batcher._restore_batch_size()
+    assert gpu_batcher.batch_size == 4
+
+
 def test_batcher_fails_single_request_that_never_fits(batcher):
     gpu_batcher, _ = batcher(limit=0, batch_size=2)
 
@@ -125,7 +143,7 @@ def test_batcher_fails_single_request_that_never_fits(batcher):
     assert gpu_batcher.batch_size == 2
 
 
-def test_batch_size_for_device_uses_startup_capacity(monkeypatch):
+def test_batch_size_for_device_uses_the_most_jobs_the_gpu_holds(monkeypatch):
     monkeypatch.setattr(piano_transcription, "_cuda_capacities", {0: 3, 1: 7})
     monkeypatch.setattr(settings.worker, "batch_size", None)
     monkeypatch.setattr(settings.worker, "max_concurrency", None)

@@ -4,7 +4,7 @@ import types
 import pytest
 
 from app.worker import launcher
-from app.transcription.device import MEASURED_FREE_VARIABLE
+from app.transcription.device import MEASURED_VARIABLE
 from app.worker.places import PLACES_VARIABLE
 
 GiB = 1024**3
@@ -39,7 +39,7 @@ def capacity(*jobs):
 @pytest.fixture(autouse=True)
 def launcher_environment(monkeypatch):
     # main() writes Dramatiq's environment into os.environ: undone after each test.
-    for name in (PLACES_VARIABLE, MEASURED_FREE_VARIABLE, "dramatiq_queue_prefetch", "OMP_NUM_THREADS",
+    for name in (PLACES_VARIABLE, MEASURED_VARIABLE, "dramatiq_queue_prefetch", "OMP_NUM_THREADS",
                  "MKL_NUM_THREADS"):
         monkeypatch.setenv(name, "")
 
@@ -74,7 +74,7 @@ def test_gpu_mode_threads_follow_vram_capacity(default_settings, cores):
     # A place per job that fits in VRAM, and a second thread for each, for
     # jobs past their model step.
     assert (plan.places, plan.threads, plan.cpu_threads) == (5, 10, None)
-    assert "2 GPU(s), up to 5 job(s) by VRAM" in plan.summary
+    assert "2 GPU(s), up to 5 job(s) by total VRAM" in plan.summary
 
 
 def test_enforce_cpu_ignores_gpu_capacity(default_settings, cores):
@@ -129,7 +129,7 @@ def test_main_gives_dramatiq_the_places_and_a_prefetch_of_its_threads(default_se
     assert args[args.index("--threads") + 1] == "6"
     assert os.environ[PLACES_VARIABLE] == "3"
     # The worker sizes its batches by this measurement, not its own.
-    assert os.environ[MEASURED_FREE_VARIABLE] == f"0={6 * GiB}"
+    assert os.environ[MEASURED_VARIABLE] == f"0={6 * GiB}:{8 * GiB}"
     # Not Dramatiq's default of twice the threads per queue, which would
     # hold jobs here that a free device could run.
     assert os.environ["dramatiq_queue_prefetch"] == "6"
@@ -174,10 +174,14 @@ def test_a_gpu_with_room_takes_the_arrangement_queue(default_settings, cores):
     assert "arrangements" in plan.summary
 
 
+# A GPU of 2.5 GiB: its context and 1.5 GiB of reserves leave 0.75, under the
+# 0.8 one arrangement needs, however little other programs use.
+SMALL_GPU = [(0, 1, 2 * GiB, int(2.5 * GiB))]
+
+
 def test_a_gpu_without_room_for_one_arrangement_warns_and_skips_the_queue(default_settings, cores):
     default_settings.worker.arrangement = True
-    # 2 GiB free: 1.5 GiB of reserves leave 0.5, under the 0.8 one arrangement needs; one job fits.
-    plan = launcher.plan_worker([(0, 1, 2 * GiB, 8 * GiB)])
+    plan = launcher.plan_worker(SMALL_GPU)
 
     assert not plan.arrangement
     assert len(plan.warnings) == 1 and "WORKER_ARRANGEMENT is on" in plan.warnings[0]
@@ -187,7 +191,17 @@ def test_a_gpu_without_room_for_one_arrangement_warns_and_skips_the_queue(defaul
 def test_one_roomy_gpu_among_several_is_enough(default_settings, cores):
     default_settings.worker.arrangement = True
 
-    assert launcher.plan_worker([(0, 1, 2 * GiB, 8 * GiB), (1, 3, 6 * GiB, 8 * GiB)]).arrangement
+    assert launcher.plan_worker([*SMALL_GPU, (1, 3, 6 * GiB, 8 * GiB)]).arrangement
+
+
+def test_arrangements_follow_total_vram_not_what_is_free_at_start(default_settings, cores):
+    # Another program used most of the VRAM as the worker started: it still
+    # takes arrangements, which wait for room like every job.
+    default_settings.worker.arrangement = True
+
+    plan = launcher.plan_worker([(0, 5, int(0.5 * GiB), 8 * GiB)])
+
+    assert plan.arrangement and plan.places == 5
 
 
 def test_arrangements_off_never_take_the_queue(default_settings, cores):
@@ -225,7 +239,7 @@ def test_main_passes_both_queues_to_dramatiq_when_the_worker_arranges(default_se
 def test_main_passes_one_queue_when_the_worker_does_not_arrange(default_settings, cores, monkeypatch):
     default_settings.worker.arrangement = True
 
-    args = run_main(monkeypatch, [(0, 1, 2 * GiB, 8 * GiB)])
+    args = run_main(monkeypatch, SMALL_GPU)
 
     assert args[args.index("--queues"):] == ["--queues", "default"]
 
@@ -233,7 +247,7 @@ def test_main_passes_one_queue_when_the_worker_does_not_arrange(default_settings
 def test_main_prints_the_warning_when_no_gpu_has_room(default_settings, cores, monkeypatch, capsys):
     default_settings.worker.arrangement = True
 
-    run_main(monkeypatch, [(0, 1, 2 * GiB, 8 * GiB)])
+    run_main(monkeypatch, SMALL_GPU)
 
     assert "Warning: WORKER_ARRANGEMENT is on" in capsys.readouterr().out
 
@@ -242,7 +256,8 @@ def test_a_gpu_plan_names_the_gpu_and_its_vram(default_settings, cores, monkeypa
     default_settings.worker.arrangement = True
     plan = launcher.plan_worker([(0, 3, 6 * GiB, 8 * GiB)], {0: "NVIDIA GeForce RTX 3060 Ti"})
 
-    assert "GPU 0 (NVIDIA GeForce RTX 3060 Ti, 8.00 GiB): 3 job(s)" in plan.summary
+    assert "GPU 0 (NVIDIA GeForce RTX 3060 Ti): up to 3 job(s), batch 3, arrangements, 8.00 GiB, 6.00 GiB free now" in \
+        plan.summary
     assert plan.hardware == {"kind": "gpu", "places": 3, "limited_by": None, "arrangements": True, "gpus": [
         {"index": 0, "name": "NVIDIA GeForce RTX 3060 Ti", "vram_mib": 8192, "free_mib": 6144, "jobs": 3,
          "arrangements": True},

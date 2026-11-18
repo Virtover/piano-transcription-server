@@ -1168,7 +1168,7 @@ def test_each_device_shows_what_its_jobs_run_on_and_how_many_at_once(api_context
 
     assert devices["hub"]["services"][0]["hardware"] == gpu
     assert "3 place(s) at once (fewer than fit in VRAM: CPU cores); transcriptions and arrangements share them" in text
-    assert "GPU 0: NVIDIA GeForce RTX 3060 Ti, 8.0 GiB VRAM, 5.7 GiB free at start, 3 job(s) fit, arrangements" in text
+    assert "GPU 0: NVIDIA GeForce RTX 3060 Ti, 8.0 GiB VRAM, 5.7 GiB free at start, up to 3 job(s), arrangements" in text
     assert "2 place(s) at once; transcriptions only" in text
     assert "CPU: Intel(R) Core(TM) i5, 4 core(s), 2 thread(s) for the models, 16.0 GiB RAM" in text
 

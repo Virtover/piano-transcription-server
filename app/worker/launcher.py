@@ -18,10 +18,11 @@ from app.transcription.device import (
     cuda_device_names,
     cuda_job_capacities,
     gpu_batch_size,
-    MEASURED_FREE_VARIABLE,
-    measured_free_text,
+    MEASURED_VARIABLE,
+    measured_text,
     physical_cpu_count,
     total_ram_bytes,
+    usable_memory,
 )
 
 MiB = 1024**2
@@ -52,8 +53,8 @@ class WorkerPlan:
     places: int | None = None
     # What the jobs run on, for the admin page and `admin.py nodes`.
     hardware: dict = field(default_factory=dict)
-    # The GPUs' free VRAM as measured here, for Dramatiq (MEASURED_FREE_VARIABLE).
-    measured_free: str = ""
+    # The GPUs' free and total VRAM as measured here, for Dramatiq (MEASURED_VARIABLE).
+    measured: str = ""
 
     def environment(self) -> dict[str, str]:
         """What Dramatiq's process needs in its environment for this plan."""
@@ -66,8 +67,8 @@ class WorkerPlan:
             # Dramatiq's default, twice the threads per queue, would hold
             # jobs here that a free device elsewhere could run.
             environment["dramatiq_queue_prefetch"] = str(self.threads)
-        if self.measured_free:
-            environment[MEASURED_FREE_VARIABLE] = self.measured_free
+        if self.measured:
+            environment[MEASURED_VARIABLE] = self.measured
         return environment
 
 
@@ -116,9 +117,10 @@ def gpu_capacity(
     parts = []
     for index, capacity, free_memory, total_memory in capacities:
         batch = f"batch {gpu_batch_size(capacity)[0]}, " if capacity > 0 else ""
-        arranges = "arrangements, " if capacity > 0 and arrangement_fits(free_memory) else ""
-        name = f" ({names[index]}, {total_memory / 1024**3:.2f} GiB)" if names.get(index) else ""
-        parts.append(f"GPU {index}{name}: {capacity} job(s), {batch}{arranges}{free_memory / 1024**3:.2f} GiB free")
+        arranges = "arrangements, " if capacity > 0 and arrangement_fits(usable_memory(total_memory)) else ""
+        name = f" ({names[index]})" if names.get(index) else ""
+        parts.append(f"GPU {index}{name}: up to {capacity} job(s), {batch}{arranges}"
+                     f"{total_memory / 1024**3:.2f} GiB, {free_memory / 1024**3:.2f} GiB free now")
     summary = ", ".join(parts)
     return len(device_capacities), total_capacity, summary
 
@@ -141,7 +143,7 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None, names: dict[
         if settings.worker.max_concurrency and settings.worker.max_concurrency < places:
             places, limited_by = settings.worker.max_concurrency, "WORKER_MAX_CONCURRENCY"
         arrangement = any(
-            capacity > 0 and arrangement_fits(free_memory) for _, capacity, free_memory, _ in capacities
+            capacity > 0 and arrangement_fits(usable_memory(total_memory)) for _, capacity, _, total_memory in capacities
         )
         if settings.worker.arrangement and not arrangement:
             warnings += ("WORKER_ARRANGEMENT is on, but no GPU has room for arrangements "
@@ -152,11 +154,12 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None, names: dict[
             # The others finish jobs past their model step (app.worker.places).
             threads=places * GPU_THREADS_PER_PLACE,
             cpu_threads=None,
-            summary=f"{device_count} GPU(s), up to {gpu_jobs} job(s) by VRAM ({gpu_summary})",
+            summary=f"{device_count} GPU(s), up to {gpu_jobs} job(s) by total VRAM, as other programs "
+                    f"leave room ({gpu_summary})",
             warnings=warnings,
             arrangement=arrangement,
             places=places,
-            measured_free=measured_free_text(capacities),
+            measured=measured_text(capacities),
             hardware={
                 "kind": "gpu",
                 "places": places,
@@ -170,8 +173,9 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None, names: dict[
                         "vram_mib": round(total_memory / MiB),
                         # At the worker's start, before it loaded its models.
                         "free_mib": round(free_memory / MiB),
+                        # The most that fit, when no other program uses the GPU.
                         "jobs": capacity,
-                        "arrangements": capacity > 0 and arrangement_fits(free_memory),
+                        "arrangements": capacity > 0 and arrangement_fits(usable_memory(total_memory)),
                     }
                     for index, capacity, free_memory, total_memory in capacities
                 ],

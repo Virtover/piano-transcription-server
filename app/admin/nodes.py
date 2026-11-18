@@ -185,7 +185,7 @@ def hardware_lines(device: dict) -> list[str]:
         for gpu in hardware.get("gpus") or []:
             name = gpu.get("name") or "name unknown"
             lines.append(f"GPU {gpu.get('index')}: {name}, {gib(gpu.get('vram_mib'))} VRAM, "
-                         f"{gib(gpu.get('free_mib'))} free at start, {gpu.get('jobs')} job(s) fit"
+                         f"{gib(gpu.get('free_mib'))} free at start, up to {gpu.get('jobs')} job(s)"
                          + (", arrangements" if gpu.get("arrangements") else ""))
     else:
         cpu = hardware.get("name") or "name unknown"

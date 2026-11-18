@@ -224,8 +224,8 @@ def test_auto_batch_size_is_per_gpu(default_settings, monkeypatch):
 
     plan = launcher.plan_worker([(0, 3, 4 * gib, 8 * gib), (1, 10, 12 * gib, 24 * gib)])
 
-    assert "GPU 0: 3 job(s), batch 3," in plan.summary
-    assert "GPU 1: 10 job(s), batch 10," in plan.summary
+    assert "GPU 0: up to 3 job(s), batch 3," in plan.summary
+    assert "GPU 1: up to 10 job(s), batch 10," in plan.summary
     assert (plan.places, plan.threads) == (13, 26)
     assert plan.warnings == ()
 

@@ -321,3 +321,229 @@ def test_the_time_limit_starts_when_the_job_has_its_place(worker, monkeypatch):
 
     assert place is not None
     assert started == [(threading.get_ident(), limit.time_limit)]
+
+
+# --- Places as memory, on a GPU that other programs share --------------------------------
+
+class Room:
+    """The room for jobs on a GPU, in GiB, as GpuRoom reads it: what other
+    programs leave; tests change it as another program takes or frees VRAM."""
+
+    def __init__(self, gib):
+        self.gib = gib
+
+    def __call__(self):
+        return self.gib
+
+
+def test_a_place_needs_room_for_its_memory_beside_the_held_ones():
+    pool = places.Places(5, room=Room(2.5))
+
+    pool.take(never, memory_gib=1.1)
+    pool.take(never, memory_gib=1.1)
+
+    # 2.2 GiB held: one more job of 1.1 does not fit in 2.5, though places are free.
+    assert pool.take(lambda: True, interval=0.01, memory_gib=1.1) is None
+    assert pool.in_use == 2 and pool.memory_gib == pytest.approx(2.2)
+    # A smaller job, as an arrangement, fits.
+    assert pool.take(never, memory_gib=0.3) is not None
+
+
+def test_a_job_waits_while_another_program_holds_the_vram_and_starts_once_it_frees_it():
+    room = Room(0.5)
+    pool = places.Places(5, room=room)
+    got = []
+    waiter = threading.Thread(target=lambda: got.append(pool.take(never, interval=0.01, memory_gib=1.1)))
+    waiter.start()
+    time.sleep(0.05)
+    assert not got and pool.waiting == 1
+
+    # The other program closes: no restart, the job takes its place.
+    room.gib = 4.0
+    waiter.join(timeout=2)
+
+    assert got and got[0] is not None and pool.in_use == 1
+
+
+def test_running_jobs_keep_their_places_when_another_program_takes_vram():
+    room = Room(4.0)
+    pool = places.Places(5, room=room)
+    held = [pool.take(never, memory_gib=1.1) for _ in range(3)]
+
+    room.gib = 1.0
+    # No new job, but the three keep running.
+    assert pool.take(lambda: True, interval=0.01, memory_gib=1.1) is None
+    assert pool.in_use == 3
+    assert pool.usable(1.1) == 3
+    for place in held:
+        place.release()
+    assert pool.memory_gib == 0.0
+
+
+def test_a_job_past_its_model_step_leaves_its_memory_to_the_next():
+    # Pipelining: a job gives its place back when its model step ends, and
+    # the next takes it while the first writes its MIDI file and uploads.
+    pool = places.Places(2, room=Room(2.2))
+    first = pool.take(never, memory_gib=1.1)
+    pool.take(never, memory_gib=1.1)
+    got = []
+    waiter = threading.Thread(target=lambda: got.append(pool.take(never, interval=5, memory_gib=1.1)))
+    waiter.start()
+    while pool.waiting < 1:
+        time.sleep(0.005)
+
+    started = time.monotonic()
+    first.release()
+    waiter.join(timeout=2)
+
+    # At once, not after a check interval.
+    assert got and got[0] is not None
+    assert time.monotonic() - started < 1
+
+
+def test_only_one_of_several_jobs_racing_for_the_last_room_takes_it():
+    pool = places.Places(10, room=Room(1.5))
+    start = threading.Barrier(8)
+    got = []
+
+    def take():
+        start.wait()
+        got.append(pool.take(lambda: True, interval=0.01, memory_gib=1.1))
+
+    threads = [threading.Thread(target=take) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert sum(place is not None for place in got) == 1
+    assert pool.memory_gib == pytest.approx(1.1)
+
+
+def test_usable_places_follow_the_room_up_to_the_capacity():
+    room = Room(10.0)
+    pool = places.Places(4, room=room)
+
+    assert pool.usable(1.1) == 4
+    room.gib = 3.0
+    assert pool.usable(1.1) == 2
+    pool.take(never, memory_gib=1.1)
+    assert pool.usable(1.1) == 2
+    room.gib = 0.0
+    assert pool.usable(1.1) == 1
+
+
+def test_a_room_that_cannot_be_read_keeps_jobs_waiting_rather_than_failing():
+    readings = iter([0.5])
+
+    def room():
+        try:
+            return next(readings)
+        except StopIteration:
+            raise RuntimeError("nvidia-smi broke")
+
+    pool = places.Places(3, room=room)
+
+    # The last reading, 0.5 GiB, stands: the job waits, and nothing raises.
+    assert pool.take(lambda: True, interval=0.01, memory_gib=1.1) is None
+
+
+def test_places_without_a_room_are_only_a_count():
+    pool = places.Places(2)
+
+    pool.take(never, memory_gib=50.0)
+    pool.take(never, memory_gib=50.0)
+
+    assert pool.usable(1.1) == 2
+
+
+def test_a_job_on_a_gpu_takes_the_memory_of_its_kind(worker, monkeypatch):
+    _, billing, _ = worker
+    pool = places.Places(3, room=Room(10.0))
+    monkeypatch.setattr(tasks, "model_places", pool)
+    queue_job(billing)
+    tasks.redis.hset(tasks.job_key("job"), "mode", tasks.ARRANGEMENT)
+
+    place, _ = tasks.wait_for_place("job")
+
+    assert place.memory_gib == tasks.settings.worker.arrangement_memory_gib
+    place.release()
+
+
+def test_a_job_on_the_cpu_takes_no_memory(worker, monkeypatch):
+    _, billing, _ = worker
+    monkeypatch.setattr(tasks, "model_places", places.Places(3))
+    queue_job(billing)
+
+    place, _ = tasks.wait_for_place("job")
+
+    assert place.memory_gib == 0.0
+    place.release()
+
+
+def test_a_device_without_room_passes_a_job_to_one_with_room(worker, monkeypatch):
+    # The owner of this device uses its GPU: places are free, VRAM is not.
+    _, billing, sent = worker
+    monkeypatch.setattr(tasks, "model_places", places.Places(4, room=Room(0.2)))
+    monkeypatch.setattr(tasks, "load_monitor", types.SimpleNamespace(current=lambda: load.Load(10.0, 500.0, True)))
+    cluster.register(tasks.redis, "desktop", cluster.TASKS)
+    tasks.routing.publish_heartbeat(tasks.redis, 2, 30.0, worker="desktop:1", node="desktop", running=0,
+                                    utilization=10.0, free_mib=200.0, gpu=True)
+    queue_job(billing)
+    install_pipeline(monkeypatch, lambda **kwargs: pytest.fail("ran here"))
+
+    tasks.transcribe_job.fn("job")
+
+    assert sent == [("job", {"delay": tasks.PASS_DELAY_MS})]
+    assert job()["status"] == "queued"
+
+
+def test_a_device_whose_heartbeat_shows_no_room_gets_no_job(worker, monkeypatch):
+    _, billing, sent = worker
+    monkeypatch.setattr(tasks, "model_places", places.Places(4, room=Room(0.2)))
+    monkeypatch.setattr(tasks, "load_monitor", types.SimpleNamespace(current=lambda: load.Load(10.0, 500.0, True)))
+    cluster.register(tasks.redis, "desktop", cluster.TASKS)
+    # Its owner uses its GPU: the places that fit now are those it runs.
+    tasks.routing.publish_heartbeat(tasks.redis, 1, 30.0, worker="desktop:1", node="desktop", running=1,
+                                    utilization=10.0, free_mib=9000.0, gpu=True)
+    queue_job(billing)
+
+    assert tasks.roomier_device(job(), "transcribe") is None
+
+
+def test_the_heartbeat_reports_the_places_that_fit_now(api_context, monkeypatch):
+    import dramatiq
+
+    room = Room(10.0)
+    monkeypatch.setenv(places.PLACES_VARIABLE, "4")
+    monkeypatch.setattr(tasks, "model_places", None)
+    monkeypatch.setattr(tasks, "load_monitor", None)
+    monkeypatch.setattr(tasks, "worker_stopping", threading.Event())
+    monkeypatch.setattr(load, "sample_gpus", lambda: None)
+    monkeypatch.setattr(tasks, "gpu_room", lambda: types.SimpleNamespace(budget_gib=room))
+    middleware = tasks.LocalWorkerHeartbeat()
+    middleware.room_check_interval = 0.02
+    middleware.after_worker_boot(tasks.broker, dramatiq.Worker(tasks.broker, queues=[tasks.LOCAL_QUEUE],
+                                                               worker_threads=8))
+
+    def capacity():
+        workers = tasks.routing.local_workers(tasks.redis)
+        return workers[0]["capacity"] if workers else None
+
+    def wait_for(expected):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and capacity() != expected:
+            time.sleep(0.01)
+        return capacity()
+
+    try:
+        assert wait_for(4) == 4
+        # Another program takes most of the VRAM: the API sees one place.
+        room.gib = 1.5
+        assert wait_for(1) == 1
+        room.gib = 0.0
+        assert wait_for(0) == 0
+        # The API then expects an endless wait here, and outsources.
+        assert tasks.routing.estimated_local_wait(tasks.redis) == float("inf")
+    finally:
+        middleware.before_worker_shutdown(tasks.broker, None)

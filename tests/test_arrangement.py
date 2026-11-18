@@ -270,10 +270,11 @@ def test_select_arrangement_device_refuses_when_no_gpu_has_room(monkeypatch):
     monkeypatch.setattr(arrangement.settings.worker, "arrangement", True)
     monkeypatch.setattr(arrangement, "select_device", lambda: "cuda:0")
     monkeypatch.setattr(piano_transcription, "_cuda_capacities", {0: 2})
-    monkeypatch.setattr(piano_transcription, "_cuda_free_memory", {0: int(1.5 * 1024**3)})
+    # A GPU of 1.75 GiB in all: too small for an arrangement beside the reserves.
+    monkeypatch.setattr(piano_transcription, "_cuda_total_memory", {0: int(1.75 * 1024**3)})
 
     with pytest.raises(arrangement.ArrangementUnavailable):
         arrangement.select_arrangement_device()
 
-    monkeypatch.setattr(piano_transcription, "_cuda_free_memory", {0: int(4 * 1024**3)})
+    monkeypatch.setattr(piano_transcription, "_cuda_total_memory", {0: int(4 * 1024**3)})
     assert arrangement.select_arrangement_device() == "cuda:0"
