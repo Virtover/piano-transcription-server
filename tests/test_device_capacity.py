@@ -215,9 +215,10 @@ class Clock:
         return self.now
 
 
-def room_budget(free_gib, reserved_gib=0.0):
-    """What GpuRoom should read: free VRAM and the worker's own memory, less the reserves."""
-    return free_gib + reserved_gib + device.OWN_CONTEXT_GIB - 1.0 - device.TEMPO_MAP_MEMORY_GIB
+def room_budget(free_gib, reserved_gib=0.0, own_gib=device.OWN_MEMORY_GIB):
+    """What GpuRoom should read: free VRAM and the worker's own memory, less
+    its context and the reserves."""
+    return free_gib + reserved_gib + own_gib - device.OWN_CONTEXT_GIB - 1.0 - device.TEMPO_MAP_MEMORY_GIB
 
 
 def test_the_room_is_what_other_programs_leave(gpus):
@@ -300,3 +301,40 @@ def test_without_any_reading_the_room_is_what_the_gpu_holds(gpus, monkeypatch):
     room = device.GpuRoom({0: 8 * GiB}, clock=Clock())
 
     assert room.budget_gib() == pytest.approx(room.most_gib())
+
+
+def test_the_workers_memory_beside_pytorchs_is_measured_once_its_models_are_loaded(gpus):
+    # 7 GiB free before the worker; its models (0.25 GiB in PyTorch) and
+    # 0.4 GiB of context and kernels leave 6.35.
+    gpus["devices"] = [("aaaa-1", int(6.35 * GiB), 8 * GiB)]
+    gpus["reserved"] = {0: int(0.25 * GiB)}
+    room = device.GpuRoom({0: 8 * GiB}, clock=Clock(), free_at_start={0: 7 * GiB})
+    before = room.budget_gib()
+
+    room.measure_own_memory()
+
+    assert room.own_memory[0] == pytest.approx(0.4 * GiB, abs=1024)
+    assert room.budget_gib() == pytest.approx(room_budget(6.35, 0.25, 0.4))
+    assert room.budget_gib() > before
+
+
+@pytest.mark.parametrize("free_now_gib, expected_gib", [
+    (7.0, device.OWN_CONTEXT_GIB),          # another program freed memory meanwhile
+    (3.0, device.OWN_CONTEXT_GIB + 1.0),    # another program took memory meanwhile
+])
+def test_the_measured_memory_is_kept_within_bounds(gpus, free_now_gib, expected_gib):
+    gpus["devices"] = [("aaaa-1", int(free_now_gib * GiB), 8 * GiB)]
+    room = device.GpuRoom({0: 8 * GiB}, clock=Clock(), free_at_start={0: 7 * GiB})
+
+    room.measure_own_memory()
+
+    assert room.own_memory[0] == pytest.approx(expected_gib * GiB)
+
+
+def test_without_the_launchers_reading_the_workers_memory_is_assumed(gpus):
+    gpus["devices"] = [("aaaa-1", 6 * GiB, 8 * GiB)]
+    room = device.GpuRoom({0: 8 * GiB}, clock=Clock())
+
+    room.measure_own_memory()
+
+    assert room.own_memory[0] == device.OWN_MEMORY_GIB * GiB

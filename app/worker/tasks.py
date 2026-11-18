@@ -736,6 +736,9 @@ worker_stopping = threading.Event()
 # Set by the heartbeat in a worker that consumes a local queue: how busy
 # this device is (app.worker.load). None elsewhere, as in the API.
 load_monitor = None
+# Set once the worker's models are loaded: the room for jobs then measures
+# the worker's own memory.
+models_loaded = threading.Event()
 
 
 def job_memory_gib(job: dict[str, str]) -> float:
@@ -1292,8 +1295,11 @@ def gpu_room():
     measurement, or None on the CPU."""
     from app.transcription.device import GpuRoom, launcher_capacities
 
-    totals = {index: total for index, capacity, _, total in launcher_capacities() or [] if capacity > 0}
-    return GpuRoom(totals) if totals else None
+    measured = [(index, free, total) for index, capacity, free, total in launcher_capacities() or [] if capacity > 0]
+    if not measured:
+        return None
+    return GpuRoom({index: total for index, _, total in measured},
+                   free_at_start={index: free for index, free, _ in measured})
 
 
 def consumes(worker, queue: str) -> bool:
@@ -1340,8 +1346,15 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
         def beat():
             published = None
             published_at = 0.0
+            measured = room is None
             while not stop.is_set():
                 changed.clear()
+                if not measured and models_loaded.is_set():
+                    measured = True
+                    try:
+                        room.measure_own_memory()
+                    except Exception:
+                        logger.exception("Could not measure the worker's own GPU memory")
                 try:
                     capacity = places.usable(job_memory)
                     running = places.in_use
@@ -1400,6 +1413,7 @@ class LocalModelPreload(dramatiq.Middleware):
                 logger.exception("Could not load the models before the first job")
                 return
             logger.info("Models loaded in %.1f s", time.monotonic() - started)
+            models_loaded.set()
 
         threading.Thread(target=preload, name="model-preload", daemon=True).start()
 

@@ -24,9 +24,12 @@ MEASURED_VARIABLE = "MODEL_GPU_MEMORY"
 # capacity is counted from its total VRAM less this, as if no other program
 # used it; the room for jobs at any moment is read live (GpuRoom).
 GPU_CONTEXT_GIB = 0.25
-# The worker's own CUDA context, which a live reading of free VRAM counts as
-# used: it is the worker's own, so it is added back (measured ~0.13 GiB).
+# The worker's own CUDA context (measured ~0.13 GiB), and that with the GPU
+# kernels it loads (~0.14 GiB more with lazy loading): memory of the worker
+# outside PyTorch's, which a live reading of free VRAM counts as used. GpuRoom
+# measures it once the models are loaded, and assumes the second until then.
 OWN_CONTEXT_GIB = 0.13
+OWN_MEMORY_GIB = 0.27
 
 # VRAM of the tempo map's beat tracker (app/transcription/tempo.py), which
 # runs on the job's GPU one job at a time. Only its weights and one 30 s
@@ -285,21 +288,34 @@ class GpuRoom:
     without a restart.
 
     The worker's own memory counts as its own: PyTorch's reserved memory and
-    the CUDA context are added back to the free memory, so running jobs and the memory PyTorch
-    keeps after a step never shut out the next job. app.worker.places then
-    subtracts what the jobs holding places will use.
+    the worker's memory beside it (its CUDA context and kernels) are added
+    back to the free memory, so running jobs and the memory PyTorch keeps
+    after a step never shut out the next job. Its context is then taken off,
+    and the reserves, as for a GPU's capacity. app.worker.places subtracts
+    what the jobs holding places will use.
 
     Readings are at most max_age seconds old; the GPUs are read by one
     caller at a time. If a reading fails, the last one is used, and without
     one the most the GPUs hold, as if no other program used them.
     """
 
-    def __init__(self, totals: dict[int, int], max_age: float = 1.0, clock=time.monotonic, config=None):
+    def __init__(
+        self,
+        totals: dict[int, int],
+        max_age: float = 1.0,
+        clock=time.monotonic,
+        config=None,
+        free_at_start: dict[int, int] | None = None,
+    ):
         # GPU index -> total bytes.
         self.totals = dict(totals)
         self.max_age = max_age
         self.clock = clock
         self.config = config
+        # GPU index -> free bytes before this process used CUDA (the launcher's).
+        self.free_at_start = dict(free_at_start or {})
+        # GPU index -> the worker's memory outside PyTorch's, in bytes.
+        self.own_memory = {index: OWN_MEMORY_GIB * 1024**3 for index in self.totals}
         self._budget: float | None = None
         self._read_at = 0.0
         self._lock = threading.Lock()
@@ -324,21 +340,52 @@ class GpuRoom:
                 self._read_at = self.clock()
             return self._budget
 
+    def measure_own_memory(self) -> None:
+        """Measure the worker's memory outside PyTorch's, once its models are
+        loaded: the free memory before the worker used CUDA, less the free
+        memory now and PyTorch's. Kept between the context alone and the
+        context with the whole model reserve, so another program that took
+        or freed memory meanwhile changes little."""
+        import torch
+
+        worker = (self.config or settings).worker
+        lowest = OWN_CONTEXT_GIB * 1024**3
+        highest = (OWN_CONTEXT_GIB + gpu_reserve_gib(worker)) * 1024**3
+        smi_free_memory = nvidia_smi_free_memory()
+        with self._lock:
+            for index in self.totals:
+                if index not in self.free_at_start:
+                    continue
+                reserved, free_memory, _ = self._reading(torch, index, smi_free_memory)
+                measured = self.free_at_start[index] - free_memory - reserved
+                self.own_memory[index] = min(highest, max(lowest, measured))
+                logger.info("GPU %s: the worker's memory beside PyTorch's is %.2f GiB (measured %.2f GiB)",
+                            index, self.own_memory[index] / 1024**3, measured / 1024**3)
+            # The next caller reads again, with it.
+            self._budget = None
+
+    @staticmethod
+    def _reading(torch, index: int, smi_free_memory: dict[str, int]) -> tuple[int, int, int]:
+        """(PyTorch's reserved bytes, free bytes, total bytes) of a GPU.
+        Reserved is read before and after the free memory, and the lower of
+        the two kept: memory PyTorch takes or gives back meanwhile then never
+        counts twice."""
+        before = torch.cuda.memory_reserved(index)
+        free_memory, total = device_free_memory(torch, index, smi_free_memory, log=False)
+        after = torch.cuda.memory_reserved(index)
+        return min(before, after), free_memory, total
+
     def _read(self) -> float:
         import torch
 
         smi_free_memory = nvidia_smi_free_memory()
         budget = 0.0
         for index, total in self.totals.items():
-            # Reserved before and after the free memory, and the lower of the
-            # two: memory PyTorch takes or gives back meanwhile then never
-            # counts twice.
-            before = torch.cuda.memory_reserved(index)
-            free_memory, _ = device_free_memory(torch, index, smi_free_memory, log=False)
-            after = torch.cuda.memory_reserved(index)
-            own = min(before, after) + OWN_CONTEXT_GIB * 1024**3
+            reserved, free_memory, _ = self._reading(torch, index, smi_free_memory)
+            # What other programs leave this worker, less its context.
+            leaves = free_memory + reserved + self.own_memory[index] - OWN_CONTEXT_GIB * 1024**3
             budget += min(
-                gpu_budget_gib(free_memory + own, self.config),
+                gpu_budget_gib(leaves, self.config),
                 gpu_budget_gib(usable_memory(total), self.config),
             )
         return budget
