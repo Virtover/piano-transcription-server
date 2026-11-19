@@ -858,3 +858,41 @@ def test_a_wrong_value_in_the_file_is_not_kept_by_enter(server):
 
     assert setup.change("WORKER_BATCH_TIMEOUT") == 0
     assert env(server).get("WORKER_BATCH_TIMEOUT") == "1m"
+
+
+# --- The menu --------------------------------------------------------------------------------
+
+def test_the_menu_keeps_a_result_on_screen_until_enter(server, monkeypatch):
+    calls = []
+    monkeypatch.setattr(online_check, "run_checks",
+                        lambda config, features=None: calls.append(1) or [Result("Redis users", "ok", "refused")])
+    setup, script = make(server, answers=["c", "", ""])
+
+    assert setup.menu() == 0
+
+    said = script.said
+    result = next(index for index, line in enumerate(said) if "The services answer as they should." in line)
+    # Enter, then the menu again: nothing printed between the result and the pause.
+    assert "Press Enter to go back to the menu" in said[result + 1]
+    assert calls == [1]
+    # The legend and the commands once, at the start, not after each choice.
+    assert script.text.count("Status         on or off") == 1
+    assert "python scripts/setup.py <name>" not in script.text
+
+
+def test_the_menu_says_what_it_did_not_understand(server):
+    setup, script = make(server, answers=["x", "99", ""])
+
+    assert setup.menu() == 0
+
+    assert "'x' is none of these." in script.text and "'99' is none of these." in script.text
+    # Asked again without drawing the features once more.
+    assert script.text.count("Optional features") == 1
+
+
+def test_a_feature_that_is_on_can_be_left_from_the_menu(server):
+    setup, script = make(server, answers=["10", "", ""])
+
+    assert setup.menu() == 0
+    assert "Piano arrangements is on." in script.text
+    assert "Press Enter to go back" not in script.text

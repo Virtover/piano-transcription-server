@@ -573,7 +573,10 @@ class Setup:
         use = feature.get(where, {}).get("use", "optional")
         return (use == "needed" and not feature["enabled"]) or (use == "unavailable" and feature["enabled"])
 
-    def status(self) -> int:
+    def status(self, legend: bool = True, commands: bool = True) -> int:
+        """The features, each with its state, and what is wrong. The menu
+        shows the legend only the first time, and its own keys instead of the
+        commands."""
         say, style = self.console.say, self.style
         report = self.report()
         if report is None and self.unreadable:
@@ -626,8 +629,7 @@ class Setup:
                     style(uses["kubernetes"][0], *uses["kubernetes"][1])))
             missing.show(self.console, " " * 6)
 
-        say("")
-        legend = [
+        explained = [
             ("Status", "on or off in server.env, which the server on this machine runs with; "
                        "ready when nothing it needs is missing"),
             ("Home cluster", "required: must be on on the hub, for its nodes too; optional: your choice; "
@@ -635,10 +637,12 @@ class Setup:
             ("On Kubernetes", "required: must be on in the cluster; optional: your choice; "
                               "not used: must be off there"),
         ]
-        for label, text in legend:
-            self.console.labelled(label.ljust(15), text, "  ", "bold")
+        if legend:
+            say("")
+            for label, text in explained:
+                self.console.labelled(label.ljust(15), text, "  ", "bold")
         for where, place in (("cluster", "in a home cluster"), ("kubernetes", "on Kubernetes")):
-            if different[where]:
+            if legend and different[where]:
                 say("")
                 say(f"  {style('*', 'bold')} Different {place} than here, and why:")
                 for feature in different[where]:
@@ -650,6 +654,8 @@ class Setup:
             self.show_problems(general)
         say("")
         self.show_cluster(features, brief=True)
+        if not commands:
+            return 0
         say("")
         for label, command in [("Set one up", "python scripts/setup.py <name>"),
                                ("Fix problems", "python scripts/setup.py fix"),
@@ -1598,37 +1604,58 @@ class Setup:
     # --- The menu ---------------------------------------------------------------------------
 
     def menu(self) -> int:
+        first = True
         while True:
-            if self.status() != 0:
+            if self.status(legend=first, commands=False) != 0:
                 if not self.console.yes("\nFix the configuration now?"):
                     return 1
                 self.fix()
+                self.pause()
                 continue
-            keys = list(self.features())
-            self.console.say("")
-            self.console.say(f"  {self.style('f', 'bold')} fixes the configuration, {self.style('c', 'bold')} tests "
-                             f"what is on, {self.style('s', 'bold')} changes any setting")
-            answer = self.console.ask("A number to set up or turn off, f, c, s, or Enter to quit: ").strip().lower()
-            if not answer:
+            first = False
+            if not self.menu_choice():
                 return 0
+
+    def menu_choice(self) -> bool:
+        """One choice of the menu, done; False to quit. The result stays on
+        screen until Enter, before the menu shows again."""
+        keys = list(self.features())
+        key_style = lambda key: self.style(key, "bold")  # noqa: E731
+        while True:
+            self.console.say("")
+            self.console.say(f"  {key_style('1')}-{key_style(str(len(keys)))} sets a feature up, tests it, or turns "
+                             f"it off; {key_style('f')} fixes the configuration; {key_style('c')} tests what is on; "
+                             f"{key_style('s')} changes any setting")
+            answer = self.console.ask("Choose, or Enter to quit: ").strip().lower()
+            if not answer:
+                return False
             if answer in ("f", "c", "s"):
                 {"f": self.fix, "c": self.check, "s": self.change}[answer]()
-                continue
-            if not answer.isdigit() or not 1 <= int(answer) <= len(keys):
-                continue
-            key = keys[int(answer) - 1]
-            if self.features()[key]["enabled"]:
-                choice = self.console.ask("It is on. Set it up again (s), test it (c), or turn it off (o)? ")
-                choice = choice.strip().lower()
+                break
+            if answer.isdigit() and 1 <= int(answer) <= len(keys):
+                key = keys[int(answer) - 1]
+                if not self.features()[key]["enabled"]:
+                    self.set_up(key)
+                    break
+                choice = self.console.ask(f"{self.features()[key]['title']} is on. Set it up again (s), test it "
+                                          "(c), turn it off (o), or Enter to go back? ").strip().lower()
+                if not choice:
+                    continue
                 if choice.startswith("o"):
                     self.turn_off(key)
-                    continue
-                if choice.startswith("c"):
+                elif choice.startswith("c"):
                     self.check(key)
+                elif choice.startswith("s"):
+                    self.set_up(key)
+                else:
                     continue
-                if not choice.startswith("s"):
-                    continue
-            self.set_up(key)
+                break
+            self.console.say(self.style(f"  {answer!r} is none of these.", "yellow"))
+        self.pause()
+        return True
+
+    def pause(self) -> None:
+        self.console.ask(self.style("\nPress Enter to go back to the menu. ", "dim"))
 
 
 def prepare(console: Console, root: Path = ROOT) -> None:
