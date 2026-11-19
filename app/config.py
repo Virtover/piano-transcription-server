@@ -1348,15 +1348,16 @@ def main(arguments: list[str]) -> int:
         result = validate_value(args.name, args.value, args.env_file or ENV_FILES)
         print(json.dumps(result) if args.json else "\n".join(result["problems"]) or "OK")
         return 0 if result["ok"] else 1
+    from app.features import FEATURES
+
+    known = [feature.key for feature in FEATURES]
+    features, unknown = select_names(args.feature, known, "feature") if args.feature else (None, [])
+    if unknown:
+        print("\n".join(unknown), file=sys.stderr)
+        return 2
     if args.json:
         from app.diagnosis import report
-        from app.features import FEATURES
 
-        known = [feature.key for feature in FEATURES]
-        features, unknown = select_names(args.feature, known, "feature") if args.feature else (None, [])
-        if unknown:
-            print("\n".join(unknown), file=sys.stderr)
-            return 2
         result = report(args.env_file or ENV_FILES, args.secrets_dir, args.online, features)
         print(json.dumps(result, indent=2, default=str))
         return 0 if result["ok"] else 1
@@ -1387,7 +1388,7 @@ def main(arguments: list[str]) -> int:
         from app.online_check import format_results, run_checks
 
         print("\nOnline checks:")
-        results = run_checks(config, args.feature) if args.feature else run_checks(config)
+        results = run_checks(config, features) if features else run_checks(config)
         print("\n".join(format_results(results)))
         if any(result.status == "fail" for result in results):
             return 1

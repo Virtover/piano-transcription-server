@@ -346,3 +346,10 @@ def test_a_session_ends_at_once_when_it_cannot_read_the_files(files, monkeypatch
 
     assert diagnosis.serve(str(files), config_module.main, ask(["features", "--json"]), answers) == 3
     assert answers.getvalue() == ""
+
+
+def test_an_unknown_feature_is_named_with_the_known_ones(files, capsys):
+    arguments = ["check", "--online", "--feature", "storage", "--env-file", str(files / "server.env")]
+
+    assert config_module.main(arguments) == 2
+    assert "unknown feature 'storage'" in capsys.readouterr().err
