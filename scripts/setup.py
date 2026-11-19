@@ -200,6 +200,11 @@ def _value_text(value) -> str | None:
     return text.split(" (", 1)[0] if isinstance(value, str) else text
 
 
+def _sentence(text: str) -> str:
+    """A message as a sentence of a question: with its end mark."""
+    return text if text.endswith((".", "?", "!")) else text + "."
+
+
 def in_sentence(title: str) -> str:
     """A title inside a sentence: "Object storage" becomes "object storage"."""
     return title[0].lower() + title[1:] if title[1:2].islower() else title
@@ -517,6 +522,8 @@ class Setup:
         [sys.executable, str(ROOT / "scripts" / "server.py"), "restart", "1m"], cwd=ROOT).returncode)
     # Set when a setup is undone after a restart ran with it.
     restart_after_undo: bool = field(default=False, init=False)
+    # Why the last check could not be read, as Docker Compose said it.
+    unreadable: str = field(default="", init=False)
 
     @property
     def secrets_dir(self) -> Path:
@@ -569,6 +576,11 @@ class Setup:
     def status(self) -> int:
         say, style = self.console.say, self.style
         report = self.report()
+        if report is None and self.unreadable:
+            say(style("The configuration cannot be read, so the server would not start:", "red", "bold"))
+            self.console.wrap(f"! {self.unreadable}", "  ", "red")
+            say(f"  Fix it: {style('python scripts/setup.py fix', 'bold')}")
+            return 1
         if report is not None and not report["loaded"]:
             say(style("The configuration cannot be read, so the server would not start:", "red", "bold"))
             self.show_problems(report["errors"])
@@ -646,7 +658,7 @@ class Setup:
                                ("Turn one off", "python scripts/setup.py off <name>"),
                                ("Home cluster", "python scripts/setup.py cluster"),
                                ("Kubernetes", "python scripts/kube.py status")]:
-            say(f"  {style(label.ljust(15), 'dim')}{command}")
+            say(f"  {style(label.ljust(18), 'dim')}{command}")
         return 0
 
     # --- A home cluster (docs/cluster.md) ----------------------------------------------------
@@ -875,7 +887,8 @@ class Setup:
             if choices and value not in choices:
                 say(style(f"  Choose one of: {', '.join(choices)}", "yellow"))
                 continue
-            problems = self.value_problems(name, value) if answer else []
+            # A value from the file may be the one that is wrong.
+            problems = self.value_problems(name, value) if answer or value == env.get(name) else []
             if problems:
                 for problem in problems:
                     self.console.wrap(f"! {problem}", "  ", "yellow")
@@ -976,6 +989,9 @@ class Setup:
         try:
             return json.loads(result.stdout)
         except ValueError:
+            # Docker Compose itself cannot read an env file, or the image is old.
+            lines = (result.stderr or "").strip().splitlines()
+            self.unreadable = host_paths(lines[-1]) if lines else ""
             return None
 
     def catalogue(self) -> dict[str, dict]:
@@ -1366,7 +1382,7 @@ class Setup:
             fix = item.get("fix") or {}
             action, name = fix.get("action"), fix.get("name")
             if action == "rename_secret":
-                if self.console.yes(f"{item['text']}. Rename it?"):
+                if self.console.yes(f"{_sentence(item['text'])} Rename it?"):
                     (self.secrets_dir / name).rename(self.secrets_dir / fix["to"])
                     say(style(f"  Renamed secrets/{name} to secrets/{fix['to']}.", "green"))
                 continue
@@ -1376,12 +1392,12 @@ class Setup:
             if source is None:
                 # From the environment Docker was started with, which no file here sets.
                 continue
-            if action == "rename" and self.console.yes(f"{item['text']} Rename {name} to {fix['to']}?"):
+            if action == "rename" and self.console.yes(f"{_sentence(item['text'])} Rename {name} to {fix['to']}?"):
                 value = fix.get("value") or source.get(name) or ""
                 source.take(name)
                 files.of(fix["to"]).set(fix["to"], value)
                 changed = True
-            elif action == "remove" and self.console.yes(f"{item['text']}. Comment it out?", default=False):
+            elif action == "remove" and self.console.yes(f"{_sentence(item['text'])} Comment it out?", default=False):
                 source.unset(name, "  # commented out by setup.py fix")
                 changed = True
         if changed:

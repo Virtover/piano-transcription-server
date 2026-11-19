@@ -837,3 +837,24 @@ def test_the_session_mounts_the_checkout_read_only(tmp_path):
     assert f"{tmp_path}:/setup:ro" in command
     assert command[-4:] == ["app.config", "session", "--root", "/setup"]
     assert options["stdin"] is subprocess.PIPE
+
+
+def test_status_says_when_docker_compose_cannot_read_the_files(server):
+    def refused(*arguments, capture=True):
+        return subprocess.CompletedProcess(arguments, 1, "", "failed to read server.env: line 3: key cannot contain a space\n")
+
+    setup, script = make(server)
+    setup.config = refused
+
+    assert setup.status() == 1
+    assert "key cannot contain a space" in script.text and "python scripts/setup.py fix" in script.text
+
+
+def test_a_wrong_value_in_the_file_is_not_kept_by_enter(server):
+    file = env(server)
+    file.set("WORKER_BATCH_TIMEOUT", "soon")
+    file.save()
+    setup, script = make(server, answers=["", "1m"])
+
+    assert setup.change("WORKER_BATCH_TIMEOUT") == 0
+    assert env(server).get("WORKER_BATCH_TIMEOUT") == "1m"
