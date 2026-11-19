@@ -38,7 +38,10 @@ STORAGE_HINTS = {
     "InvalidAccessKeyId": "The access key ID is wrong. Rewrite secrets/storage_access_key, or create a new R2 API token.",
     "SignatureDoesNotMatch": "The secret access key does not match the access key ID. Rewrite secrets/storage_secret_key.",
     "Unauthorized": "The storage keys are wrong. Rewrite both key files, or create a new R2 API token.",
-    "AccessDenied": "The token cannot write to this bucket. It needs Object Read & Write, applied to this bucket.",
+    "AccessDenied": (
+        "The token cannot write to this bucket. Check STORAGE_BUCKET: R2 also says this for a bucket the token "
+        "is not applied to. Otherwise the token needs Object Read & Write, applied to this bucket."
+    ),
     "NoSuchBucket": (
         "No bucket with this name at this endpoint. Check STORAGE_BUCKET; a bucket in the EU "
         "jurisdiction is only visible through the .eu. endpoint, and other buckets only without it."
@@ -501,7 +504,10 @@ OFFSITE_HINTS = {
     "InvalidAccessKeyId": "The access key ID is wrong. Rewrite secrets/offsite_backup_access_key.",
     "SignatureDoesNotMatch": "The secret access key does not match the access key ID. Rewrite secrets/offsite_backup_secret_key.",
     "Unauthorized": "The storage keys are wrong. Rewrite both secrets/offsite_backup_* files.",
-    "AccessDenied": "The keys cannot use this bucket. They need to list, read, write, and delete objects in it.",
+    "AccessDenied": (
+        "The keys cannot use this bucket. Check OFFSITE_BACKUP_BUCKET; otherwise they need to list, read, write, "
+        "and delete objects in it."
+    ),
     "NoSuchBucket": "No bucket with this name at this endpoint. Check OFFSITE_BACKUP_BUCKET and OFFSITE_BACKUP_ENDPOINT.",
 }
 

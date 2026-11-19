@@ -1716,6 +1716,7 @@ def _shown(value) -> str:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
+        # Ctrl+C, or the end of piped answers: a setup puts its files back.
         print("\nStopped.")
         sys.exit(130)
