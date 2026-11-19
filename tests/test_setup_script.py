@@ -896,3 +896,19 @@ def test_a_feature_that_is_on_can_be_left_from_the_menu(server):
     assert setup.menu() == 0
     assert "Piano arrangements is on." in script.text
     assert "Press Enter to go back" not in script.text
+
+
+def test_leaving_the_setting_search_goes_straight_back_to_the_menu(server):
+    setup, script = make(server, answers=["s", "", ""])
+
+    assert setup.menu() == 0
+    assert "Press Enter to go back" not in script.text
+
+
+def test_the_menu_fits_a_terminal_80_columns_wide(server):
+    setup, script = make(server, answers=[""])
+
+    setup.menu()
+
+    menu = [line for line in script.said if "changes any setting" in line or "turns it off" in line]
+    assert menu and all(len(line) <= 80 for line in menu)

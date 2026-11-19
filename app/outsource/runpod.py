@@ -12,8 +12,9 @@ from app.outsource.provider import RemoteFailed, RemoteStatus
 logger = logging.getLogger(__name__)
 
 DEFAULT_API_BASE = "https://api.runpod.ai/v2"
-# Endpoint settings (max workers) come from RunPod's management API.
-REST_API_BASE = "https://rest.runpod.io/v1"
+# Endpoint settings (max workers) come from RunPod's management API, v2: v1
+# at rest.runpod.io was retired on 2026-11-15, and its name no longer resolves.
+MANAGEMENT_API_BASE = "https://api.runpod.io/v2"
 REQUEST_TIMEOUT = 30
 
 STATES = {
@@ -119,35 +120,20 @@ class RunPodProvider:
         return RemoteStatus(state)
 
     def endpoint_settings(self) -> dict[str, Any]:
-        """The endpoint's configuration from RunPod's management API,
-        including its template (image and environment). Restricted keys
-        cannot use that API; see runpod_read_api_key."""
+        """The endpoint's configuration from RunPod's management API, with
+        its image and environment inline: v2 has no template on an
+        endpoint. Restricted keys cannot use that API; see
+        runpod_read_api_key."""
         try:
             response = self.session.request(
                 "GET",
-                f"{REST_API_BASE}/endpoints/{self.endpoint_id}",
-                params={"includeTemplate": "true"},
+                f"{MANAGEMENT_API_BASE}/serverless/{self.endpoint_id}",
                 headers=self._read_headers,
                 timeout=REQUEST_TIMEOUT,
             )
         except requests.RequestException as error:
             raise RemoteFailed(f"RunPod is unreachable ({type(error).__name__})") from error
-        endpoint = self._json(response, "endpoint settings")
-        # RunPod can leave the template out despite includeTemplate.
-        template_id = endpoint.get("templateId")
-        if not isinstance(endpoint.get("template"), dict) and template_id:
-            try:
-                response = self.session.request(
-                    "GET",
-                    f"{REST_API_BASE}/templates/{template_id}",
-                    params={"includeEndpointBoundTemplates": "true"},
-                    headers=self._read_headers,
-                    timeout=REQUEST_TIMEOUT,
-                )
-                endpoint["template"] = self._json(response, "template settings")
-            except (requests.RequestException, RemoteFailed) as error:
-                logger.warning("Could not read the RunPod endpoint's template: %s", error)
-        return endpoint
+        return self._json(response, "endpoint settings")
 
     def max_workers(self) -> int | None:
         """The endpoint's max workers setting, read from RunPod's management
@@ -158,7 +144,7 @@ class RunPodProvider:
         try:
             response = self.session.request(
                 "GET",
-                f"{REST_API_BASE}/endpoints/{self.endpoint_id}",
+                f"{MANAGEMENT_API_BASE}/serverless/{self.endpoint_id}",
                 headers=self._read_headers,
                 timeout=REQUEST_TIMEOUT,
             )
@@ -174,9 +160,9 @@ class RunPodProvider:
             )
             return None
         try:
-            workers = int(response.json()["workersMax"])
+            workers = int(response.json()["workers"]["max"])
         except (ValueError, KeyError, TypeError):
-            logger.warning("The RunPod endpoint settings have no workersMax")
+            logger.warning("The RunPod endpoint settings have no workers.max")
             return None
         return workers if workers > 0 else None
 

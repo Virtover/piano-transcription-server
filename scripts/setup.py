@@ -1412,7 +1412,7 @@ class Setup:
 
     # --- python scripts/setup.py set [NAME] -------------------------------------------------
 
-    def change(self, name: str | None = None) -> int:
+    def change(self, name: str | None = None) -> int | None:
         """Change any one setting or secret file, or a Kubernetes cluster's
         choice, checked as the server reads it."""
         say, style = self.console.say, self.style
@@ -1423,7 +1423,7 @@ class Setup:
             self.console.heading("== Change a setting ==")
             name = self.choose(catalogue, choices)
             if name is None:
-                return 0
+                return None
         else:
             match = next((known for known in names if known.lower() == name.lower()), None)
             if match is None:
@@ -1623,14 +1623,17 @@ class Setup:
         key_style = lambda key: self.style(key, "bold")  # noqa: E731
         while True:
             self.console.say("")
-            self.console.say(f"  {key_style('1')}-{key_style(str(len(keys)))} sets a feature up, tests it, or turns "
-                             f"it off; {key_style('f')} fixes the configuration; {key_style('c')} tests what is on; "
+            self.console.say(f"  {key_style(f'1-{len(keys)}')}  sets a feature up, tests it, or turns it off")
+            self.console.say(f"  {key_style('f')} fixes the configuration, {key_style('c')} tests what is on, "
                              f"{key_style('s')} changes any setting")
             answer = self.console.ask("Choose, or Enter to quit: ").strip().lower()
             if not answer:
                 return False
             if answer in ("f", "c", "s"):
-                {"f": self.fix, "c": self.check, "s": self.change}[answer]()
+                done = {"f": self.fix, "c": self.check, "s": self.change}[answer]()
+                if done is None:
+                    # Nothing chosen: straight back, nothing to read.
+                    continue
                 break
             if answer.isdigit() and 1 <= int(answer) <= len(keys):
                 key = keys[int(answer) - 1]
@@ -1723,7 +1726,7 @@ def run_command(setup: Setup, args, parser) -> int:
     if args.command == "check":
         return setup.check(args.feature)
     if args.command == "set":
-        return setup.change(args.feature)
+        return setup.change(args.feature) or 0
     if args.command == "off":
         if not args.feature:
             parser.error("off needs the feature to turn off")

@@ -163,19 +163,19 @@ class Session:
         return self.response
 
 
-def test_runpod_max_workers_from_rest_api():
-    session = Session(Response(200, {"id": "endpoint-1", "workersMax": 3, "workersMin": 0}))
+def test_runpod_max_workers_from_the_management_api():
+    session = Session(Response(200, {"id": "endpoint-1", "workers": {"max": 3, "min": 0}}))
     provider = RunPodProvider("https://api.runpod.ai/v2", "endpoint-1", "rp-key", session=session)
 
     assert provider.max_workers() == 3
     method, url, kwargs = session.calls[0]
-    assert (method, url) == ("GET", "https://rest.runpod.io/v1/endpoints/endpoint-1")
+    assert (method, url) == ("GET", "https://api.runpod.io/v2/serverless/endpoint-1")
     assert kwargs["headers"] == {"Authorization": "Bearer rp-key"}
 
 
 @pytest.mark.parametrize(
     "response",
-    [Response(403), Response(200, None), Response(200, {"workersMax": 0}), Response(200, {}), requests.ConnectionError("down")],
+    [Response(403), Response(200, None), Response(200, {"workers": {"max": 0}}), Response(200, {}), Response(200, {"workersMax": 3}), requests.ConnectionError("down")],
 )
 def test_runpod_max_workers_unknown(response, caplog):
     provider = RunPodProvider("https://api.runpod.ai/v2", "endpoint-1", "rp-key", session=Session(response))

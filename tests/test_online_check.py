@@ -200,16 +200,15 @@ def test_failed_delete_is_reported():
 
 # --- RunPod -----------------------------------------------------------------
 
+# RunPod's v2 endpoint object, as GET /v2/serverless/{id} answers it.
 GOOD_SETTINGS = {
-    "template": {"imageName": "user/piano-transcription-runpod:4", "env": {}},
+    "image": "user/piano-transcription-runpod:4",
     "env": {"STORAGE_ENDPOINT": "https://storage.example"},
-    "minCudaVersion": "12.8",
-    "executionTimeoutMs": 20 * 60_000,
-    "workersMin": 0,
-    "workersMax": 2,
-    "scalerType": "REQUEST_COUNT",
-    "scalerValue": 12,
-    "idleTimeout": 5,
+    "gpu": {"minCudaVersion": "12.8", "allowedCudaVersions": [], "count": 1, "pools": ["AMPERE_16"]},
+    "timeout": 20 * 60_000,
+    "workers": {"min": 0, "max": 2, "idleTimeout": 5},
+    "scaling": {"type": "REQUEST_COUNT", "requestCount": 12},
+    "flashboot": "FLASHBOOT",
 }
 
 
@@ -220,8 +219,18 @@ def outsourcing(default_settings):
     return default_settings
 
 
+def merged(base: dict, changes: dict) -> dict:
+    """base with changes, nested objects changed field by field; env, the
+    endpoint's variables, as a whole."""
+    result = dict(base)
+    for key, value in changes.items():
+        nested = isinstance(value, dict) and isinstance(base.get(key), dict) and key != "env"
+        result[key] = merged(base[key], value) if nested else value
+    return result
+
+
 def endpoint_check(config, **changes):
-    settings = {**GOOD_SETTINGS, **changes}
+    settings = merged(GOOD_SETTINGS, changes)
     provider = runpod(HttpResponse(payload={"workers": {"idle": 1}}), HttpResponse(payload=settings))
     return check_runpod(config, lambda config: provider)
 
@@ -234,7 +243,8 @@ def test_runpod_health_and_matching_settings(outsourcing):
     assert "user/piano-transcription-runpod:4" in results[1].detail
 
 
-def test_endpoint_settings_are_read_with_the_template(outsourcing):
+def test_endpoint_settings_are_read_from_the_v2_management_api(outsourcing):
+    """v1 at rest.runpod.io was retired on 2026-11-15."""
     session = Session(HttpResponse(payload={"workers": {}}), HttpResponse(payload=GOOD_SETTINGS))
     calls = []
     original = session.request
@@ -243,38 +253,15 @@ def test_endpoint_settings_are_read_with_the_template(outsourcing):
 
     check_runpod(outsourcing, lambda config: provider)
 
-    assert calls[1] == ("https://rest.runpod.io/v1/endpoints/endpoint-1", {"includeTemplate": "true"})
+    assert calls[1] == ("https://api.runpod.io/v2/serverless/endpoint-1", None)
 
 
-def without_template(**changes):
-    settings = {key: value for key, value in GOOD_SETTINGS.items() if key not in ("template", "env")}
-    return {**settings, "templateId": "template-1", **changes}
-
-
-def test_a_template_left_out_is_read_by_its_id(outsourcing):
-    template = {"imageName": "user/piano-transcription-runpod:4", "env": {"STORAGE_ENDPOINT": "https://storage.example"}}
-    session = Session(
-        HttpResponse(payload={"workers": {}}),
-        HttpResponse(payload=without_template()),
-        HttpResponse(payload=template),
-    )
-    calls = []
-    original = session.request
-    session.request = lambda method, url, **kwargs: calls.append(url) or original(method, url, **kwargs)
-    provider = RunPodProvider("https://api.runpod.ai/v2", "endpoint-1", "key", session=session)
-
-    results = check_runpod(outsourcing, lambda config: provider)
-
-    assert calls[2] == "https://rest.runpod.io/v1/templates/template-1"
-    assert all(result.status == "ok" for result in results)
+def without_env(**changes):
+    return {**{key: value for key, value in GOOD_SETTINGS.items() if key != "env"}, **changes}
 
 
 def test_environment_variables_runpod_does_not_report_are_not_called_missing(outsourcing):
-    provider = runpod(
-        HttpResponse(payload={"workers": {}}),
-        HttpResponse(payload=without_template()),
-        HttpResponse(404),
-    )
+    provider = runpod(HttpResponse(payload={"workers": {}}), HttpResponse(payload=without_env()))
 
     results = check_runpod(outsourcing, lambda config: provider)
 
@@ -300,13 +287,13 @@ def test_runpod_errors_explain_the_fix(default_settings, status, hint):
         ({"env": {"OUTSOURCE_STORAGE_ENDPOINT": "https://other.example"}}, "fail", "OUTSOURCE_STORAGE_ENDPOINT on the endpoint differs"),
         ({"env": {"STORAGE_ENDPOINT": "https://storage.example", "OUTSOURCE_STORAGE_ENDPOINT": "https://storage.example"}},
          "fail", "both"),
-        ({"minCudaVersion": None, "allowedCudaVersions": []}, "warn", "older than 12.8"),
-        ({"minCudaVersion": None, "allowedCudaVersions": ["12.6", "12.8"]}, "warn", "older than 12.8"),
-        ({"executionTimeoutMs": 10 * 60_000}, "warn", "needs at least 20 min"),
-        ({"workersMin": 1}, "warn", "always on"),
-        ({"workersMax": 0}, "warn", "fewer than OUTSOURCE_MAX_CONCURRENCY"),
-        ({"scalerType": "QUEUE_DELAY"}, "warn", "queue delay"),
-        ({"idleTimeout": 120}, "warn", "idle timeout 120 s"),
+        ({"gpu": {"minCudaVersion": None, "allowedCudaVersions": []}}, "warn", "older than 12.8"),
+        ({"gpu": {"minCudaVersion": None, "allowedCudaVersions": ["12.6", "12.8"]}}, "warn", "older than 12.8"),
+        ({"timeout": 10 * 60_000}, "warn", "needs at least 20 min"),
+        ({"workers": {"min": 1}}, "warn", "always on"),
+        ({"workers": {"max": 0}}, "warn", "fewer than OUTSOURCE_MAX_CONCURRENCY"),
+        ({"scaling": {"type": "QUEUE_DELAY", "queueDelay": 4}}, "warn", "queue delay"),
+        ({"workers": {"idleTimeout": 120}}, "warn", "idle timeout 120 s"),
     ],
 )
 def test_endpoint_settings_mismatches(outsourcing, changes, status, text):
@@ -325,7 +312,7 @@ def test_an_endpoint_with_the_deprecated_storage_name_passes(outsourcing):
 
 
 def test_new_cuda_versions_only_are_accepted(outsourcing):
-    results = endpoint_check(outsourcing, minCudaVersion=None, allowedCudaVersions=["12.8", "12.9", "13.0"])
+    results = endpoint_check(outsourcing, gpu={"minCudaVersion": None, "allowedCudaVersions": ["12.8", "12.9", "13.0"]})
 
     assert all(result.status == "ok" for result in results)
 
@@ -341,7 +328,7 @@ def test_execution_timeout_requirement_follows_outsource_timeout(outsourcing):
 def test_auto_concurrency_reports_max_workers(outsourcing):
     outsourcing.outsource.max_concurrency = None
 
-    results = endpoint_check(outsourcing, workersMax=3)
+    results = endpoint_check(outsourcing, workers={"max": 3})
 
     assert any(result.detail == "max workers 3 (OUTSOURCE_MAX_CONCURRENCY=auto)" for result in results)
 
@@ -474,7 +461,7 @@ def test_read_key_is_used_only_for_the_management_api(outsourcing):
     check_runpod(outsourcing, lambda config: provider)
 
     assert calls[0] == ("https://api.runpod.ai/v2/endpoint-1/health", {"Authorization": "Bearer run-key"})
-    assert calls[1] == ("https://rest.runpod.io/v1/endpoints/endpoint-1", {"Authorization": "Bearer read-key"})
+    assert calls[1] == ("https://api.runpod.io/v2/serverless/endpoint-1", {"Authorization": "Bearer read-key"})
 
 
 def test_without_read_key_the_main_key_reads_settings():
@@ -554,3 +541,21 @@ def test_google_play_warns_about_subscriptions_without_their_base_plan(settings)
     assert warned.status == "warn" and "sub_pro" in warned.detail
     missing = check_google_play(settings, lambda config: WithSubscriptions(products, []))
     assert missing.status == "warn" and "sub_pro" in missing.detail
+
+
+def test_a_management_api_that_does_not_answer_is_not_blamed_on_the_key(outsourcing):
+    import requests as http
+
+    class Unreachable(Session):
+        def request(self, method, url, **kwargs):
+            if "api.runpod.io" in url:
+                raise http.ConnectionError("no such host")
+            return super().request(method, url, **kwargs)
+
+    provider = RunPodProvider("https://api.runpod.ai/v2", "endpoint-1", "key", session=Unreachable(
+        HttpResponse(payload={"workers": {}})), read_api_key="read-key")
+
+    results = check_runpod(outsourcing, lambda config: provider)
+
+    assert results[1].status == "warn" and "did not answer" in results[1].hint
+    assert "rejected" not in results[1].hint

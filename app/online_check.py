@@ -176,7 +176,11 @@ def check_endpoint_settings(config, provider) -> list[Result]:
     try:
         endpoint = provider.endpoint_settings()
     except RemoteFailed as error:
-        if provider.has_read_key:
+        if "unreachable" in str(error):
+            # No answer at all: the key was never asked about.
+            hint = ("RunPod's management API did not answer from this server: check its connection to the "
+                    "internet, then test again. Jobs use another address, which the RunPod line above tested.")
+        elif provider.has_read_key:
             hint = (
                 "The key in secrets/runpod_read_api_key was rejected. It needs read access to the "
                 "account (permission Read Only), not only to the endpoint."
@@ -190,19 +194,20 @@ def check_endpoint_settings(config, provider) -> list[Result]:
         return [Result(name, "warn", f"cannot read the endpoint's settings: {error}", hint)]
 
     results = []
-    template = endpoint.get("template") or {}
-    image = template.get("imageName")
+    # RunPod's v2 endpoint object: image and env inline, workers, gpu, and
+    # scaling nested, the timeout in milliseconds.
+    image = endpoint.get("image")
     results.append(
         Result(name, "ok", f"image {image}")
         if image
         else Result(name, "warn", "the endpoint reports no image", "Check the endpoint's container image.")
     )
 
-    env = {**(template.get("env") or {}), **(endpoint.get("env") or {})}
+    env = endpoint.get("env") or {}
     expected = config.storage.endpoint
     # The handler also reads the deprecated name, which older endpoints have.
     names = [name for name in ("STORAGE_ENDPOINT", "OUTSOURCE_STORAGE_ENDPOINT") if name in env]
-    if "env" not in endpoint and "env" not in template:
+    if not isinstance(endpoint.get("env"), dict):
         results.append(
             Result(
                 name,
@@ -235,8 +240,9 @@ def check_endpoint_settings(config, provider) -> list[Result]:
         )
 
     minimum = _version(RUNPOD_CUDA_VERSION)
-    allowed = endpoint.get("allowedCudaVersions") or []
-    min_cuda = endpoint.get("minCudaVersion")
+    gpu = endpoint.get("gpu") or {}
+    allowed = gpu.get("allowedCudaVersions") or []
+    min_cuda = gpu.get("minCudaVersion")
     if not ((min_cuda and _version(min_cuda) >= minimum) or (allowed and all(_version(v) >= minimum for v in allowed))):
         results.append(
             Result(
@@ -247,7 +253,7 @@ def check_endpoint_settings(config, provider) -> list[Result]:
             )
         )
 
-    timeout_ms = endpoint.get("executionTimeoutMs")
+    timeout_ms = endpoint.get("timeout")
     required_minutes = execution_timeout_minutes(config)
     if not timeout_ms or timeout_ms < required_minutes * 60_000:
         shown = f"{timeout_ms / 60_000:g} min" if timeout_ms else "not set"
@@ -260,16 +266,17 @@ def check_endpoint_settings(config, provider) -> list[Result]:
             )
         )
 
-    if (endpoint.get("workersMin") or 0) > 0:
+    workers = endpoint.get("workers") or {}
+    if (workers.get("min") or 0) > 0:
         results.append(
             Result(
                 name,
                 "warn",
-                f"{endpoint['workersMin']} workers always on",
+                f"{workers['min']} workers always on",
                 "Always-on workers are billed while idle. Use 0 unless cold starts are unacceptable.",
             )
         )
-    workers_max = endpoint.get("workersMax") or 0
+    workers_max = workers.get("max") or 0
     per_worker = max(1, jobs_per_gpu(16, config))
     if config.outsource.max_concurrency and workers_max * per_worker < config.outsource.max_concurrency:
         results.append(
@@ -284,17 +291,19 @@ def check_endpoint_settings(config, provider) -> list[Result]:
     elif config.outsource.max_concurrency is None:
         results.append(Result(name, "ok", f"max workers {workers_max} (OUTSOURCE_MAX_CONCURRENCY=auto)"))
 
-    if endpoint.get("scalerType") != "REQUEST_COUNT":
+    scaling = (endpoint.get("scaling") or {}).get("type")
+    if scaling != "REQUEST_COUNT":
         results.append(
             Result(
                 name,
                 "warn",
-                f"scaling by {str(endpoint.get('scalerType') or 'unknown').lower().replace('_', ' ')}",
+                f"scaling by {str(scaling or 'unknown').lower().replace('_', ' ')}",
                 f"Scale by request count, about {per_worker} per worker: each worker batches that many requests.",
             )
         )
 
-    idle = endpoint.get("idleTimeout")
+    # Only queue-delay scaling has one in v2; request count scales workers down itself.
+    idle = workers.get("idleTimeout")
     if idle and idle > 6 * IDLE_TIMEOUT_SECONDS:
         results.append(
             Result(
