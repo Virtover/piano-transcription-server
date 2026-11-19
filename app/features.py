@@ -70,6 +70,8 @@ class Feature:
     serves: tuple[str, ...] = ()
     # The secret file whose presence turns it on, for features without a setting.
     switch_secret: str | None = None
+    # Whether check --online tests its services (app/online_check.py).
+    online: bool = False
     # On Kubernetes: needed, optional, or unavailable, and why; and when a
     # need applies, if not always.
     kubernetes: tuple[str, str] = ("optional", "")
@@ -178,6 +180,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="tunnel",
+        online=True,
         kubernetes=('needed', 'cloudflared runs there, with the token in its own Secret'),
         # Not on the test cluster on a PC, which runs no tunnel.
         kubernetes_applies=lambda config: config.tunnel.deployed is not False,
@@ -202,6 +205,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="admin_web",
+        online=True,
         kubernetes=('optional', 'its component in deploy/kubernetes/kustomization.yaml'),
         title="Admin web page",
         summary="The admin commands as a web page, on a hostname of its own behind Cloudflare Access.",
@@ -222,6 +226,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="billing",
+        online=True,
         title="Billing with Google Play and Google sign-in",
         summary="Users sign in with Google and buy transcription minutes in the Android app.",
         switch="BILLING_PROVIDER=google_play",
@@ -241,6 +246,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="provider_backups",
+        online=True,
         kubernetes=('needed', 'set by deploy/kubernetes/base/wiring.yaml: no folder outlives a pod'),
         # A test cluster's own database has no provider; the API backs it up.
         kubernetes_applies=lambda config: app_config.runs_elsewhere(app_config.effective_database_url(config)),
@@ -257,6 +263,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="offsite",
+        online=True,
         kubernetes=('unavailable', "it copies the server's backups, which Kubernetes leaves to the provider"),
         title="Off-site backups",
         summary="Encrypted copies of the server's billing backups in a bucket away from this machine.",
@@ -278,6 +285,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="object_storage",
+        online=True,
         kubernetes=('needed', 'job files in object storage need it'),
         cluster=('optional', "with JOB_STORAGE=local, job files are in the hub's own bucket"),
         title="Object storage",
@@ -296,6 +304,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="job_storage",
+        online=True,
         kubernetes=('needed', 'set by deploy/kubernetes/base/wiring.yaml: several machines share no folder'),
         cluster=('optional', "JOB_STORAGE=local keeps job files in the hub's own bucket, which nodes reach"),
         title="Job files in object storage",
@@ -312,6 +321,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="outsourcing",
+        online=True,
         cluster=('optional', 'nodes allowed the dispatch task send jobs to RunPod too'),
         title="Outsourcing to RunPod",
         summary="Jobs run on RunPod Serverless GPUs when the local GPU is busy.",
@@ -346,6 +356,7 @@ FEATURES: tuple[Feature, ...] = (
     ),
     Feature(
         key="error_reports",
+        online=True,
         title="Error reports",
         summary="Errors of the API and workers go to a website's error monitor, with secrets removed.",
         switch="ERROR_REPORT_URL",
@@ -537,6 +548,7 @@ def describe_features(config: Settings) -> list[dict]:
             "problems": feature_problems(feature, config, "all"),
             "docs": feature.docs,
             "requirement_sections": list(feature.requirement_sections),
+            "online": feature.online,
             "kubernetes": {"use": feature.kubernetes[0], "why": feature.kubernetes[1]},
             "cluster": {"use": feature.cluster[0], "why": feature.cluster[1]},
         })

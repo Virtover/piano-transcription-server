@@ -31,6 +31,8 @@ REDIS_CLI = (
 REDIS_REFUSALS = ("NOAUTH", "WRONGPASS", "NOPERM", "AUTH failed", "ERR ")
 PG_RESTORE = ["pg_restore", "-U", "billing", "-d", "billing", "--clean", "--if-exists", "--no-owner",
               "--single-transaction", "--exit-on-error"]
+# Where a configuration session sees the checkout (app/diagnosis.py).
+SESSION_ROOT = "/setup"
 READY_PROBE = "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=5)"
 
 
@@ -85,6 +87,12 @@ class Stack:
     def prepare_files(self) -> list[str]:
         """Create what must exist before anything starts; say what was created."""
         return []
+
+    def config_session(self, stderr=None) -> subprocess.Popen:
+        """python -m app.config session: one container of the API's image
+        that answers configuration commands on standard input, reading this
+        checkout's env files as they change (app/diagnosis.py)."""
+        raise NotImplementedError
 
     def start_build(self):
         raise NotImplementedError
@@ -204,6 +212,15 @@ class ComposeStack(Stack):
 
     def prepare_files(self) -> list[str]:
         return self._prepare(self.root) if self._prepare else []
+
+    def config_session(self, stderr=None):
+        # The folder, not the files: a save replaces a file, which a mount
+        # of the file alone would not show.
+        return self._popen(
+            self.compose() + ["run", "--rm", "--no-deps", "-T", "-v", f"{self.root}:{SESSION_ROOT}:ro", "api",
+                              "python", "-m", "app.config", "session", "--root", SESSION_ROOT],
+            cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr or subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace")
 
     def build(self, *services: str, quiet: bool = False) -> int:
         return self.docker(self.compose() + ["build", *(["--quiet"] if quiet else []), *services]).returncode

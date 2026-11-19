@@ -60,21 +60,38 @@ The stack runs as above with every optional feature off: no sign-in, no billing,
 ```shell
 python scripts/setup.py                   # what is on, then a menu
 python scripts/setup.py status            # what is on and what is missing
-python scripts/setup.py outsourcing       # set one feature up
+python scripts/setup.py outsourcing       # set one feature up, test it, and fix what fails
+python scripts/setup.py check [feature]   # test what is on with the real services, and fix what fails
+python scripts/setup.py fix               # repair the env files, the secret files, and the settings
+python scripts/setup.py set [NAME]        # change any one setting or secret file
 python scripts/setup.py off outsourcing   # turn one off
 ```
+
+None of it needs a file edited by hand.
 
 For a feature, it:
 
 1. **sets up what it needs first**, such as object storage for outsourcing, and offers to turn off what it cannot be on with;
 2. **lists what external services must provide**, from `python -m app.config requirements`, as what is needed and why. Where each is set at a provider changes, so look it up in the provider's current documentation, or give the list to an AI agent;
-3. **asks for the settings** with their descriptions from [Configuration](configuration.md), and writes them into `.env`, where `.env.example` has them, keeping the comments;
-4. **asks for the secrets** without showing them, or generates a random one where any value works, and writes them to `secrets`;
-5. **checks the result** with the server's own validation, and offers `check --online` for the external services.
+3. **asks for the settings** with their descriptions from [Configuration](configuration.md), checks each value as the server will read it, asking again for one it would refuse, and writes them into `server.env` or `.env`, where the example files have them, keeping the comments;
+4. **asks for the secrets** without showing them, or generates a random one where any value works, and writes them to `secrets`, without the byte order mark or line ends some editors and shells add; a downloaded JSON key must be valid JSON;
+5. **checks the result** with the server's own validation, and asks again for what each problem names;
+6. **tests the external services** with the real settings and secrets, as `check --online` does, such as uploading to the bucket and downloading through a signed link. When a test fails, it shows the likely fix and asks again for what that names, such as `secrets/storage_access_key`; or tests again after a change at the provider; or keeps the setup as it is; or undoes it. The tunnel and the admin page are tested once the server runs with them, after an announced restart it offers;
+7. **offers to apply it** with an announced restart, when the server runs.
 
 A setup that does not finish, because something is still missing or because you stop it with Ctrl+C, puts `server.env` and `.env` back as they were: a feature that was off is off again, and one you were changing keeps its previous settings. The secret files you gave stay for the next try, except one whose presence alone turns the feature on, such as `server_password`. What it set up first because the feature needs it, such as object storage for outsourcing, stays set up.
 
-Apply the changes with `python scripts/server.py restart 1m`, or `start` when the stack is stopped: settings and secrets are read when the services start. The script needs only Python 3 and the docker CLI. It asks the server itself what the features are, after bringing the API image up to the code, which takes seconds when nothing changed, so it changes with the code. `status` also says, for each feature, whether Kubernetes needs it, can use it, or cannot run it; see [Kubernetes](kubernetes.md). It names what each feature that is on still misses: a secret file by its place in `secrets`, a setting by its name in `server.env`, or another problem. In a terminal it shows them in color; `NO_COLOR=1` turns colors off.
+`check` tests a feature that is already on, or every one, the same way, and asks again for what fails. `set` changes any one setting or secret file, found by part of its name or a word of what it does, checked the same way, and undoes the change if the server would not start with it; with Kubernetes, it also changes the cluster's own choices in `deploy/kubernetes/cluster.env`, checked as `scripts/kube.py` checks them. The passwords that `scripts/server.py start` creates, and the hub bucket's keys, are not offered: scripts write them.
+
+`fix` repairs what keeps the configuration from being read or the server from starting:
+
+* in `server.env` and `.env`: a byte order mark before the first setting, lines that are no setting, settings written twice (the earlier lines are commented out, so what applies does not change), a setting name with a typo, a deprecated name, which it renames with its value converted, and a setting in the wrong one of the two files;
+* in `secrets`: a folder where a file belongs, as Docker creates for a missing file; a file in UTF-16, as Windows PowerShell's `>` writes it, or with a byte order mark, Windows line ends, or spaces around the value; a file the services cannot read; one named almost as one the server reads, such as `storage_access_key.txt`; one under an old name; and a secret file git keeps;
+* every other error, by asking again for the settings and secret files it names.
+
+Then it offers to test every feature that is on. Secret values are never shown. `status` says when the configuration cannot be read at all, and the menu offers `fix` then.
+
+Apply the changes with `python scripts/server.py restart 1m`, or `start` when the stack is stopped: settings and secrets are read when the services start. The questions go to one container of the API's image, which reads `.env`, `server.env`, and `secrets` from this folder as they change, so each answer takes a fraction of a second; with an image from before it, each question starts a container of its own. The script needs only Python 3 and the docker CLI. It asks the server itself what the features are, after bringing the API image up to the code, which takes seconds when nothing changed, so it changes with the code. `status` also says, for each feature, whether Kubernetes needs it, can use it, or cannot run it; see [Kubernetes](kubernetes.md). It names what each feature that is on still misses: a secret file by its place in `secrets`, a setting by its name in `server.env`, or another problem. In a terminal it shows them in color; `NO_COLOR=1` turns colors off.
 
 ## 🔒 Password protection
 

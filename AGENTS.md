@@ -11,7 +11,9 @@ docker compose run --rm api python -m app.config check --online  # also test sto
 docker compose run --rm api python -m app.config requirements    # what external services must provide; --json for agents, --feature/--section for only part
 .\.venv\Scripts\python -m app.config describe OUTSOURCE_TIMEOUT  # one setting or secret: file, value, default, docs line, features; host only
 docker compose run --rm api python -m app.config features --json # the optional features: on or off, what each needs, what is missing
-python scripts/setup.py status                                  # the same for people; python scripts/setup.py <feature> sets one up
+python scripts/setup.py status                                  # the same for people; python scripts/setup.py <feature> sets one up and tests it
+python scripts/setup.py fix                                     # repair env files, secret files, and settings; also check [feature], set [NAME]
+docker compose run --rm api python -m app.config check --json   # each problem with the settings and secrets it names; validate NAME VALUE checks one value
 docker compose up -d --build                                     # the stack; OUTSOURCE_PROVIDER in server.env switches RunPod on
 python scripts/server.py restart 5m                              # announced restart; also: stop 10m, start (also first start), status, cancel
 python scripts/server.py restore 2                               # billing database from a backup: latest, a name, or Nth newest; --from local, --fallback
@@ -55,7 +57,8 @@ python scripts/kube.py restart 5m                               # server.py's an
 | `app/admin/`, `app/controls.py`, `scripts/admin.py` | `python -m app.admin`: status, jobs, users, the billing report, and temporary limits the API reads from Redis; the host script runs it in the API container |
 | `deploy/kubernetes/` | The Kubernetes deployment: `base/`, the real cluster's overlay, and `local/`, a test cluster on this PC; `tests/test_kubernetes.py` keeps it in step with `docker-compose.yml`. Tested only on the local cluster, never yet on real infrastructure |
 | `scripts/kube.py` | Kubernetes from the host: up, update, status, down, for a real cluster and, with `local`, the test cluster; `config` writes the component from `cluster.env` |
-| `scripts/setup.py` | Guided setup of the optional features on the host, from `features --json` and `requirements --json` |
+| `scripts/setup.py` | Guided setup of the optional features on the host, from `features --json` and `requirements --json`; tests them, repairs the files (`fix`), and changes any setting (`set`) |
+| `app/diagnosis.py` | `check --json`, `validate`, and `session`: problems with the names they concern, for `scripts/setup.py`, answered by one container that reads the checkout's files as they change |
 | `app/maintenance.py`, `scripts/server.py` | Planned restarts and shutdowns: the notice clients see, and the host script that drives them |
 | `scripts/stacks.py` | Where the server runs, for the host scripts: requests built on a few primitives, `ComposeStack` gives them with the docker CLI and `KubeStack` (in `scripts/kube.py`) with kubectl. A change to server.py or admin.py reaches both |
 

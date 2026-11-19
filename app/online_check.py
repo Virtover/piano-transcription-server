@@ -7,7 +7,9 @@ print secrets, presigned URLs, or raw provider responses.
 
 import re
 import uuid
-from dataclasses import dataclass
+from collections.abc import Collection
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Callable, Literal
 
 import requests
@@ -25,6 +27,9 @@ class Result:
     status: Status
     detail: str
     hint: str | None = None
+    # The feature of app/features.py it checks; None for the server's own
+    # services, such as Redis. run_checks fills it in.
+    feature: str | None = None
 
 
 # --- Storage ----------------------------------------------------------------
@@ -731,41 +736,103 @@ def check_job_storage(config, storage_factory: Callable | None = None) -> Result
     return Result("Job storage", "ok", f"listing and metadata work under {PREFIX} in bucket {storage.bucket}")
 
 
+# --- Database ---------------------------------------------------------------
+
+DATABASE_HINT = (
+    "Check the URL in secrets/database_url (or DATABASE_URL), and that the provider accepts connections "
+    "from this machine's address."
+)
+
+
+def check_database(config, connect: Callable | None = None) -> Result:
+    """Sign in to a managed billing database as the API does, and see that
+    the connection is encrypted. The error's type only: its text can hold the
+    URL, and with it the password."""
+    from urllib.parse import quote, urlsplit, urlunsplit
+
+    from app.config import effective_database_url
+
+    url = effective_database_url(config)
+    parts = urlsplit(url)
+    password_file = Path(config.secrets_dir) / "postgres_password"
+    if parts.password is None and password_file.is_file():
+        # As app.billing does: Compose keeps the password out of the URL.
+        password = quote(password_file.read_text(encoding="utf-8").strip(), safe="")
+        netloc = f"{parts.username}:{password}@{parts.hostname}" + (f":{parts.port}" if parts.port else "")
+        url = urlunsplit(parts._replace(netloc=netloc))
+    try:
+        if connect is None:
+            import psycopg
+
+            connect = psycopg.connect
+        with connect(url, connect_timeout=REQUEST_TIMEOUT) as connection:
+            connection.execute("SELECT 1")
+            encrypted = bool(connection.pgconn.ssl_in_use)
+    except Exception as error:
+        return Result("Database", "fail", f"cannot sign in at {parts.hostname}: {type(error).__name__}", DATABASE_HINT)
+    if not encrypted:
+        return Result("Database", "warn", f"signed in at {parts.hostname}, without TLS",
+                      "Add sslmode=verify-full and sslrootcert=<the provider's CA file> to the URL in "
+                      "secrets/database_url.")
+    return Result("Database", "ok", f"signed in at {parts.hostname}, with TLS")
+
+
 # --- Running ----------------------------------------------------------------
 
-def run_checks(config) -> list[Result]:
-    results = [check_redis(config)]
-    if config.admin_web.enabled:
-        results.extend(check_admin_web(config))
-    if config.outsource.provider == "runpod" or config.jobs.storage == "s3":
-        results.append(check_storage(config))
+def run_checks(config, features: Collection[str] | None = None) -> list[Result]:
+    """Test the services of the features that are on, each result with its
+    feature. With features, only theirs and those they need, as a setup of
+    one feature tests it; a feature with nothing outside the server to test
+    gets one skip saying so."""
+    from app.config import tunnel_enabled
+    from app.features import BY_KEY
     from app.job_storage import uses_bucket
 
-    if uses_bucket(config):
-        results.append(check_job_storage(config))
-    if config.outsource.provider == "runpod":
-        results.extend(check_runpod(config))
-    else:
-        results.append(Result("Outsourcing", "skip", "OUTSOURCE_PROVIDER=none"))
-    if config.billing.provider == "google_play":
-        results.append(check_client_ids(config))
-        results.append(check_google_play(config))
-    else:
-        results.append(Result("Google", "skip", "BILLING_PROVIDER=none"))
-    from app.config import tunnel_enabled
+    wanted: set[str] | None = None
+    if features is not None:
+        wanted = set()
+        pending = list(features)
+        while pending:
+            key = pending.pop()
+            if key not in wanted:
+                wanted.add(key)
+                pending.extend(BY_KEY[key].needs)
+    results: list[Result] = []
 
-    if tunnel_enabled(config):
-        results.extend(check_tunnel(config))
-    else:
-        results.append(Result("Cloudflare Tunnel", "skip", "COMPOSE_PROFILES does not list cloudflare"))
-    if config.offsite.enabled:
-        results.append(check_offsite(config))
-    else:
-        results.append(Result("Off-site backups", "skip", "OFFSITE_BACKUP_BUCKET is not set"))
-    if config.error_report.url:
-        results.append(check_error_report(config))
-    else:
-        results.append(Result("Error reports", "skip", "ERROR_REPORT_URL is not set"))
+    def add(feature: str | None, on: bool, check: Callable[[], Result | list[Result]], skip: Result | None = None):
+        if wanted is not None and feature not in wanted:
+            return
+        if on:
+            produced = check()
+            for result in produced if isinstance(produced, list) else [produced]:
+                results.append(replace(result, feature=feature))
+        elif skip is not None and wanted is None:
+            results.append(replace(skip, feature=feature))
+
+    add(None, True, lambda: check_redis(config))
+    add("admin_web", config.admin_web.enabled, lambda: check_admin_web(config))
+    add("object_storage", bool(config.storage.bucket), lambda: check_storage(config))
+    # The hub's own bucket of a home cluster is no feature: only a full check tests it.
+    add("job_storage" if config.jobs.storage == "s3" else None, uses_bucket(config),
+        lambda: check_job_storage(config))
+    add("outsourcing", config.outsource.provider == "runpod", lambda: check_runpod(config),
+        Result("Outsourcing", "skip", "OUTSOURCE_PROVIDER=none"))
+    add("billing", config.billing.provider == "google_play",
+        lambda: [check_client_ids(config), check_google_play(config)],
+        Result("Google", "skip", "BILLING_PROVIDER=none"))
+    add("provider_backups", config.database.backups == "provider", lambda: check_database(config))
+    add("tunnel", tunnel_enabled(config), lambda: check_tunnel(config),
+        Result("Cloudflare Tunnel", "skip", "COMPOSE_PROFILES does not list cloudflare"))
+    add("offsite", config.offsite.enabled, lambda: check_offsite(config),
+        Result("Off-site backups", "skip", "OFFSITE_BACKUP_BUCKET is not set"))
+    add("error_reports", bool(config.error_report.url), lambda: check_error_report(config),
+        Result("Error reports", "skip", "ERROR_REPORT_URL is not set"))
+    for key in sorted(wanted or ()):
+        if not any(result.feature == key for result in results):
+            title = BY_KEY[key].title
+            detail = ("nothing outside the server to test; check tests it" if BY_KEY[key].enabled(config)
+                      else "it is off")
+            results.append(Result(title, "skip", detail, feature=key))
     return results
 
 

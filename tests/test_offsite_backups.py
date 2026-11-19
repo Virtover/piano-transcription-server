@@ -295,7 +295,7 @@ def test_online_checks_skip_off_site_when_off(api_context, monkeypatch):
 
     results = online_check.run_checks(settings)
 
-    assert online_check.Result("Off-site backups", "skip", "OFFSITE_BACKUP_BUCKET is not set") in results
+    assert online_check.Result("Off-site backups", "skip", "OFFSITE_BACKUP_BUCKET is not set", feature="offsite") in results
 
 
 def test_offsite_key_names():

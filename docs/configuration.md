@@ -38,7 +38,7 @@ A basic server needs no setting: `python scripts/server.py start` runs it with e
 | Error reports | `ERROR_REPORT_URL` | | `error_report_token` | [Error reports](#error-reports) |
 | Metrics for scaling | the secret file `metrics_token` | | `metrics_token` | [Metrics for scaling](architecture.md#-metrics-for-scaling) |
 
-`python scripts/setup.py` sets features up and turns them off; see [Setting up features](setup.md#-setting-up-optional-features). `python -m app.config features --json` lists them with their state and what is missing, for scripts and agents; `--feature outsourcing` lists only that one, by its key. The table is `FEATURES` in `app/features.py`, which validation reads, and a test keeps this list and the blocks of `.env.example` in step with it.
+`python scripts/setup.py` sets features up and turns them off; see [Setting up features](setup.md#-setting-up-optional-features). `python -m app.config features --json` lists them with their state and what is missing, for scripts and agents; `--feature outsourcing` lists only that one, by its key. `check --json` gives every problem with the settings and secret files it names, its feature, and for some a fix a script can make, such as a rename; with `--online --feature outsourcing`, it tests only that feature's services and those it needs. `validate NAME VALUE` says whether the server would accept a value. The table is `FEATURES` in `app/features.py`, which validation reads, and a test keeps this list and the blocks of `.env.example` in step with it.
 
 ### ✅ Checking the configuration
 

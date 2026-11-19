@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 from dotenv import dotenv_values
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.exceptions import SettingsError
 
 from app import network
 
@@ -904,17 +905,23 @@ def resolve_secret_aliases(secrets_dir: str | None) -> dict[str, str]:
 INTERNAL_VARIABLES = {"ERROR_REPORT_SERVICE"}
 
 
-def unknown_variable_warnings(environment: dict[str, str]) -> list[str]:
+def unknown_variables(environment: dict[str, str]) -> list[tuple[str, str | None]]:
+    """Each variable with a checked prefix that no setting has, and the
+    setting it is probably a typo of."""
     # Docker Compose's own, such as WORKER_GPU_BUILD, are known too.
     known = set(known_variables()) | set(ALIASES) | COMPOSE_ONLY_VARIABLES | INTERNAL_VARIABLES
-    messages = []
+    unknown = []
     for name in sorted(environment):
         if not name.startswith(CHECKED_PREFIXES) or name in known:
             continue
         suggestion = difflib.get_close_matches(name, sorted(known), n=1)
-        hint = f"; did you mean {suggestion[0]}?" if suggestion else ""
-        messages.append(f"Unknown setting {name}{hint}")
-    return messages
+        unknown.append((name, suggestion[0] if suggestion else None))
+    return unknown
+
+
+def unknown_variable_warnings(environment: dict[str, str]) -> list[str]:
+    return [f"Unknown setting {name}" + (f"; did you mean {suggestion}?" if suggestion else "")
+            for name, suggestion in unknown_variables(environment)]
 
 
 def _format_errors(group: type[BaseSettings], error: ValidationError, overrides: dict[str, str]) -> list[str]:
@@ -955,6 +962,13 @@ def load_settings(env_file: "str | Sequence[str] | None" = ENV_FILES, secrets_di
                                        **values)
         except ValidationError as error:
             problems.extend(_format_errors(group, error, values))
+        except SettingsError as error:
+            # A secret file that is no UTF-8 text, as Windows PowerShell's >
+            # writes UTF-16: named, rather than a traceback at startup.
+            field = re.search(r'field "([^"]+)"', str(error))
+            name = env_name(group, field.group(1)) if field and field.group(1) in group.model_fields else group_name
+            where = f"The secret file {name}" if group is SecretSettings else name
+            problems.append(f"{where} cannot be read: it must be UTF-8 text ({error.__cause__ or error})")
     if problems:
         raise ConfigError(problems)
     return Settings(**groups, secrets_dir=secrets_dir or SECRETS_DIR)
@@ -1275,6 +1289,18 @@ def main(arguments: list[str]) -> int:
         action="store_true",
         help="also test the configured services (storage, RunPod, Google Play) with the real credentials",
     )
+    check.add_argument("--json", action="store_true",
+                       help="print JSON: each problem with the settings and secrets it names, for scripts/setup.py")
+    check.add_argument("--feature", action="append",
+                       help="with --online, only this feature's services and those it needs; repeatable")
+    validate = subcommands.add_parser("validate", help="whether a value would be accepted for a setting")
+    validate.add_argument("name", metavar="NAME")
+    validate.add_argument("value", metavar="VALUE")
+    validate.add_argument("--env-file", action="append", help="an env file to read; repeatable (default: .env and server.env)")
+    validate.add_argument("--secrets-dir", default=SECRETS_DIR)
+    validate.add_argument("--json", action="store_true", help="print JSON")
+    session = subcommands.add_parser("session", help="answer commands as JSON lines on standard input, for scripts/setup.py")
+    session.add_argument("--root", default="/setup", help="the checkout whose env files the commands read")
     requirements = subcommands.add_parser(
         "requirements",
         help="print what the external services must provide, derived from the configuration",
@@ -1296,7 +1322,8 @@ def main(arguments: list[str]) -> int:
         "describe",
         help="print one setting or secret: its file, value, features, and documentation",
     )
-    describe_command.add_argument("names", nargs="+", metavar="NAME", help="a variable or secret file name, for example OUTSOURCE_TIMEOUT")
+    describe_command.add_argument("names", nargs="*", metavar="NAME", help="a variable or secret file name, for example OUTSOURCE_TIMEOUT")
+    describe_command.add_argument("--all", action="store_true", help="every setting and secret file people choose")
     describe_command.add_argument("--env-file", action="append", help="an env file to read; repeatable (default: .env and server.env)")
     describe_command.add_argument("--secrets-dir", default=SECRETS_DIR)
     describe_command.add_argument("--json", action="store_true", help="print JSON, for scripts and AI agents")
@@ -1308,7 +1335,31 @@ def main(arguments: list[str]) -> int:
     if args.command == "features":
         return print_features(args)
     if args.command == "describe":
+        if not args.names and not args.all:
+            parser.error("describe needs a NAME, or --all")
         return print_settings(args)
+    if args.command == "session":
+        from app.diagnosis import serve
+
+        return serve(args.root, main)
+    if args.command == "validate":
+        from app.diagnosis import validate_value
+
+        result = validate_value(args.name, args.value, args.env_file or ENV_FILES)
+        print(json.dumps(result) if args.json else "\n".join(result["problems"]) or "OK")
+        return 0 if result["ok"] else 1
+    if args.json:
+        from app.diagnosis import report
+        from app.features import FEATURES
+
+        known = [feature.key for feature in FEATURES]
+        features, unknown = select_names(args.feature, known, "feature") if args.feature else (None, [])
+        if unknown:
+            print("\n".join(unknown), file=sys.stderr)
+            return 2
+        result = report(args.env_file or ENV_FILES, args.secrets_dir, args.online, features)
+        print(json.dumps(result, indent=2, default=str))
+        return 0 if result["ok"] else 1
     try:
         config = load_settings(args.env_file or ENV_FILES, args.secrets_dir)
         problems = validate_settings(config, "all")
@@ -1336,7 +1387,7 @@ def main(arguments: list[str]) -> int:
         from app.online_check import format_results, run_checks
 
         print("\nOnline checks:")
-        results = run_checks(config)
+        results = run_checks(config, args.feature) if args.feature else run_checks(config)
         print("\n".join(format_results(results)))
         if any(result.status == "fail" for result in results):
             return 1
@@ -1432,6 +1483,8 @@ def setting_facts(name: str, config: Settings | None, secrets_dir: str, document
     from app.features import FEATURES
 
     secrets = {env_name(SecretSettings, field): field for field in SecretSettings.model_fields}
+    # Read by cloudflared alone, in a folder of its own.
+    secrets[TUNNEL_TOKEN_FILE] = None
     variables = known_variables()
     by_lower = {known.lower(): known for known in [*variables, *ALIASES, *COMPOSE_VARIABLES]}
     if name in secrets or name.lower() in {secret.lower() for secret in secrets}:
@@ -1448,6 +1501,10 @@ def setting_facts(name: str, config: Settings | None, secrets_dir: str, document
             if name in variables and config is not None:
                 group_name, field = variables[name]
                 facts["value"] = shown_value(getattr(config, group_name), field)
+            from app.diagnosis import setting_choices
+
+            if choices := setting_choices(name):
+                facts["choices"] = choices
     else:
         return None
     facts["features"] = [
@@ -1492,6 +1549,10 @@ def print_settings(args) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")  # the docs' text on a console without UTF-8
     described, unknown = [], []
+    if args.all:
+        from app.diagnosis import all_setting_names
+
+        args.names = [*args.names, *all_setting_names()]
     for name in args.names:
         facts = setting_facts(name, config, args.secrets_dir, documentation)
         if facts is None:
@@ -1521,6 +1582,19 @@ if __name__ == "__main__":
 
     sys.exit(package_main(sys.argv[1:]))
 
+def _run_as_command() -> bool:
+    """Whether this process is `python -m app.config`, which names the
+    problems of an invalid configuration instead of failing to start."""
+    spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+    return getattr(spec, "name", None) == "app.config"
+
+
 # Every service imports this module before it connects anywhere.
 network.use_ipv4_without_ipv6_route()
-settings = load_settings()
+try:
+    settings = load_settings()
+except ConfigError:
+    if not _run_as_command():
+        raise
+    # The command reads the files itself and reports what is wrong.
+    settings = None

@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import json
 import shutil
 import subprocess
@@ -6,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from app import config as config_module
+from app import online_check
 from app.config import load_settings
+from app.online_check import Result
 from app.features import describe_features
 from app.requirements import build_requirements, requirements_json
 
@@ -52,25 +57,39 @@ def server(tmp_path):
     shutil.copyfile(ROOT / "server.env.example", tmp_path / "server.env")
     (tmp_path / "secrets").mkdir()
 
+    return tmp_path, answering(tmp_path)
+
+
+def answering(root):
+    """python -m app.config, as the session in a container answers it, on
+    root's files."""
     def config(*arguments, capture=True):
-        settings = load_settings([str(tmp_path / ".env"), str(tmp_path / "server.env")], str(tmp_path / "secrets"))
-        if arguments[0] == "features":
-            output = json.dumps(describe_features(settings), default=str)
-        elif arguments[0] == "requirements":
-            output = json.dumps(requirements_json(build_requirements(settings)), default=str)
-        else:
-            output = ""
-        return subprocess.CompletedProcess(arguments, 0, output, "")
+        files = ["--env-file", str(root / ".env"), "--env-file", str(root / "server.env"),
+                 "--secrets-dir", str(root / "secrets")]
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            try:
+                code = config_module.main([*arguments, *files])
+            except SystemExit as error:
+                code = error.code if isinstance(error.code, int) else 1
+        return subprocess.CompletedProcess(arguments, code, output.getvalue(), errors.getvalue())
 
-    return tmp_path, config
+    return config
 
 
-def make(server, answers=(), hidden=()):
+@pytest.fixture(autouse=True)
+def no_services(monkeypatch):
+    """The online checks answer what a test gives; none reaches a service."""
+    monkeypatch.setattr(online_check, "run_checks", lambda config, features=None: [])
+
+
+def make(server, answers=(), hidden=(), running=False, restart=lambda: 0):
     root, config = server
     script = Script(answers, hidden)
     console = setup_script.Console(ask=script.ask, ask_hidden=script.ask_hidden, say=script.say)
     setup = setup_script.Setup(console=console, root=root, config=config,
-                               descriptions=setup_script.setting_descriptions())
+                               descriptions=setup_script.setting_descriptions(), running=lambda: running,
+                               restart=restart)
     return setup, script
 
 
@@ -179,7 +198,7 @@ def test_outsourcing_sets_up_object_storage_first(server):
 
 def test_an_unfinished_setup_says_what_is_missing(server):
     before = (server[0] / "server.env").read_text(encoding="utf-8")
-    setup, script = make(server, answers=["", "audio", "https://storage.example", ""], hidden=["", ""])
+    setup, script = make(server, answers=["", "audio", "https://storage.example", "", "n"], hidden=["", ""])
 
     assert setup.set_up("object_storage") is False
 
@@ -188,7 +207,7 @@ def test_an_unfinished_setup_says_what_is_missing(server):
     assert "Object storage is off again" in script.text
 
     # Each missing secret file by its place on the host, not in the container.
-    assert "missing secret file  secrets/storage_access_key" in script.text
+    assert "! STORAGE_BUCKET needs the secret file secrets/storage_access_key" in " ".join(script.text.split())
     assert "/run/secrets" not in script.text
     assert "python scripts/setup.py object_storage" in script.text
 
@@ -203,14 +222,14 @@ def test_a_required_setting_cannot_be_skipped(server):
 
 def test_a_failed_setup_keeps_the_secrets_given_but_not_a_switch_secret(server):
     secrets_dir = server[0] / "secrets"
-    setup, _ = make(server, answers=["", "audio", "https://storage.example", ""], hidden=["access-key", ""])
+    setup, _ = make(server, answers=["", "audio", "https://storage.example", "", "n"], hidden=["access-key", ""])
 
     setup.set_up("object_storage")
 
     assert (secrets_dir / "storage_access_key").read_text(encoding="utf-8") == "access-key"
 
     # A password too short: its file alone would turn the feature on.
-    setup, script = make(server, answers=["n"], hidden=["short"])
+    setup, script = make(server, answers=["n", "n"], hidden=["short"])
     assert setup.set_up("password") is False
     assert not (secrets_dir / "server_password").exists()
     text = " ".join(script.text.split())
@@ -278,9 +297,9 @@ def test_the_admin_page_offers_only_modes_that_turn_it_on(server):
     setup, script = make(
         server,
         answers=[
-            "y", "", "", "",                     # the tunnel first: its services, no hostname, no online test
+            "y", "", "",                         # the tunnel first: its services, no hostname
             "", "read-write", "admin.example.com", '["me@example.com"]', "team.cloudflareaccess.com", "aud",
-            "",                                  # no online test
+            # Both are tested once the server runs with them, so not here.
         ],
         hidden=["tunnel-token"],
     )
@@ -589,3 +608,232 @@ def test_on_a_node_setup_shows_the_nodes_side_and_creates_no_hub_files(tmp_path,
     assert "the hub's Redis answers at 127.0.0.9:6379" in script.text
     assert not (tmp_path / ".env").exists() and not (tmp_path / "billing-data").exists()
     assert setup_script.main(["outsourcing"], setup) == 1
+
+# --- Values checked as they are typed -------------------------------------------------------
+
+def test_a_value_the_server_would_refuse_is_asked_again(server):
+    setup, script = make(server, answers=["30", "30s"])
+
+    assert setup.change("WORKER_BATCH_TIMEOUT") == 0
+
+    assert env(server).get("WORKER_BATCH_TIMEOUT") == "30s"
+    assert "! the value must use a format such as 30s" in script.text
+
+
+def test_any_setting_is_found_by_part_of_its_name(server):
+    setup, script = make(server, answers=["batch_timeout", "2m"])
+
+    assert setup.change() == 0
+
+    assert env(server).get("WORKER_BATCH_TIMEOUT") == "2m"
+
+
+def test_a_change_that_stops_the_server_is_undone(server):
+    # Typed in rather than generated.
+    setup, script = make(server, answers=["n", "y"], hidden=["short"])
+
+    assert setup.change("server_password") == 1
+
+    assert not (server[0] / "secrets" / "server_password").exists()
+    assert "must hold at least 12 characters" in " ".join(script.text.split())
+
+
+def test_an_unknown_setting_suggests_the_known_one(server):
+    setup, script = make(server)
+
+    assert setup.change("WORKER_BATCH_TIMOUT") == 1
+    assert "Did you mean WORKER_BATCH_TIMEOUT" in script.text
+
+
+def test_a_kubernetes_choice_is_checked_as_kube_py_checks_it(server):
+    root, _ = server
+    (root / "deploy" / "kubernetes").mkdir(parents=True)
+    shutil.copyfile(ROOT / "deploy" / "kubernetes" / "cluster.env.example",
+                    root / "deploy" / "kubernetes" / "cluster.env.example")
+    setup, script = make(server, answers=["many", "3"])
+
+    assert setup.change("KUBE_MAX_WORKERS") == 0
+
+    assert setup_script.EnvFile(root / "deploy" / "kubernetes" / "cluster.env").get("KUBE_MAX_WORKERS") == "3"
+    assert "KUBE_MAX_WORKERS must be a whole number" in script.text
+
+
+# --- Testing with the real services, and fixing what fails ----------------------------------
+
+def failing_storage_once(monkeypatch):
+    """The storage test fails until the access key is written again."""
+    calls = []
+
+    def checks(config, features=None):
+        calls.append(features)
+        if len(calls) == 1:
+            return [Result("Storage", "fail", "Upload: InvalidAccessKeyId",
+                           "The access key ID is wrong. Rewrite secrets/storage_access_key.", feature="object_storage")]
+        return [Result("Storage", "ok", "upload, signed download, and delete work", feature="object_storage")]
+
+    monkeypatch.setattr(online_check, "run_checks", checks)
+    return calls
+
+
+def test_a_failed_test_asks_again_for_what_its_hint_names(server, monkeypatch):
+    calls = failing_storage_once(monkeypatch)
+    setup, script = make(server, answers=["", "audio", "https://storage.example", "", "", ""],
+                         hidden=["wrong", "secret", "right"])
+
+    assert setup.set_up("object_storage") is True
+
+    assert calls == [["object_storage"], ["object_storage"]]
+    assert (server[0] / "secrets" / "storage_access_key").read_text(encoding="utf-8") == "right"
+    assert "To change: storage_access_key" in script.text
+    assert "The services answer as they should." in script.text
+
+
+def test_a_failed_test_can_undo_the_setup(server, monkeypatch):
+    failing_storage_once(monkeypatch)
+    before = (server[0] / "server.env").read_text(encoding="utf-8")
+    setup, script = make(server, answers=["", "audio", "https://storage.example", "", "", "u"],
+                         hidden=["wrong", "secret"])
+
+    assert setup.set_up("object_storage") is False
+    assert (server[0] / "server.env").read_text(encoding="utf-8") == before
+
+
+def test_check_tests_a_feature_that_is_on(server, monkeypatch):
+    calls = failing_storage_once(monkeypatch)
+    file = env(server)
+    file.set("STORAGE_BUCKET", "audio")
+    file.set("STORAGE_ENDPOINT", "https://storage.example")
+    file.save()
+    for name in ("storage_access_key", "storage_secret_key"):
+        (server[0] / "secrets" / name).write_text("key", encoding="utf-8")
+    setup, script = make(server, answers=["t"])
+
+    assert setup.check("object_storage") == 0
+    assert len(calls) == 2
+
+
+def test_a_feature_whose_service_starts_with_the_server_is_tested_after_a_restart(server, monkeypatch):
+    restarts, calls = [], []
+
+    def checks(config, features=None):
+        calls.append(features)
+        return [Result("Cloudflare Tunnel", "ok", "connected", feature="tunnel")]
+
+    monkeypatch.setattr(online_check, "run_checks", checks)
+    setup, script = make(server, answers=["", "", "y"], hidden=["token"], running=True,
+                         restart=lambda: restarts.append(1) or 0)
+
+    assert setup.set_up("tunnel") is True
+
+    assert restarts == [1] and calls == [["tunnel"]]
+
+
+# --- python scripts/setup.py fix ------------------------------------------------------------
+
+def test_fix_repairs_what_editors_and_shells_leave_in_the_files(server):
+    root, _ = server
+    server_env = root / "server.env"
+    server_env.write_bytes(b"\xef\xbb\xbf" + server_env.read_bytes()
+                           + b"\nJOB_DIAGNOSTICS_RETENTON=9d\nnot a setting\nWORKER_BATCH_TIMEOUT=1m\nWORKER_BATCH_TIMEOUT=2m\n")
+    secrets_dir = root / "secrets"
+    # PowerShell 5.1's > writes UTF-16 with a byte order mark; Notepad adds .txt.
+    (secrets_dir / "metrics_token").write_bytes("token\r\n".encode("utf-16"))
+    (secrets_dir / "error_report_token.txt").write_text("report-token", encoding="utf-8")
+    (secrets_dir / "server_password").mkdir()
+    setup, script = make(server, answers=["y", "y", "y", "y", "n"])
+
+    assert setup.fix() == 0
+
+    raw = server_env.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    file = env(server)
+    assert file.get("WORKER_BATCH_TIMEOUT") == "2m" and file.get("JOB_DIAGNOSTICS_RETENTION") == "9d"
+    assert file.get("JOB_DIAGNOSTICS_RETENTON") is None
+    assert "# not a setting" in raw.decode("utf-8")
+    assert (secrets_dir / "metrics_token").read_bytes() == b"token"
+    assert (secrets_dir / "error_report_token").read_text(encoding="utf-8") == "report-token"
+    assert not (secrets_dir / "server_password").exists()
+    # Never a secret's value on screen.
+    assert "report-token" not in script.text and "token\r" not in script.text
+
+
+def test_fix_asks_for_what_keeps_the_server_from_starting(server):
+    file = env(server)
+    file.set("WORKER_BATCH_TIMEOUT", "soon")
+    file.save()
+    setup, script = make(server, answers=["", "45s", "n"])
+
+    assert setup.fix() == 0
+
+    assert env(server).get("WORKER_BATCH_TIMEOUT") == "45s"
+
+
+def test_status_says_how_to_fix_a_configuration_it_cannot_read(server):
+    file = env(server)
+    file.set("WORKER_BATCH_TIMEOUT", "soon")
+    file.save()
+    setup, script = make(server)
+
+    assert setup.status() == 1
+    assert "python scripts/setup.py fix" in script.text and "WORKER_BATCH_TIMEOUT" in script.text
+
+
+def test_line_problems_skip_values_over_several_lines():
+    broken, duplicates = setup_script.env_line_problems(
+        ["A=1", "B='first", "still B", "end'", "oops", "A=2", "# C=3"])
+
+    assert broken == [4]
+    assert duplicates == {"A": [0, 5]}
+
+
+def test_a_secret_with_one_line_end_after_it_is_fine():
+    assert setup_script.decoded_secret(b"key\n") == ("key", [])
+    assert setup_script.decoded_secret(b"\xef\xbb\xbfkey")[1] == ["a byte order mark (BOM)"]
+    assert setup_script.decoded_secret(b"key\r\n")[1] == ["Windows line ends"]
+    assert setup_script.decoded_secret(b"\xff\xfe\x00\xd8")[0] is None
+
+
+# --- One container for the whole run ---------------------------------------------------------
+
+class FakeSession:
+    def __init__(self, answers):
+        self.stdin = io.StringIO()
+        self.stdout = io.StringIO("".join(json.dumps(answer) + "\n" for answer in answers))
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        pass
+
+
+def test_the_session_answers_and_falls_back_when_it_ends():
+    stack = type("Stack", (), {})()
+    started, fallback = [], []
+    stack.config_session = lambda: started.append(1) or FakeSession([{"returncode": 0, "stdout": "{}", "stderr": ""}])
+
+    def one_off(*arguments, capture=True):
+        fallback.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, "fallback", "")
+
+    session = setup_script.ConfigSession(stack, one_off)
+
+    assert session("features", "--json").stdout == "{}"
+    # The fake has no second answer, as when the container stops.
+    assert session("features", "--json").stdout == "fallback"
+    assert session("check").stdout == "fallback"
+    assert started == [1] and fallback == [("features", "--json"), ("check",)]
+
+
+def test_the_session_mounts_the_checkout_read_only(tmp_path):
+    ran = []
+    stack = setup_script.SERVER_SCRIPT.ComposeStack([], popen=lambda command, **options: ran.append((command, options)),
+                                                    root=tmp_path)
+
+    stack.config_session()
+
+    command, options = ran[0]
+    assert command[:3] == ["docker", "compose", "run"]
+    assert f"{tmp_path}:/setup:ro" in command
+    assert command[-4:] == ["app.config", "session", "--root", "/setup"]
+    assert options["stdin"] is subprocess.PIPE
