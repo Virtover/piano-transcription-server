@@ -1,14 +1,11 @@
-"""Every download of an image build, and every image, has a source to fall
-back on: build/ for what the Dockerfiles download, scripts/stacks.py for the
-images themselves."""
+"""Every download of an image build has a source to fall back on: build/
+for what the Dockerfiles download. The images themselves fall back through
+Docker's own registry-mirrors ("Download sources of a build" in docs/setup.md)."""
 
 import hashlib
 import importlib.util
-import json
 import re
-import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -25,7 +22,6 @@ def load(path: Path):
 
 fetch = load(ROOT / "build" / "fetch.py")
 pip_install = load(ROOT / "build" / "pip_install.py")
-stacks = load(ROOT / "scripts" / "stacks.py")
 
 
 # --- fetch.py ---------------------------------------------------------------
@@ -188,195 +184,3 @@ def test_the_build_tools_reach_the_build():
     ignored = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
 
     assert not any(line.strip("/") in ("build", "build/*") for line in ignored)
-
-
-# --- Images: Docker Hub, or an identical copy ---------------------------------
-
-def test_image_sources():
-    assert stacks.image_sources("python:3.12-slim") == [
-        "python:3.12-slim", "public.ecr.aws/docker/library/python:3.12-slim", "mirror.gcr.io/library/python:3.12-slim"]
-    assert stacks.image_sources("nvidia/cuda:12.8.1-base-ubuntu22.04") == [
-        "nvidia/cuda:12.8.1-base-ubuntu22.04", "nvcr.io/nvidia/cuda:12.8.1-base-ubuntu22.04",
-        "mirror.gcr.io/nvidia/cuda:12.8.1-base-ubuntu22.04"]
-    assert stacks.image_sources("cloudflare/cloudflared:2026.10.0") == [
-        "cloudflare/cloudflared:2026.10.0", "mirror.gcr.io/cloudflare/cloudflared:2026.10.0"]
-    # Another registry's image has only its own.
-    for image in ("hub.example.ts.net/piano-worker:current", "localhost:5000/x", "nvcr.io/nvidia/cuda:12.8.1"):
-        assert stacks.image_sources(image) == [image]
-
-
-def test_every_image_of_the_project_has_a_copy_elsewhere():
-    images = stacks.base_images(DOCKERFILES)
-    for compose in ROOT.glob("docker-compose*.yml"):
-        images += re.findall(r"^\s*image:\s*([^\s$]+)\s*$", compose.read_text(encoding="utf-8"), re.MULTILINE)
-
-    assert "python:3.12-slim" in images and "nvidia/cuda:12.6.3-base-ubuntu22.04" in images
-    assert [image for image in images if len(stacks.image_sources(image)) < 2] == []
-
-
-def test_base_images_leave_out_stages_and_build_arguments():
-    assert stacks.base_images([ROOT / "Dockerfile.worker"]) == [
-        "nvidia/cuda:12.8.1-base-ubuntu22.04", "nvidia/cuda:12.6.3-base-ubuntu22.04"]
-
-
-INSPECT = ["docker", "image", "inspect", "--format", "{{.Id}}"]
-
-
-def fake_docker(failing=(), local=(), stalling=()):
-    calls = []
-
-    def docker(command):
-        calls.append(command)
-        if command[:3] == ["docker", "image", "inspect"]:
-            return SimpleNamespace(returncode=0 if command[-1] in local else 1, stdout="", stderr="")
-        if command[:2] == ["docker", "pull"] and command[-1] in stalling:
-            raise subprocess.TimeoutExpired(command, stacks.PULL_TIMEOUT)
-        failed = command[:2] == ["docker", "pull"] and command[-1] in failing
-        return SimpleNamespace(returncode=1 if failed else 0, stdout="", stderr="")
-    return calls, docker
-
-
-def test_an_image_comes_from_a_copy_under_its_own_name_when_docker_hub_fails():
-    calls, docker = fake_docker(failing={"redis:7-alpine"})
-    said = []
-
-    assert stacks.ensure_image(docker, "redis:7-alpine", say=said.append)
-    assert calls == [
-        INSPECT + ["redis:7-alpine"],
-        ["docker", "pull", "redis:7-alpine"],
-        ["docker", "pull", "public.ecr.aws/docker/library/redis:7-alpine"],
-        ["docker", "tag", "public.ecr.aws/docker/library/redis:7-alpine", "redis:7-alpine"],
-        ["docker", "image", "rm", "public.ecr.aws/docker/library/redis:7-alpine"],
-    ]
-    assert "Docker Hub failed" in said[-1] and "public.ecr.aws" in said[-1]
-
-
-def test_a_stalled_registry_gives_way_to_the_next():
-    image = "nvidia/cuda:12.8.1-base-ubuntu22.04"
-    calls, docker = fake_docker(stalling={image})
-
-    assert stacks.ensure_image(docker, image, say=lambda text: None)
-    assert calls[2] == ["docker", "pull", "nvcr.io/" + image]
-
-
-def test_no_registry_giving_an_image_is_said_and_left_to_the_build():
-    image = "postgres:17-alpine"
-    calls, docker = fake_docker(failing=set(stacks.image_sources(image)))
-    said = []
-
-    assert not stacks.ensure_image(docker, image, say=said.append)
-    assert "will fail" in said[-1]
-
-
-def test_an_image_on_this_machine_needs_no_network():
-    # As builds and Compose: a start after a power cut, offline, rebuilds
-    # nothing because Docker Hub has a newer image.
-    calls, docker = fake_docker(local={"python:3.12-slim"})
-
-    assert stacks.ensure_image(docker, "python:3.12-slim")
-    assert calls == [INSPECT + ["python:3.12-slim"]]
-
-
-IMAGE_LS = ["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"]
-
-
-def compose_run(config, calls, local=()):
-    def run(command, **options):
-        calls.append((command, options))
-        stdout = ""
-        if command[2:4] == ["config", "--format"]:
-            stdout = json.dumps(config)
-        elif command == IMAGE_LS:
-            stdout = "".join(image + chr(10) for image in local)
-        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
-    return run
-
-
-def pulls(calls):
-    return [command[-1] for command, _ in calls if command[:2] == ["docker", "pull"]]
-
-
-def test_compose_stack_gets_missing_images_before_a_start_once(tmp_path):
-    (tmp_path / "Dockerfile.api").write_text("FROM python:3.12-slim", encoding="utf-8")
-    config = {"services": {
-        "api": {"build": {"context": str(tmp_path), "dockerfile": "Dockerfile.api"}, "image": "project-api"},
-        "redis": {"image": "redis:7-alpine"},
-        "postgres": {"image": "postgres:17-alpine"},
-    }}
-    calls = []
-    stack = stacks.ComposeStack([], run=compose_run(config, calls, local={"postgres:17-alpine"}), root=tmp_path)
-    stack.up()
-    stack.up()
-
-    # One listing for every image, not a call each.
-    assert [command for command, _ in calls] == [
-        ["docker", "compose", "config", "--format", "json"],
-        IMAGE_LS,
-        ["docker", "pull", "python:3.12-slim"],
-        ["docker", "pull", "redis:7-alpine"],
-        ["docker", "compose", "up", "-d", "--build"],
-        ["docker", "compose", "up", "-d", "--build"],
-    ]
-    # A pull shows docker's progress, as Compose's would, within a time limit.
-    for command, options in calls:
-        if command[:2] == ["docker", "pull"]:
-            assert options == {"cwd": tmp_path, "timeout": stacks.PULL_TIMEOUT}
-        else:
-            assert "timeout" not in options
-
-
-def test_a_restart_checks_the_service_images_after_its_build(tmp_path):
-    config = {"services": {"api": {"build": {"context": str(tmp_path)}}, "redis": {"image": "redis:7-alpine"}}}
-    calls = []
-    stack = stacks.ComposeStack([], run=compose_run(config, calls), popen=lambda *a, **k: None, root=tmp_path)
-    stack.start_build()
-    assert pulls(calls) == []
-
-    stack.up()
-    assert pulls(calls) == ["redis:7-alpine"]
-
-
-def test_building_one_service_gets_only_its_images(tmp_path):
-    (tmp_path / "Dockerfile.api").write_text("FROM python:3.12-slim", encoding="utf-8")
-    (tmp_path / "Dockerfile.worker").write_text("FROM nvidia/cuda:12.8.1-base-ubuntu22.04", encoding="utf-8")
-    config = {"services": {
-        "api": {"build": {"context": str(tmp_path), "dockerfile": "Dockerfile.api"}},
-        "worker": {"build": {"context": str(tmp_path), "dockerfile": "Dockerfile.worker"}},
-        "redis": {"image": "redis:7-alpine"},
-    }}
-    calls = []
-    stacks.ComposeStack([], run=compose_run(config, calls), root=tmp_path).build("api")
-
-    assert pulls(calls) == ["python:3.12-slim"]
-
-
-def test_a_start_with_every_image_here_is_one_listing(tmp_path):
-    (tmp_path / "Dockerfile.api").write_text("FROM python:3.12-slim", encoding="utf-8")
-    config = {"services": {"api": {"build": {"context": str(tmp_path), "dockerfile": "Dockerfile.api"}},
-                           "redis": {"image": "redis:7-alpine"}}}
-    calls = []
-    stacks.ComposeStack([], run=compose_run(config, calls, local={"python:3.12-slim", "redis:7-alpine"}),
-                        root=tmp_path).up()
-
-    assert [command for command, _ in calls][1:-1] == [IMAGE_LS]
-
-
-def test_a_start_without_a_build_gets_no_base_image(tmp_path):
-    (tmp_path / "Dockerfile.worker").write_text("FROM nvidia/cuda:12.8.1-base-ubuntu22.04", encoding="utf-8")
-    config = {"services": {"worker": {"build": {"context": str(tmp_path), "dockerfile": "Dockerfile.worker"},
-                                      "image": "hub.example/piano-worker:current"}}}
-    calls = []
-    stacks.NodeStack(gpu=False, run=compose_run(config, calls), root=tmp_path).up(build=False)
-
-    assert [command for command, _ in calls if command[:2] == ["docker", "image"]] == []
-
-
-def test_a_broken_compose_configuration_is_left_to_compose(tmp_path):
-    calls = []
-
-    def run(command, **options):
-        calls.append(command)
-        return SimpleNamespace(returncode=1 if "config" in command else 0, stdout="not json", stderr="error")
-
-    assert stacks.ComposeStack([], run=run, root=tmp_path).up() == 0
-    assert calls[-1] == ["docker", "compose", "up", "-d", "--build"]

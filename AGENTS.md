@@ -53,7 +53,7 @@ python scripts/kube.py restart 5m                               # server.py's an
 | `app/error_report.py` | Optional error reports of the API and workers to `ERROR_REPORT_URL`, with secrets redacted |
 | `redis/` | The Redis users and their rules (`users.acl`), and the script that gives them to Redis at start |
 | `runpod/handler.py` | The RunPod Serverless handler, built with `Dockerfile.runpod` |
-| `build/` | What image builds download through: apt's mirror lists, `fetch.py` (files with a checksum), `pip_install.py` (PyPI and PyTorch's index, or their mirrors); `scripts/stacks.py` pulls the images from Docker Hub or a copy ("Download sources of a build" in `docs/setup.md`) |
+| `build/` | What image builds download through: apt's mirror lists, `fetch.py` (files with a checksum), `pip_install.py` (PyPI and PyTorch's index, or their mirrors); images fall back through Docker's own `registry-mirrors` ("Download sources of a build" in `docs/setup.md`) |
 | `app/admin_web/` | The optional admin web page behind Cloudflare Access: token checks, read-only routes, lowering its own access |
 | `app/admin/`, `app/controls.py`, `scripts/admin.py` | `python -m app.admin`: status, jobs, users, the billing report, and temporary limits the API reads from Redis; the host script runs it in the API container |
 | `deploy/kubernetes/` | The Kubernetes deployment: `base/`, the real cluster's overlay, and `local/`, a test cluster on this PC; `tests/test_kubernetes.py` keeps it in step with `docker-compose.yml`. Tested only on the local cluster, never yet on real infrastructure |

@@ -181,12 +181,40 @@ A build downloads from several services, and each has copies elsewhere that the 
 
 | What | First | Then |
 | --- | --- | --- |
-| Base and service images | Docker Hub | AWS's and Google's copies of Docker Hub, and NVIDIA's own registry for CUDA. Identical images, by digest |
 | Ubuntu and Debian packages | The distribution's own servers | Mirrors in the US, Germany, Japan, and Australia (`build/apt/`). apt checks every package against the distribution's signature |
 | deno and model weights | GitHub, and the weights' authors | Deno's own server, and copies of the weights on Hugging Face and the Internet Archive. Only a file with a checksum in the Dockerfile is kept (`build/fetch.py`) |
 | Python packages | PyPI, and PyTorch's index for torch | University and company mirrors in South Korea and China (`build/pip_install.py`) |
+| Base and service images | Docker Hub | Google's copy of Docker Hub, once Docker is set up for it (below) |
 
-Before a build or start, `scripts/server.py` and `scripts/kube.py` pull the images this machine lacks, base and service images alike. An image already here is left as it is, as Docker does, so a start needs no network and rebuilds nothing. A copy is tagged with the image's own name, so the build and Compose find it. A plain `docker compose up --build` takes images from Docker Hub only. To take newer base images, pull them before a build: `docker pull python:3.12-slim`.
+**Images.** Every image the server uses is on Docker Hub. Docker itself can take them from Google's copy of Docker Hub, `mirror.gcr.io`, and from Docker Hub when the copy lacks one or fails: `registry-mirrors` in Docker's own settings, once per machine. Builds, `docker pull`, and Compose all use it.
+
+**Docker Desktop (Windows, macOS):** in Docker Desktop's settings for the Docker Engine, add the line to the JSON, keeping what is there, and apply:
+
+```json
+"registry-mirrors": ["https://mirror.gcr.io"]
+```
+
+**Linux:** add it to `/etc/docker/daemon.json`. The file may already hold settings, such as NVIDIA's runtime for the GPU, which must stay, so add to it rather than replace it:
+
+```shell
+sudo cp -a /etc/docker/daemon.json /etc/docker/daemon.json.bak 2>/dev/null
+sudo python3 -c "
+import json, os
+path = '/etc/docker/daemon.json'
+config = json.load(open(path)) if os.path.exists(path) and os.path.getsize(path) else {}
+mirrors = config.setdefault('registry-mirrors', [])
+if 'https://mirror.gcr.io' not in mirrors:
+    mirrors.append('https://mirror.gcr.io')
+json.dump(config, open(path, 'w'), indent=2)
+"
+```
+
+Docker reads the setting when it starts, and restarting Docker stops every container. Stop the server first (`python scripts/server.py stop 1m`, or `python scripts/server.py stop` on a node), restart Docker (`sudo systemctl restart docker` on Linux; Docker Desktop restarts itself), check, and start the server again:
+
+```shell
+docker info --format "{{json .RegistryConfig.Mirrors}}"
+python scripts/server.py start
+```
 
 Python packages are not signed: a mirror is trusted as much as PyPI. Only mirrors run by universities and large companies are listed.
 
