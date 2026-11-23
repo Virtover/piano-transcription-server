@@ -243,12 +243,12 @@ def test_an_image_comes_from_a_copy_under_its_own_name_when_docker_hub_fails():
     assert stacks.ensure_image(docker, "redis:7-alpine", say=said.append)
     assert calls == [
         INSPECT + ["redis:7-alpine"],
-        ["docker", "pull", "--quiet", "redis:7-alpine"],
-        ["docker", "pull", "--quiet", "public.ecr.aws/docker/library/redis:7-alpine"],
+        ["docker", "pull", "redis:7-alpine"],
+        ["docker", "pull", "public.ecr.aws/docker/library/redis:7-alpine"],
         ["docker", "tag", "public.ecr.aws/docker/library/redis:7-alpine", "redis:7-alpine"],
         ["docker", "image", "rm", "public.ecr.aws/docker/library/redis:7-alpine"],
     ]
-    assert "public.ecr.aws" in said[0]
+    assert "Docker Hub failed" in said[-1] and "public.ecr.aws" in said[-1]
 
 
 def test_a_stalled_registry_gives_way_to_the_next():
@@ -256,7 +256,7 @@ def test_a_stalled_registry_gives_way_to_the_next():
     calls, docker = fake_docker(stalling={image})
 
     assert stacks.ensure_image(docker, image, say=lambda text: None)
-    assert calls[2] == ["docker", "pull", "--quiet", "nvcr.io/" + image]
+    assert calls[2] == ["docker", "pull", "nvcr.io/" + image]
 
 
 def test_no_registry_giving_an_image_is_said_and_left_to_the_build():
@@ -265,7 +265,7 @@ def test_no_registry_giving_an_image_is_said_and_left_to_the_build():
     said = []
 
     assert not stacks.ensure_image(docker, image, say=said.append)
-    assert "will fail" in said[0]
+    assert "will fail" in said[-1]
 
 
 def test_an_image_on_this_machine_needs_no_network():
@@ -277,17 +277,27 @@ def test_an_image_on_this_machine_needs_no_network():
     assert calls == [INSPECT + ["python:3.12-slim"]]
 
 
+IMAGE_LS = ["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"]
+
+
 def compose_run(config, calls, local=()):
     def run(command, **options):
         calls.append((command, options))
-        stdout = json.dumps(config) if command[2:4] == ["config", "--format"] else ""
-        missing = command[:3] == ["docker", "image", "inspect"] and command[-1] not in local
-        return SimpleNamespace(returncode=1 if missing else 0, stdout=stdout, stderr="")
+        stdout = ""
+        if command[2:4] == ["config", "--format"]:
+            stdout = json.dumps(config)
+        elif command == IMAGE_LS:
+            stdout = "".join(image + chr(10) for image in local)
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
     return run
 
 
+def pulls(calls):
+    return [command[-1] for command, _ in calls if command[:2] == ["docker", "pull"]]
+
+
 def test_compose_stack_gets_missing_images_before_a_start_once(tmp_path):
-    (tmp_path / "Dockerfile.api").write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.api").write_text("FROM python:3.12-slim", encoding="utf-8")
     config = {"services": {
         "api": {"build": {"context": str(tmp_path), "dockerfile": "Dockerfile.api"}, "image": "project-api"},
         "redis": {"image": "redis:7-alpine"},
@@ -298,19 +308,21 @@ def test_compose_stack_gets_missing_images_before_a_start_once(tmp_path):
     stack.up()
     stack.up()
 
+    # One listing for every image, not a call each.
     assert [command for command, _ in calls] == [
         ["docker", "compose", "config", "--format", "json"],
-        INSPECT + ["python:3.12-slim"],
-        ["docker", "pull", "--quiet", "python:3.12-slim"],
-        INSPECT + ["redis:7-alpine"],
-        ["docker", "pull", "--quiet", "redis:7-alpine"],
-        INSPECT + ["postgres:17-alpine"],
+        IMAGE_LS,
+        ["docker", "pull", "python:3.12-slim"],
+        ["docker", "pull", "redis:7-alpine"],
         ["docker", "compose", "up", "-d", "--build"],
         ["docker", "compose", "up", "-d", "--build"],
     ]
-    # Only a pull has a time limit.
-    assert [options.get("timeout") for command, options in calls if command[:2] == ["docker", "pull"]] == [stacks.PULL_TIMEOUT] * 2
-    assert all("timeout" not in options for command, options in calls if command[:2] != ["docker", "pull"])
+    # A pull shows docker's progress, as Compose's would, within a time limit.
+    for command, options in calls:
+        if command[:2] == ["docker", "pull"]:
+            assert options == {"cwd": tmp_path, "timeout": stacks.PULL_TIMEOUT}
+        else:
+            assert "timeout" not in options
 
 
 def test_a_restart_checks_the_service_images_after_its_build(tmp_path):
@@ -318,34 +330,45 @@ def test_a_restart_checks_the_service_images_after_its_build(tmp_path):
     calls = []
     stack = stacks.ComposeStack([], run=compose_run(config, calls), popen=lambda *a, **k: None, root=tmp_path)
     stack.start_build()
-    assert INSPECT + ["redis:7-alpine"] not in [command for command, _ in calls]
+    assert pulls(calls) == []
 
     stack.up()
-    assert INSPECT + ["redis:7-alpine"] in [command for command, _ in calls]
+    assert pulls(calls) == ["redis:7-alpine"]
 
 
 def test_building_one_service_gets_only_its_images(tmp_path):
-    (tmp_path / "Dockerfile.api").write_text("FROM python:3.12-slim\n", encoding="utf-8")
-    (tmp_path / "Dockerfile.worker").write_text("FROM nvidia/cuda:12.8.1-base-ubuntu22.04\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.api").write_text("FROM python:3.12-slim", encoding="utf-8")
+    (tmp_path / "Dockerfile.worker").write_text("FROM nvidia/cuda:12.8.1-base-ubuntu22.04", encoding="utf-8")
     config = {"services": {
         "api": {"build": {"context": str(tmp_path), "dockerfile": "Dockerfile.api"}},
         "worker": {"build": {"context": str(tmp_path), "dockerfile": "Dockerfile.worker"}},
         "redis": {"image": "redis:7-alpine"},
     }}
     calls = []
-    stacks.ComposeStack([], run=compose_run(config, calls, local={"python:3.12-slim"}), root=tmp_path).build("api")
+    stacks.ComposeStack([], run=compose_run(config, calls), root=tmp_path).build("api")
 
-    assert [command[-1] for command, _ in calls if command[:3] == ["docker", "image", "inspect"]] == ["python:3.12-slim"]
+    assert pulls(calls) == ["python:3.12-slim"]
+
+
+def test_a_start_with_every_image_here_is_one_listing(tmp_path):
+    (tmp_path / "Dockerfile.api").write_text("FROM python:3.12-slim", encoding="utf-8")
+    config = {"services": {"api": {"build": {"context": str(tmp_path), "dockerfile": "Dockerfile.api"}},
+                           "redis": {"image": "redis:7-alpine"}}}
+    calls = []
+    stacks.ComposeStack([], run=compose_run(config, calls, local={"python:3.12-slim", "redis:7-alpine"}),
+                        root=tmp_path).up()
+
+    assert [command for command, _ in calls][1:-1] == [IMAGE_LS]
 
 
 def test_a_start_without_a_build_gets_no_base_image(tmp_path):
-    (tmp_path / "Dockerfile.worker").write_text("FROM nvidia/cuda:12.8.1-base-ubuntu22.04\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.worker").write_text("FROM nvidia/cuda:12.8.1-base-ubuntu22.04", encoding="utf-8")
     config = {"services": {"worker": {"build": {"context": str(tmp_path), "dockerfile": "Dockerfile.worker"},
                                       "image": "hub.example/piano-worker:current"}}}
     calls = []
     stacks.NodeStack(gpu=False, run=compose_run(config, calls), root=tmp_path).up(build=False)
 
-    assert not [command for command, _ in calls if command[:3] == ["docker", "image", "inspect"]]
+    assert [command for command, _ in calls if command[:2] == ["docker", "image"]] == []
 
 
 def test_a_broken_compose_configuration_is_left_to_compose(tmp_path):

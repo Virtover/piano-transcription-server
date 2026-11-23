@@ -102,23 +102,34 @@ def base_images(dockerfiles: list[Path]) -> list[str]:
     return images
 
 
+def local_images(docker: Callable[[list[str]], subprocess.CompletedProcess]) -> set[str] | None:
+    """The names of the images on this machine, in one call; None when
+    docker cannot list them."""
+    result = docker(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"])
+    return set((result.stdout or "").split()) if result.returncode == 0 else None
+
+
 def ensure_image(docker: Callable[[list[str]], subprocess.CompletedProcess], image: str,
-                 say: Callable[[str], None] = lambda text: print(text, file=sys.stderr)) -> bool:
+                 say: Callable[[str], None] = lambda text: print(text, file=sys.stderr),
+                 local: set[str] | None = None,
+                 pull: Callable[[list[str]], subprocess.CompletedProcess] | None = None) -> bool:
     """When this machine lacks image, pull it from the first source that
     gives it, under its own name, so builds and Compose find it as if Docker
     Hub had given it. An image this machine has is left as it is, as builds
-    and Compose do: a start needs no network and rebuilds nothing."""
-    def run(command: list[str]) -> bool:
+    and Compose do: a start needs no network and rebuilds nothing. local is
+    what local_images listed; pull runs a pull, showing docker's progress."""
+    def run(command: list[str], runner=docker) -> bool:
         try:
-            return docker(command).returncode == 0
+            return runner(command).returncode == 0
         except subprocess.TimeoutExpired:
             return False
 
-    if run(["docker", "image", "inspect", "--format", "{{.Id}}", image]):
+    if image in local if local is not None else run(["docker", "image", "inspect", "--format", "{{.Id}}", image]):
         return True
     sources = image_sources(image)
     for source in sources:
-        if not run(["docker", "pull", "--quiet", source]):
+        say(f"{image} is not on this machine: pulling it from {source}")
+        if not run(["docker", "pull", source], pull or docker):
             continue
         if source == image:
             return True
@@ -277,10 +288,13 @@ class ComposeStack(Stack):
         return self._run(command, cwd=self.root, **options)
 
     def quiet_docker(self, command: list[str]) -> subprocess.CompletedProcess:
-        # A registry that accepts the connection and then stalls must not
-        # hold a start: after the timeout, the next source is tried.
-        timeout = {"timeout": PULL_TIMEOUT} if command[:2] == ["docker", "pull"] else {}
-        return self.docker(command, capture_output=True, text=True, **timeout)
+        return self.docker(command, capture_output=True, text=True)
+
+    def pull(self, command: list[str]) -> subprocess.CompletedProcess:
+        # Docker's own progress, as Compose shows it. A registry that accepts
+        # the connection and then stalls must not hold a start: after the
+        # timeout, the next source is tried.
+        return self.docker(command, timeout=PULL_TIMEOUT)
 
     def ensure_images(self, services: tuple[str, ...] = (), build: bool = True, start: bool = True) -> None:
         """Before a build or start: the images it needs that this machine
@@ -306,10 +320,13 @@ class ComposeStack(Stack):
         self._ensure(base_images(dockerfiles) + images)
 
     def _ensure(self, images: list[str]) -> None:
+        images = [image for image in dict.fromkeys(images) if image not in self._ensured]
+        if not images:
+            return
+        self._ensured.update(images)
+        local = local_images(self.quiet_docker)
         for image in images:
-            if image not in self._ensured:
-                self._ensured.add(image)
-                ensure_image(self.quiet_docker, image)
+            ensure_image(self.quiet_docker, image, local=local, pull=self.pull)
 
     def exec(self, service, *command, input=None, stdin=None, capture=True, terminal=False, env=None):
         no_terminal = [] if terminal else ["-T"]

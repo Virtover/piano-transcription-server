@@ -685,8 +685,10 @@ class Kube:
         names = {name: f"{registry + '/' if registry else ''}{repository.rsplit('/', 1)[-1]}:{tag}"
                  for name, (repository, _) in self.target.images().items()}
         stacks = SERVER_SCRIPT.STACKS
+        local = stacks.local_images(self.run)
         for base in stacks.base_images([self.root / IMAGES[name] for name in names]):
-            stacks.ensure_image(self.run, base, say=self.console.say)
+            stacks.ensure_image(self.run, base, say=self.console.say, local=local,
+                                pull=lambda command: self.run(command, capture=False))
         for name, image in names.items():
             self.console.say(f"  Building {self.style(image, 'bold')}")
             if self.run(["docker", "build", "-f", IMAGES[name], "-t", image, "."], capture=False).returncode != 0:
