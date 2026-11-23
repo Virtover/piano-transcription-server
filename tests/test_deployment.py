@@ -44,13 +44,20 @@ def test_deno_is_pinned_and_checked(dockerfile):
     assert "releases/latest" not in text
     assert re.search(r"ARG DENO_VERSION=\d+\.\d+\.\d+", text)
     assert re.search(r"ARG DENO_SHA256=[0-9a-f]{64}", text)
-    assert 'sha256sum -c -' in text
+    assert re.search(r"ARG DENO_DL_SHA256=[0-9a-f]{64}", text)
+    assert '/build/fetch.py --sha256 "$DENO_SHA256" --sha256 "$DENO_DL_SHA256" --out /tmp/deno.zip' in text
+    # From GitHub, else Deno's own download server, which builds each release
+    # again: a checksum each, both published, and only these files are kept.
+    for source in ("https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/",
+                   "https://dl.deno.land/release/v${DENO_VERSION}/"):
+        assert source + "deno-x86_64-unknown-linux-gnu.zip" in text
 
 
 def test_deno_is_the_same_in_both_images():
     versions = {
-        re.search(r"ARG DENO_VERSION=(\S+)", (ROOT / name).read_text(encoding="utf-8")).group(1)
-        for name in SERVICE_DOCKERFILES
+        tuple(re.search(rf"ARG {name}=(\S+)", (ROOT / dockerfile).read_text(encoding="utf-8")).group(1)
+              for name in ("DENO_VERSION", "DENO_SHA256", "DENO_DL_SHA256"))
+        for dockerfile in SERVICE_DOCKERFILES
     }
     assert len(versions) == 1
 

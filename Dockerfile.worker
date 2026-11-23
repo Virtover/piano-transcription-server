@@ -10,16 +10,16 @@ FROM base-${GPU_BUILD}
 ARG GPU_BUILD
 # PyTorch's CUDA 12.6 build, the newest that still includes Pascal. Its sm_60
 # kernels also run on sm_61 cards such as the GTX 1050 Ti.
-ARG LEGACY_TORCH_INDEX=https://download.pytorch.org/whl/cu126
+ARG LEGACY_TORCH_BUILD=cu126
 
 WORKDIR /app
 
-# yt-dlp runs deno for YouTube. A fixed version, checked against its
-# published checksum. To update: change both, from the release's .sha256sum file.
-ARG DENO_VERSION=2.9.8
-ARG DENO_SHA256=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
+# The build's own tools: apt's mirror lists, and fetch.py and pip_install.py,
+# which take each download from the next source when one fails.
+COPY build /build
 
-RUN apt-get update \
+RUN sh /build/apt-mirrors.sh \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
         python3-dev \
@@ -27,42 +27,47 @@ RUN apt-get update \
         ffmpeg \
         build-essential \
         postgresql-client \
-        wget \
         unzip \
-    && wget -qO /tmp/deno.zip "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \
-    && echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c - \
+    && rm -rf /var/lib/apt/lists/*
+
+# yt-dlp runs deno for YouTube. A fixed version, checked against its
+# published checksum: from GitHub, else Deno's own server, which builds each
+# release again and gives it another checksum. To update: change the version
+# and both checksums, each from its source's .sha256sum file next to the zip.
+ARG DENO_VERSION=2.9.8
+ARG DENO_SHA256=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
+ARG DENO_DL_SHA256=a39762429792913fe762ef0b59c9cba41dbd38195984da99221a193b13d97b40
+RUN python3 /build/fetch.py --sha256 "$DENO_SHA256" --sha256 "$DENO_DL_SHA256" --out /tmp/deno.zip \
+        "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \
+        "https://dl.deno.land/release/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \
     && unzip -p /tmp/deno.zip deno > /usr/local/bin/deno \
     && chmod +x /usr/local/bin/deno \
-    && rm -f /tmp/deno.zip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -f /tmp/deno.zip
 
 COPY requirements.worker.txt .
 
 # For legacy, torch and torchaudio come from PyTorch's index at the versions
 # pinned in requirements.worker.txt; 2.14.1+cu126 satisfies torch==2.14.1.
-RUN python3 -m pip install --upgrade pip setuptools wheel \
+RUN python3 /build/pip_install.py --upgrade pip setuptools wheel \
     && if [ "$GPU_BUILD" = legacy ]; then \
-        pip install --no-cache-dir --index-url "$LEGACY_TORCH_INDEX" \
+        python3 /build/pip_install.py --torch "$LEGACY_TORCH_BUILD" --no-cache-dir \
             $(grep -E '^(torch|torchaudio)==' requirements.worker.txt) \
         && python3 -c "import torch; flags = torch._C._cuda_getArchFlags(); assert {'sm_60', 'sm_61'} & set(flags.split()), f'torch {torch.__version__} lacks Pascal GPUs: {flags}'"; \
     fi \
-    && pip install --no-cache-dir -r requirements.worker.txt
+    && python3 /build/pip_install.py --no-cache-dir -r requirements.worker.txt
 
 # Beat This! beat tracker weights for the MIDI tempo map
 # (app/transcription/tempo.py), checked against their checksum and loaded once.
-# From the authors' server (CPJKU), or when it fails, from a copy on Hugging
-# Face at a fixed revision. Only a file with this checksum is kept, from
-# whichever source, so the copy can be no other file.
+# From the authors' server (CPJKU, Austria), else a copy on Hugging Face at a
+# fixed revision, else the Internet Archive's copy of the authors' file. Only
+# a file with this checksum is kept, so a copy can be no other file.
 ARG BEAT_THIS_CHECKPOINT_URL=https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt
 ARG BEAT_THIS_CHECKPOINT_MIRROR=https://huggingface.co/rtikw/localmusic-assets/resolve/a44f51ed621bc9895c15f8b46194cf16d7b22b66/analysis/beat_this-final0.ckpt
+ARG BEAT_THIS_CHECKPOINT_ARCHIVE=https://web.archive.org/web/20250720021822id_/https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt
 ARG BEAT_THIS_CHECKPOINT_SHA256=8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331
 RUN mkdir -p /opt/beat-this \
-    && for url in "$BEAT_THIS_CHECKPOINT_URL" "$BEAT_THIS_CHECKPOINT_MIRROR"; do \
-         python3 -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], '/opt/beat-this/final0.ckpt')" "$url" \
-         && echo "${BEAT_THIS_CHECKPOINT_SHA256}  /opt/beat-this/final0.ckpt" | sha256sum -c - && break; \
-         echo "Beat This! weights: $url failed; trying the next source"; rm -f /opt/beat-this/final0.ckpt; \
-       done \
-    && echo "${BEAT_THIS_CHECKPOINT_SHA256}  /opt/beat-this/final0.ckpt" | sha256sum -c - \
+    && python3 /build/fetch.py --sha256 "$BEAT_THIS_CHECKPOINT_SHA256" --out /opt/beat-this/final0.ckpt \
+        "$BEAT_THIS_CHECKPOINT_URL" "$BEAT_THIS_CHECKPOINT_MIRROR" "$BEAT_THIS_CHECKPOINT_ARCHIVE" \
     && python3 -c "from beat_this.inference import load_model; load_model('/opt/beat-this/final0.ckpt')"
 
 # AMT-APC weights for piano arrangements (app/transcription/arrangement.py),
@@ -70,8 +75,8 @@ RUN mkdir -p /opt/beat-this \
 ARG AMT_APC_WEIGHTS_URL=https://github.com/310hz/amt-apc/releases/download/beta/apc.pth
 ARG AMT_APC_WEIGHTS_SHA256=78ebe9a28d65ec3849132adef6c38de599692abed0ae00191753a5032554fe7b
 RUN mkdir -p /opt/amt-apc \
-    && python3 -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], '/opt/amt-apc/apc.pth')" "$AMT_APC_WEIGHTS_URL" \
-    && echo "${AMT_APC_WEIGHTS_SHA256}  /opt/amt-apc/apc.pth" | sha256sum -c - \
+    && python3 /build/fetch.py --sha256 "$AMT_APC_WEIGHTS_SHA256" --out /opt/amt-apc/apc.pth \
+        "$AMT_APC_WEIGHTS_URL" \
     && python3 -c "import torch; torch.load('/opt/amt-apc/apc.pth', map_location='cpu', weights_only=True)"
 
 # The worker runs untrusted media through yt-dlp and ffmpeg, so not as root.

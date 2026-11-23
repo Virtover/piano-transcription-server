@@ -1,0 +1,13 @@
+# Debian's archive, for build/apt-mirrors.sh. apt takes each file from the
+# lowest priority that has it and checks it against the archive's signature,
+# so a mirror cannot change a package.
+# Debian's own, on Fastly's worldwide network
+http://deb.debian.org/debian/	priority:1
+# Oregon State University Open Source Lab, US
+https://debian.osuosl.org/debian/	priority:2
+# RWTH Aachen University, Germany
+https://ftp.halifax.rwth-aachen.de/debian/	priority:3
+# Japan's official Debian mirror
+http://ftp.jp.debian.org/debian/	priority:4
+# AARNet, Australia
+https://mirror.aarnet.edu.au/debian/	priority:5

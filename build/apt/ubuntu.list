@@ -1,0 +1,11 @@
+# Ubuntu's archive, for build/apt-mirrors.sh. apt takes each file from the
+# lowest priority that has it and checks it against the archive's signature,
+# so a mirror cannot change a package.
+# Canonical, UK and US
+http://archive.ubuntu.com/ubuntu/	priority:1
+# RWTH Aachen University, Germany
+https://ftp.halifax.rwth-aachen.de/ubuntu/	priority:2
+# JAIST, Japan
+https://ftp.jaist.ac.jp/pub/Linux/ubuntu/	priority:3
+# AARNet, Australia
+https://mirror.aarnet.edu.au/pub/ubuntu/archive/	priority:4

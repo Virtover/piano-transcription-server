@@ -67,7 +67,7 @@ def test_runpod_cuda_version_matches_the_dockerfile():
     dockerfile = (ROOT / "Dockerfile.runpod").read_text()
     wheel_tag = "cu" + RUNPOD_CUDA_VERSION.replace(".", "")
 
-    assert f"download.pytorch.org/whl/{wheel_tag}" in dockerfile
+    assert f"pip_install.py --torch {wheel_tag} " in dockerfile
     assert f"FROM nvidia/cuda:{RUNPOD_CUDA_VERSION}." in dockerfile
     assert f"torch.version.cuda.startswith('{RUNPOD_CUDA_VERSION}')" in dockerfile
 

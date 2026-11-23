@@ -1,0 +1,7 @@
+# Debian's security updates, for build/apt-mirrors.sh. Few mirrors carry them.
+# Debian's own, on Fastly's worldwide network
+http://deb.debian.org/debian-security/	priority:1
+# Debian's security servers, without Fastly
+http://security.debian.org/debian-security/	priority:2
+# AARNet, Australia
+https://mirror.aarnet.edu.au/debian-security/	priority:3

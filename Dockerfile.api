@@ -2,28 +2,23 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# The build's own tools: apt's mirror lists, and fetch.py and pip_install.py,
+# which take each download from the next source when one fails.
+COPY build /build
+
 # yt-dlp runs deno for YouTube. A fixed version, checked against its
-# published checksum. To update: change both, from the release's .sha256sum file.
+# published checksum: from GitHub, else Deno's own server, which builds each
+# release again and gives it another checksum. To update: change the version
+# and both checksums, each from its source's .sha256sum file next to the zip.
 ARG DENO_VERSION=2.9.8
 ARG DENO_SHA256=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
+ARG DENO_DL_SHA256=a39762429792913fe762ef0b59c9cba41dbd38195984da99221a193b13d97b40
 
-RUN apt-get update \
-	&& apt-get install -y --no-install-recommends \
-		ca-certificates \
-		ffmpeg \
-		postgresql-client \
-		unzip \
-		wget \
-	&& wget -qO /tmp/deno.zip "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \
-	&& echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c - \
-	&& unzip -p /tmp/deno.zip deno > /usr/local/bin/deno \
-	&& chmod +x /usr/local/bin/deno \
-	&& rm -f /tmp/deno.zip \
-	&& rm -rf /var/lib/apt/lists/*
+RUN sh /build/apt-mirrors.sh 	&& apt-get update 	&& apt-get install -y --no-install-recommends 		ca-certificates 		ffmpeg 		postgresql-client 		unzip 	&& python /build/fetch.py --sha256 "$DENO_SHA256" --sha256 "$DENO_DL_SHA256" --out /tmp/deno.zip 		"https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" 		"https://dl.deno.land/release/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" 	&& unzip -p /tmp/deno.zip deno > /usr/local/bin/deno 	&& chmod +x /usr/local/bin/deno 	&& rm -f /tmp/deno.zip 	&& rm -rf /var/lib/apt/lists/*
 
 COPY requirements.api.txt .
 
-RUN pip install --no-cache-dir -r requirements.api.txt
+RUN python /build/pip_install.py --no-cache-dir -r requirements.api.txt
 
 # The services run as this user, not root. New volumes mounted at /data and
 # /billing take the ownership below; see "Running as a non-root user" in

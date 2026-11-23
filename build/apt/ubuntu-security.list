@@ -1,0 +1,11 @@
+# Ubuntu's security updates, for build/apt-mirrors.sh; the archive mirrors
+# carry them too, a few hours later.
+# Canonical, UK and US
+http://security.ubuntu.com/ubuntu/	priority:1
+http://archive.ubuntu.com/ubuntu/	priority:2
+# RWTH Aachen University, Germany
+https://ftp.halifax.rwth-aachen.de/ubuntu/	priority:3
+# JAIST, Japan
+https://ftp.jaist.ac.jp/pub/Linux/ubuntu/	priority:4
+# AARNet, Australia
+https://mirror.aarnet.edu.au/pub/ubuntu/archive/	priority:5

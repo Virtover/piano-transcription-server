@@ -193,9 +193,11 @@ def test_profiles_reach_restart_commands():
 
     assert all(command[:4] == ["docker", "compose", "--profile", "outsource"] for command in calls)
     assert calls[0][4:] == ["exec", "-T", "api", "python", "-m", "app.maintenance", "status"]
-    assert calls[1][4:] == ["build"]
-    assert calls[2][4:] == ["up", "-d", "--build"]
-    assert calls[3][4:] == ["up", "-d"]
+    # The images to pull before a build, read once.
+    assert calls[1][4:] == ["config", "--format", "json"]
+    assert calls[2][4:] == ["build"]
+    assert calls[3][4:] == ["up", "-d", "--build"]
+    assert calls[4][4:] == ["up", "-d"]
 
 
 def test_requests_are_built_on_the_primitives_alone(tmp_path):
@@ -1212,6 +1214,7 @@ def test_compose_exec_passes_variables_and_a_terminal(tmp_path):
     assert [command for command, _ in calls] == [
         ["docker", "compose", "exec", "-e", "A=1", "api", "true"],
         ["docker", "compose", "run", "--rm", "--no-deps", "-T", "api", "python", "-m", "app.config", "check", "--online"],
+        ["docker", "compose", "config", "--format", "json"],
         ["docker", "compose", "build", "--quiet", "api"],
     ]
     assert all(options["cwd"] == tmp_path for _, options in calls)

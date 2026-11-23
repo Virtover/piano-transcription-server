@@ -219,6 +219,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_subscriptions.py` | Subscriptions (plans' settings and levels, periods replacing free minutes, renewals, grace, hold, upgrades, one account per subscription, the refresh from Google Play, acknowledgement), unlimited plans and their fair-use limit, refunded orders, crashes mid-transaction, welcome minutes, and minutes for every account. With `PIANO_TEST_POSTGRES_URL`, also on PostgreSQL, with the admin web page's role. |
 | `test_voided_purchases.py` | Refunds and chargebacks: minutes taken back once, negative balances, free minutes, and reading every page from Google Play. |
 | `test_deployment.py` | The images: pinned requirements and deno, services not running as root, and the startup check for root-owned volumes. |
+| `test_build_sources.py` | Download sources of the image builds: apt's mirror lists, `build/fetch.py` keeping only a file with its checksum, `build/pip_install.py` moving to the next index, every Dockerfile using them, and the images taken from a copy of Docker Hub's when it fails. |
 | `test_device_capacity.py` | GPU capacity calculation from total VRAM, the live room for jobs (`GpuRoom`: the worker's own memory, caching, failed readings), and the `nvidia-smi` free memory check used under WSL. |
 | `test_device_selection.py` | GPU and CPU device selection for transcription jobs. Needs the worker dependencies, so it is skipped in the API test environment. |
 

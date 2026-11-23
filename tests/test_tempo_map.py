@@ -300,12 +300,15 @@ def test_images_include_the_beat_tracker_weights(dockerfile):
     text = (ROOT / dockerfile).read_text(encoding="utf-8")
 
     assert re.search(r"ARG BEAT_THIS_CHECKPOINT_SHA256=[0-9a-f]{64}", text)
-    assert text.count(str(tempo.CHECKPOINT.as_posix())) >= 3
-    assert "sha256sum -c -" in text
-    # A second source, at a fixed revision, for when the authors' server fails;
-    # the checksum is checked after either.
+    # Fetched with its checksum checked, and loaded once.
+    checkpoint = tempo.CHECKPOINT.as_posix()
+    assert f'/build/fetch.py --sha256 "$BEAT_THIS_CHECKPOINT_SHA256" --out {checkpoint}' in text
+    assert f"load_model('{checkpoint}')" in text
+    # Copies at a fixed revision and a fixed capture, for when the authors'
+    # server fails; the checksum decides which file is kept.
     assert re.search(r"ARG BEAT_THIS_CHECKPOINT_MIRROR=https://huggingface\.co/[^/]+/[^/]+/resolve/[0-9a-f]{40}/", text)
-    assert 'for url in "$BEAT_THIS_CHECKPOINT_URL" "$BEAT_THIS_CHECKPOINT_MIRROR"' in text
+    assert re.search(r"ARG BEAT_THIS_CHECKPOINT_ARCHIVE=https://web\.archive\.org/web/\d{14}id_/", text)
+    assert '"$BEAT_THIS_CHECKPOINT_URL" "$BEAT_THIS_CHECKPOINT_MIRROR" "$BEAT_THIS_CHECKPOINT_ARCHIVE"' in text
 
 
 def test_beat_tracking_moves_to_cpu_when_the_gpu_is_full(tmp_path, monkeypatch):

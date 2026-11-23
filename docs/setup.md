@@ -175,6 +175,21 @@ Optional. When the local GPU is busy, jobs can run on RunPod Serverless GPUs ins
 
 See [Outsourcing to RunPod](runpod.md). It also includes a free local test that needs none of these accounts.
 
+## 🌍 Download sources of a build
+
+A build downloads from several services, and each has copies elsewhere that the build turns to when it fails. A copy is used only after the original failed, and the build log says which.
+
+| What | First | Then |
+| --- | --- | --- |
+| Base and service images | Docker Hub | AWS's and Google's copies of Docker Hub, and NVIDIA's own registry for CUDA. Identical images, by digest |
+| Ubuntu and Debian packages | The distribution's own servers | Mirrors in the US, Germany, Japan, and Australia (`build/apt/`). apt checks every package against the distribution's signature |
+| deno and model weights | GitHub, and the weights' authors | Deno's own server, and copies of the weights on Hugging Face and the Internet Archive. Only a file with a checksum in the Dockerfile is kept (`build/fetch.py`) |
+| Python packages | PyPI, and PyTorch's index for torch | University and company mirrors in South Korea and China (`build/pip_install.py`) |
+
+Before a build or start, `scripts/server.py` and `scripts/kube.py` pull the images this machine lacks, base and service images alike. An image already here is left as it is, as Docker does, so a start needs no network and rebuilds nothing. A copy is tagged with the image's own name, so the build and Compose find it. A plain `docker compose up --build` takes images from Docker Hub only. To take newer base images, pull them before a build: `docker pull python:3.12-slim`.
+
+Python packages are not signed: a mirror is trusted as much as PyPI. Only mirrors run by universities and large companies are listed.
+
 ## 🧹 Freeing disk space
 
 Each build of the worker or RunPod image is 7 to 8 GB, and Docker keeps every old image and its build cache. On Windows, all of it lives in one virtual disk file, `%LOCALAPPDATA%\Docker\wsl\disk\docker_data.vhdx`, which grows but never shrinks on its own. When drive C: fills up, builds stop with `error reading from server: EOF` and Docker Desktop reports **Docker Desktop is unable to start**.

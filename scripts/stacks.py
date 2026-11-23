@@ -10,6 +10,8 @@ command themselves; a test keeps it so.
 Runs on the host with only the Python standard library.
 """
 
+import json
+import re
 import shlex
 import subprocess
 import sys
@@ -53,6 +55,79 @@ def run_options(input: str | None, stdin, capture: bool) -> dict:
 
 def failure(result, fallback: str) -> str:
     return (result.stderr or result.stdout or "").strip() or fallback
+
+
+# --- Images from Docker Hub, or an identical copy elsewhere -------------------
+
+# Registries that copy Docker Hub's official images (python, redis, postgres)
+# byte for byte, by digest: AWS's in the US, then Google's worldwide one.
+OFFICIAL_IMAGE_COPIES = ["public.ecr.aws/docker/library/", "mirror.gcr.io/library/"]
+# Other Docker Hub images: their publisher's own registry first, then
+# Google's copy of Docker Hub, which keeps the images many people pull.
+PUBLISHER_REGISTRIES = {"nvidia/cuda": ["nvcr.io/"]}
+OTHER_IMAGE_COPIES = ["mirror.gcr.io/"]
+# The longest one source may take to give an image.
+PULL_TIMEOUT = 900
+FROM_LINE = re.compile(r"^FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", re.IGNORECASE | re.MULTILINE)
+
+
+def image_sources(image: str) -> list[str]:
+    """Where image can be pulled from: Docker Hub, then copies of it. An
+    image of another registry has only its own."""
+    name = image.split("@")[0]
+    if ":" in name.rsplit("/", 1)[-1]:
+        name = name.rsplit(":", 1)[0]
+    first = name.split("/")[0]
+    if "/" in name and ("." in first or ":" in first or first == "localhost"):
+        return [image]
+    if "/" not in name:
+        return [image] + [copy + image for copy in OFFICIAL_IMAGE_COPIES]
+    return [image] + [registry + image for registry in PUBLISHER_REGISTRIES.get(name, [])] \
+        + [copy + image for copy in OTHER_IMAGE_COPIES]
+
+
+def base_images(dockerfiles: list[Path]) -> list[str]:
+    """The images the Dockerfiles start FROM, without their own stages and
+    names chosen by a build argument."""
+    images = []
+    for dockerfile in dockerfiles:
+        if not dockerfile.is_file():
+            continue
+        stages = set()
+        for image, stage in FROM_LINE.findall(dockerfile.read_text(encoding="utf-8")):
+            if "$" not in image and image not in stages and image != "scratch" and image not in images:
+                images.append(image)
+            if stage:
+                stages.add(stage)
+    return images
+
+
+def ensure_image(docker: Callable[[list[str]], subprocess.CompletedProcess], image: str,
+                 say: Callable[[str], None] = lambda text: print(text, file=sys.stderr)) -> bool:
+    """When this machine lacks image, pull it from the first source that
+    gives it, under its own name, so builds and Compose find it as if Docker
+    Hub had given it. An image this machine has is left as it is, as builds
+    and Compose do: a start needs no network and rebuilds nothing."""
+    def run(command: list[str]) -> bool:
+        try:
+            return docker(command).returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
+
+    if run(["docker", "image", "inspect", "--format", "{{.Id}}", image]):
+        return True
+    sources = image_sources(image)
+    for source in sources:
+        if not run(["docker", "pull", "--quiet", source]):
+            continue
+        if source == image:
+            return True
+        if run(["docker", "tag", source, image]):
+            run(["docker", "image", "rm", source])
+            say(f"{image}: taken from {source}, an identical copy, as Docker Hub failed.")
+            return True
+    say(f"{image}: no registry gave it ({', '.join(sources)}); the build or start that needs it will fail.")
+    return False
 
 
 class Stack:
@@ -191,6 +266,8 @@ class ComposeStack(Stack):
         self._popen = popen
         self.root = root
         self._prepare = prepare
+        self._services: dict | None = None
+        self._ensured: set[str] = set()
 
     def compose(self, profiles: list[str] | None = None) -> list[str]:
         selected = self.profiles if profiles is None else profiles
@@ -198,6 +275,41 @@ class ComposeStack(Stack):
 
     def docker(self, command: list[str], **options) -> subprocess.CompletedProcess:
         return self._run(command, cwd=self.root, **options)
+
+    def quiet_docker(self, command: list[str]) -> subprocess.CompletedProcess:
+        # A registry that accepts the connection and then stalls must not
+        # hold a start: after the timeout, the next source is tried.
+        timeout = {"timeout": PULL_TIMEOUT} if command[:2] == ["docker", "pull"] else {}
+        return self.docker(command, capture_output=True, text=True, **timeout)
+
+    def ensure_images(self, services: tuple[str, ...] = (), build: bool = True, start: bool = True) -> None:
+        """Before a build or start: the images it needs that this machine
+        lacks, from Docker Hub or a copy of it (ensure_image). The images the
+        builds start from with build, and the services' own with start; only
+        those of services, when given."""
+        if self._services is None:
+            result = self.quiet_docker(self.compose() + ["config", "--format", "json"])
+            try:
+                self._services = json.loads(result.stdout)["services"] if result.returncode == 0 else {}
+            except (TypeError, ValueError, KeyError):
+                self._services = {}
+        dockerfiles, images = [], []
+        for name, service in self._services.items():
+            if services and name not in services:
+                continue
+            if service.get("build"):
+                path = Path(service["build"].get("context") or self.root) / service["build"].get("dockerfile", "Dockerfile")
+                if build and path not in dockerfiles:
+                    dockerfiles.append(path)
+            elif start and service.get("image") and service["image"] not in images:
+                images.append(service["image"])
+        self._ensure(base_images(dockerfiles) + images)
+
+    def _ensure(self, images: list[str]) -> None:
+        for image in images:
+            if image not in self._ensured:
+                self._ensured.add(image)
+                ensure_image(self.quiet_docker, image)
 
     def exec(self, service, *command, input=None, stdin=None, capture=True, terminal=False, env=None):
         no_terminal = [] if terminal else ["-T"]
@@ -223,14 +335,17 @@ class ComposeStack(Stack):
             text=True, encoding="utf-8", errors="replace")
 
     def build(self, *services: str, quiet: bool = False) -> int:
+        self.ensure_images(services, start=False)
         return self.docker(self.compose() + ["build", *(["--quiet"] if quiet else []), *services]).returncode
 
     def start_build(self):
+        self.ensure_images(start=False)
         return self._popen(self.compose() + ["build"], cwd=self.root)
 
     def up(self, command: str | None = None, build: bool = True) -> int:
         if command:
             return self.docker(shlex.split(command, posix=(sys.platform != "win32"))).returncode
+        self.ensure_images(build=build)
         return self.docker(self.compose() + ["up", "-d"] + (["--build"] if build else [])).returncode
 
     def stop(self, down: bool) -> int:
@@ -284,6 +399,7 @@ class ComposeStack(Stack):
 
     def build_image(self, dockerfile: str, tag: str, build_args: dict[str, str]) -> int:
         arguments = [part for name, value in build_args.items() for part in ("--build-arg", f"{name}={value}")]
+        self._ensure(base_images([self.root / dockerfile]))
         return self.docker(["docker", "build", "-f", dockerfile, *arguments, "-t", tag, "."]).returncode
 
     def push_image(self, tag: str) -> str | None:
@@ -320,6 +436,7 @@ class NodeStack(ComposeStack):
 
     def up(self, command: str | None = None, build: bool = True, recreate: bool = False) -> int:
         # recreate: after join, whose new password a running worker read before.
+        self.ensure_images(build=build)
         return self.docker(self.compose() + ["up", "-d"] + (["--build"] if build else [])
                            + (["--force-recreate"] if recreate else [])).returncode
 
