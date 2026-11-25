@@ -1155,7 +1155,7 @@ def test_a_plans_longer_video_limit_applies_to_its_subscribers_only(google, monk
 
     client, settings, billing, fake = google
 
-    def check_video(source_url, user_id=None):
+    def check_video(source_url, user_id=None, sender=None):
         # The site's answer, then the real length check.
         return billing_routes.CheckedVideo(
             billing_routes.ensure_allowed_length(130.0, user_id), {"title": "Long", "duration": 130}, time.time()

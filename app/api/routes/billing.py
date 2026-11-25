@@ -1,18 +1,22 @@
 import hashlib
 import json
 import logging
+import math
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, HttpUrl
 from redis import Redis
+from redis.exceptions import RedisError
 
 from app.billing import Billing, SubscriptionOwned, transcription_cost
 from app.config import settings
 from app import clips, controls, google_play, maintenance, video_check, video_sites
-from app.errors import SourceBusy, SourceError, SourceTimedOut, SourceUnsupported, SourceVideoUnavailable
+from app.errors import SourceBusy, SourceError, SourceRefused, SourceTimedOut, SourceUnsupported
+from app.errors import SourceVideoUnavailable
 from app.maintenance import NoticeResponse
 from app.slots import VIDEO_CHECKS_KEY, LeasedSlot
 from app.auth import AuthenticatedUser, current_user, google_oauth_client_ids
@@ -38,6 +42,29 @@ FAILED_CHECK_KINDS = {kind.__name__: kind for kind in FAILED_CHECK_TTLS}
 # Held while a URL is checked, so the same URL is checked once at a time.
 CHECKING_SUFFIX = ":checking"
 CHECKING_TTL = 90
+# Checks that are not answered from memory, in this process at once. Each
+# holds one of the threads every sync route shares (AnyIO's 40) while it
+# waits for a place and runs yt-dlp, up to a minute, so links sent faster
+# than they can be checked are refused at once instead of leaving none
+# for job status and downloads.
+CHECK_THREADS = 16
+check_threads = threading.BoundedSemaphore(CHECK_THREADS)
+# The links whose check failed lately, per client, scored by when: a sorted
+# set, so a link counts once however often it is sent.
+FAILED_CHECKS_KEY = "video_check:failed:"
+# Failures about the link itself; a busy server or a site that refuses or
+# does not answer is nobody's fault, and an unsafe link never runs yt-dlp.
+COUNTED_FAILURES = {SourceError, SourceUnsupported, SourceVideoUnavailable}
+
+
+def check_client(request: Request, user: AuthenticatedUser | None) -> str:
+    """Whose failed links count together: a signed-in user, or without
+    sign-in the address connecting to the API. That is never a header a
+    client could forge, so behind a proxy or tunnel all such clients share
+    the proxy's address."""
+    if user is not None:
+        return f"user:{user.user_id}"
+    return f"address:{request.client.host if request.client else 'unknown'}"
 
 
 class CostResponse(BaseModel):
@@ -173,22 +200,84 @@ class CheckedVideo:
     checked_at: float
 
 
-def check_video(source_url: HttpUrl, user_id: str | None = None) -> CheckedVideo:
+def check_video(source_url: HttpUrl, user_id: str | None = None, client: str | None = None) -> CheckedVideo:
     """Read a video's info with yt-dlp, and check its length. A check is
     reused for VIDEO_CHECK_TTL, so asking the cost and then submitting the
     video asks the site once. Requests for a URL being checked wait for that
-    check instead of starting another."""
+    check instead of starting another. With client (check_client), a client
+    whose links failed MAX_FAILED_VIDEO_CHECKS times lately is refused
+    before yt-dlp runs; answers from memory are still given."""
     try:
         # An unsafe URL is refused as unsupported.
         safe_url = ensure_safe_source_url(str(source_url))
         key = VIDEO_CHECK_KEY + hashlib.sha256(safe_url.encode()).hexdigest()
         checked = cached_check(key)
         if checked is None:
-            checked = run_check(key, safe_url)
+            ensure_few_failures(client, user_id)
+            checked = fresh_check(key, safe_url, client)
     except SourceError as error:
         raise source_refusal(error) from error
     return CheckedVideo(
         ensure_allowed_length(float(checked["info"]["duration"]), user_id), checked["info"], checked["checked_at"]
+    )
+
+
+def fresh_check(key: str, safe_url: str, client: str | None) -> dict[str, Any]:
+    if not check_threads.acquire(blocking=False):
+        raise SourceBusy(video_sites.BUSY_MESSAGE, retry_after=5)
+    try:
+        return run_check(key, safe_url)
+    except SourceError as error:
+        if client is not None and type(error) in COUNTED_FAILURES:
+            remember_failure(client, key)
+        raise
+    finally:
+        check_threads.release()
+
+
+def remember_failure(client: str, link: str) -> None:
+    """Count a link whose check failed against client. In one transaction,
+    so the set expires however the API stops."""
+    window = settings.limits.failed_video_check_window
+    if settings.limits.max_failed_video_checks is None:
+        return
+    key = FAILED_CHECKS_KEY + client
+    now = time.time()
+    try:
+        with redis.pipeline() as pipe:
+            pipe.zadd(key, {link: now})
+            pipe.zremrangebyscore(key, "-inf", now - window)
+            pipe.expire(key, math.ceil(window))
+            pipe.execute()
+    except RedisError:
+        # The user's answer is the link's failure, not this.
+        logger.warning("Could not count a failed video check", exc_info=True)
+
+
+def ensure_few_failures(client: str | None, user_id: str | None) -> None:
+    """Refuse a client with MAX_FAILED_VIDEO_CHECKS different failed links
+    in the last FAILED_VIDEO_CHECK_WINDOW, until enough of them leave it.
+    A developer's account, which tests failures, is never refused."""
+    limit = settings.limits.max_failed_video_checks
+    if client is None or limit is None:
+        return
+    window = settings.limits.failed_video_check_window
+    key = FAILED_CHECKS_KEY + client
+    now = time.time()
+    with redis.pipeline() as pipe:
+        pipe.zremrangebyscore(key, "-inf", now - window)
+        pipe.zrange(key, 0, -1, withscores=True)
+        _, failures = pipe.execute()
+    if len(failures) < limit or (user_id is not None and billing.is_developer(user_id)):
+        return
+    # When enough have left the window for one more.
+    _, since = failures[len(failures) - limit]
+    retry_after = max(1, math.ceil(since + window - now))
+    wait = "a minute" if retry_after <= 60 else f"{math.ceil(retry_after / 60)} minutes"
+    raise SourceRefused(
+        f"Several links you sent lately could not be read, so new links can be checked again in {wait}. "
+        "Check the link, or upload the file instead",
+        retry_after=retry_after,
     )
 
 
@@ -263,8 +352,8 @@ def source_refusal(error: SourceError) -> HTTPException:
     )
 
 
-def video_duration(source_url: HttpUrl, user_id: str | None = None) -> float:
-    return check_video(source_url, user_id).duration
+def video_duration(source_url: HttpUrl, user_id: str | None = None, client: str | None = None) -> float:
+    return check_video(source_url, user_id, client).duration
 
 
 def ensure_accepting(user_id: str, link: bool, submission: bool = True, source_url: str | None = None) -> None:
@@ -406,6 +495,7 @@ def balance_of(user_id: str) -> BalanceResponse:
 
 @router.get("/cost", response_model=CostResponse, response_model_exclude_none=True)
 def cost(
+    connection: Request,
     source_url: HttpUrl | None = None,
     duration_seconds: float | None = Query(default=None, gt=0),
     start_seconds: float | None = Query(default=None, ge=0, allow_inf_nan=False),
@@ -425,7 +515,7 @@ def cost(
     )
     user_id = user.user_id if user else None
     if source_url is not None:
-        duration = video_duration(source_url, user_id)
+        duration = video_duration(source_url, user_id, check_client(connection, user))
     else:
         duration = ensure_allowed_length(duration_seconds, user_id)
     clip = checked_clip(start_seconds, end_seconds, duration)

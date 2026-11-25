@@ -114,7 +114,7 @@ LIMITED_BY_SITE = {
 }
 # The video itself cannot be read; asking again would not help.
 UNAVAILABLE = re.compile(
-    r"Video unavailable|Private video|video is private|has been removed|members[- ]only"
+    r"Video unavailable|video is unavailable|Private video|video is private|has been removed|members[- ]only"
     r"|confirm your age|age[- ]restricted|in your country"
     r"|copyright|live event will begin|Premieres in|HTTP Error 404|does not exist",
     re.IGNORECASE,

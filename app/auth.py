@@ -1,7 +1,9 @@
 import base64
 import binascii
+import hashlib
 import hmac
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +27,17 @@ USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 # Avoids a call to Google on every API request. Worst-case delay before a
 # revoked token is noticed is the TTL.
 _token_cache: TTLCache = TTLCache(maxsize=10_000, ttl=300)
+# Tokens Google rejected, by their hash, with the answer: a client that
+# keeps sending one is answered without asking Google again.
+_rejected_tokens: TTLCache = TTLCache(maxsize=10_000, ttl=60)
+# TTLCache is not thread-safe, and sync routes run on many threads.
+_cache_lock = threading.Lock()
+# Calls to Google at once in this process. Each holds one of the threads
+# every sync route shares for up to its timeout, so tokens this process has
+# not seen, sent faster than Google answers them, are refused at once
+# instead of leaving no thread for the others.
+GOOGLE_CHECKS = 8
+_google_checks = threading.BoundedSemaphore(GOOGLE_CHECKS)
 
 
 SERVER_PASSWORD_HEADER = "X-Server-Password"
@@ -90,15 +103,16 @@ def verify_google_access_token(token: str) -> dict[str, Any]:
             detail="Google authentication is not configured",
         )
     
-    info = _token_cache.get(token)
+    with _cache_lock:
+        info = _token_cache.get(token)
     if info is None:
-        info = _fetch_token_info(token, allowed_client_ids)
-        _token_cache[token] = info
-    
+        info = _checked_with_google(token, allowed_client_ids)
+
     now = time.time()
     expires_at = int(info.get("exp", 0))
     if expires_at <= now:
-        _token_cache.pop(token, None)
+        with _cache_lock:
+            _token_cache.pop(token, None)
         raise HTTPException(
             status_code=401,
             detail="Google authentication token has expired",
@@ -115,6 +129,36 @@ def verify_google_access_token(token: str) -> dict[str, Any]:
     #         headers={"WWW-Authenticate": "Bearer"},
     #     )
     #
+    return info
+
+
+def _checked_with_google(token: str, allowed_client_ids: set[str]) -> dict[str, Any]:
+    """The token's info from Google, remembered either way: as valid for
+    _token_cache's time, or as rejected (401) for _rejected_tokens'. An
+    outage is not remembered."""
+    digest = hashlib.sha256(token.encode()).digest()
+    with _cache_lock:
+        rejected = _rejected_tokens.get(digest)
+    if rejected is not None:
+        detail, headers = rejected
+        raise HTTPException(status_code=401, detail=detail, headers=headers)
+    if not _google_checks.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="Google authentication service is busy; try again shortly",
+            headers={"Retry-After": "2"},
+        )
+    try:
+        info = _fetch_token_info(token, allowed_client_ids)
+    except HTTPException as error:
+        if error.status_code == 401:
+            with _cache_lock:
+                _rejected_tokens[digest] = (error.detail, error.headers)
+        raise
+    finally:
+        _google_checks.release()
+    with _cache_lock:
+        _token_cache[token] = info
     return info
 
 

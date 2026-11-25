@@ -174,7 +174,7 @@ def test_video_check_gives_its_slot_back(yt_dlp, stdout):
 def test_cost_needs_sign_in_when_billing(api_context, monkeypatch):
     client, settings, _ = api_context
     settings.billing.provider = "google_play"
-    monkeypatch.setattr(billing_routes, "video_duration", lambda url, user_id=None: pytest.fail("yt-dlp ran"))
+    monkeypatch.setattr(billing_routes, "video_duration", lambda url, user_id=None, sender=None: pytest.fail("yt-dlp ran"))
 
     response = client.get("/api/billing/cost", params={"source_url": "https://youtube.com/watch?v=1"})
 

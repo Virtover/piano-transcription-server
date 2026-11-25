@@ -16,7 +16,7 @@ from app.job_storage import StorageUnavailable, delete_job_files
 from app.maintenance import NoticeResponse
 from app.config import settings
 from app.billing import Billing, transcription_cost, InsufficientMinutes
-from app.api.routes.billing import check_video, checked_clip, ensure_accepting, ensure_allowed_length
+from app.api.routes.billing import check_client, check_video, checked_clip, ensure_accepting, ensure_allowed_length
 from app.auth import AuthenticatedUser, current_user
 from app.media import UnsupportedMedia, probe_audio
 from app.outsource import routing
@@ -447,6 +447,7 @@ def queue_job(
 )
 def create_transcription(
     request: CreateTranscriptionRequest,
+    connection: Request,
     user: AuthenticatedUser | None = Depends(current_user),
     idempotency_key: str | None = IDEMPOTENCY_KEY,
 ):
@@ -465,7 +466,12 @@ def create_transcription(
         return earlier
     try:
         return submit_link(
-            job_id, str(request.source_url), user, fields=modes, clip=(request.start_seconds, request.end_seconds)
+            job_id,
+            str(request.source_url),
+            user,
+            fields=modes,
+            clip=(request.start_seconds, request.end_seconds),
+            client=check_client(connection, user),
         )
     except BaseException:
         give_back_place(job_id, user_id)
@@ -491,10 +497,12 @@ def submit_link(
     backend: routing.Backend | None = None,
     fields: dict[str, str] | None = None,
     clip: tuple[float | None, float | None] = (None, None),
+    client: str | None = None,
 ) -> CreateTranscriptionResponse:
     """Check a video link and queue it, for a job whose place is held, with
-    fields such as its mode, and only the clip's part of it if one is given."""
-    video = check_video(source_url, user.user_id if user else None)
+    fields such as its mode, and only the clip's part of it if one is given.
+    client, the sender's (check_client), counts the link if it fails."""
+    video = check_video(source_url, user.user_id if user else None, client)
     # Checked against the video's length before anything is saved.
     duration, fields = clip_job(video.duration, checked_clip(*clip, video.duration), fields or {})
     # The worker downloads with this info instead of asking the site again;

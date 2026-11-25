@@ -95,6 +95,8 @@ def test_a_site_limiting_the_server_opens_its_breaker(site, stderr):
     [
         (YOUTUBE, PRIVATE, SourceVideoUnavailable),
         (YOUTUBE, "ERROR: [youtube] abc: Video unavailable. This video has been removed by the uploader", SourceVideoUnavailable),
+        # YouTube's words for a video ID that does not exist.
+        (YOUTUBE, "ERROR: [youtube] Zq3xK9vLw2Q: This video is unavailable", SourceVideoUnavailable),
         (YOUTUBE, "ERROR: [youtube] abc: This live event will begin in 3 hours. Try again later", SourceVideoUnavailable),
         (YOUTUBE, "ERROR: Unsupported URL: https://youtube.com/feed", SourceUnsupported),
         (YOUTUBE, "ERROR: [youtube] abc: Requested format is not available", SourceError),
@@ -574,8 +576,8 @@ def test_links_to_a_refused_site_are_refused_but_others_and_uploads_accepted(api
     from app.api.routes import transcriptions
 
     monkeypatch.setattr(transcriptions, "probe_audio", lambda path, measure=True, max_seconds=None: 130.0)
-    monkeypatch.setattr(billing_routes, "video_duration", lambda url, user_id=None: 90.0)
-    monkeypatch.setattr(transcriptions, "check_video", lambda url, user_id=None: pytest.fail("the link was checked"))
+    monkeypatch.setattr(billing_routes, "video_duration", lambda url, user_id=None, sender=None: 90.0)
+    monkeypatch.setattr(transcriptions, "check_video", lambda url, user_id=None, sender=None: pytest.fail("the link was checked"))
     video_sites.open_breaker(YOUTUBE, video_sites.LIMITED, "429")
 
     link = client.post("/api/transcriptions", json={"source_url": "https://youtu.be/1"})

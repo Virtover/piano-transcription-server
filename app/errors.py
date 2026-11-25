@@ -57,6 +57,14 @@ class SourceBusy(SourceError):
     status = 503
 
 
+class SourceRefused(SourceError):
+    """This client sent many links that could not be read lately; its new
+    links wait (MAX_FAILED_VIDEO_CHECKS). Uploads still work."""
+
+    code = "too_many_failed_links"
+    status = 429
+
+
 class SourceVideoUnavailable(SourceError):
     """The video is private, removed, restricted, or not out yet."""
 

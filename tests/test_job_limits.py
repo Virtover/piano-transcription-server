@@ -103,7 +103,7 @@ def test_place_is_held_while_the_video_is_checked(api_context, monkeypatch):
     settings.limits.max_active_jobs = 1
     seen = {}
 
-    def check_video(url, user_id=None):
+    def check_video(url, user_id=None, sender=None):
         [key] = [key for key in tasks.redis.scan_iter("transcription:*")]
         seen["status"] = tasks.redis.hget(key, "status")
         seen["second"] = submit(client).status_code
@@ -119,7 +119,7 @@ def test_failed_video_check_gives_the_place_back(api_context, monkeypatch):
     client, settings, _ = api_context
     settings.limits.max_active_jobs = 1
 
-    def check_video(url, user_id=None):
+    def check_video(url, user_id=None, sender=None):
         raise HTTPException(status_code=422, detail="Unable to read video metadata")
 
     monkeypatch.setattr(transcriptions, "check_video", check_video)

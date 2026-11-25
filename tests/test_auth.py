@@ -234,3 +234,39 @@ def test_password_header_works_next_to_google_sign_in(password_protected, api_co
 
     assert response.status_code == 200
     assert response.json()["user_id"] == "user-1"
+
+
+def test_rejected_token_is_remembered_but_an_outage_is_not(google):
+    responses, calls = google
+    responses[auth.TOKENINFO_URL] = FakeResponse(400)
+    assert verify_status("bad")[0] == 401
+    # A client that keeps sending it is answered without asking Google.
+    assert verify_status("bad") == (401, "Invalid Google authentication token")
+    assert calls == [auth.TOKENINFO_URL]
+
+    responses[auth.TOKENINFO_URL] = FakeResponse(500)
+    assert verify_status("other")[0] == 503
+    responses[auth.TOKENINFO_URL] = FakeResponse(200, token_info())
+    assert auth.verify_google_access_token("other")["sub"] == "user-1"
+
+
+def test_google_checks_beyond_the_limit_are_refused_at_once(google, monkeypatch):
+    responses, calls = google
+    responses[auth.TOKENINFO_URL] = FakeResponse(200, token_info())
+    monkeypatch.setattr(auth, "_google_checks", auth.threading.BoundedSemaphore(1))
+    assert auth._google_checks.acquire(blocking=False)
+
+    with pytest.raises(HTTPException) as error:
+        auth.verify_google_access_token("token")
+
+    assert error.value.status_code == 503
+    assert error.value.headers["Retry-After"] == "2"
+    assert calls == []
+    auth._google_checks.release()
+    assert auth.verify_google_access_token("token")["sub"] == "user-1"
+    # Given back after a rejection and an outage too.
+    responses[auth.TOKENINFO_URL] = FakeResponse(401)
+    verify_status("bad")
+    responses[auth.TOKENINFO_URL] = requests.ConnectionError("offline")
+    verify_status("offline")
+    assert auth._google_checks.acquire(blocking=False)

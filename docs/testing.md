@@ -183,8 +183,9 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_requirements.py` | `requirements`: values calculated from the configuration, the RunPod CUDA version matching `Dockerfile.runpod`, the text and JSON output, and `--section` and `--feature`. |
 | `test_job_diagnostics.py` | Job diagnostics records at each job state, survival after the Redis job expires, account deletion, pruning, and inclusion in backups. |
 | `test_worker_tasks.py` | Worker job lifecycle, billing reconciliation (leaving jobs that just ended to whoever ended them), restart handling, and file cleanup. |
-| `test_auth.py` | Google token checks: audience, expiry, verified email, userinfo fallback, caching, and outages. |
+| `test_auth.py` | Google token checks: audience, expiry, verified email, userinfo fallback, caching, remembered rejections, the limit on calls to Google at once, and outages. |
 | `test_url_safety.py` | Source URL validation: allowed hosts, schemes, ports, credentials, and private addresses. |
+| `test_failed_links.py` | Link checks refused before `yt-dlp`: past the threads of an API replica, and for a client with `MAX_FAILED_VIDEO_CHECKS` different failed links; the same link counting once, the window, what never counts, and the counts expiring. |
 | `test_server_api.py` | Health and readiness, server info offers, `yt-dlp` duration handling, reused video checks, and the video information saved for the worker. |
 | `test_upload_api.py` | File uploads: storage, size and length limits, title handling, billing, cleanup on errors, and cost by duration. |
 | `test_media.py` | `ffprobe` checks: accepted and rejected formats, files without audio, and playlist files. Real-file tests need `ffmpeg`. |
