@@ -39,10 +39,10 @@ python -m pytest -q -k cancellation
 
 ## 🐳 Tests that need the worker's packages
 
-Tests that import `torch` or `transkun` (`tests/test_ensemble.py`, `tests/test_ensemble_models.py`, `tests/test_budget.py`, and the batching and device tests) are skipped in the test environment above, which does not install them. Run them in a worker image, which has the packages and dettato's weights, which `tests/test_ensemble_models.py` needs. The image has no pytest, no tests, and not the packages of the tests' shared fixtures (`tests/conftest.py`), so mount the tests and install them in the container:
+Tests that import `torch` or `transkun` (`tests/test_ensemble.py`, `tests/test_ensemble_models.py`, `tests/test_budget.py`, and the batching and device tests) are skipped in the test environment above, which does not install them. Run them in a worker image, which has the packages and dettato's weights, which `tests/test_ensemble_models.py` needs. The image has no pytest, no tests, and not the packages of the tests' shared fixtures (`tests/conftest.py`), so mount the tests and install them in the container. The packages are in the image's virtual environment, `/opt/venv`, which only root may change; as root, the installs vanish with the container:
 
 ```shell
-docker compose run --rm --no-deps -v ./tests:/app/tests:ro -v ./pytest.ini:/app/pytest.ini:ro worker sh -c "python3 -m pip install -q pytest fakeredis fastapi httpx && python3 -m pytest -q -p no:cacheprovider tests/test_budget.py tests/test_ensemble.py tests/test_ensemble_models.py"
+docker compose run --rm --no-deps --user root -v ./tests:/app/tests:ro -v ./pytest.ini:/app/pytest.ini:ro worker sh -c "python3 -m pip install -q pytest fakeredis fastapi httpx && python3 -m pytest -q -p no:cacheprovider tests/test_budget.py tests/test_ensemble.py tests/test_ensemble_models.py"
 ```
 
 ## 🧱 Tests on a real Redis
@@ -238,13 +238,13 @@ Some tests need PyTorch, Transkun, or `ffmpeg`, which are only in the worker ima
 **Windows (PowerShell)**
 
 ```powershell
-docker compose run --rm --no-deps -v "${PWD}\tests:/app/tests:ro" worker sh -c "pip install -q --user pytest && python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_media.py tests/test_pipeline_upload.py tests/test_gpu_batcher.py tests/test_device_selection.py tests/test_device_capacity.py"
+docker compose run --rm --no-deps -v "${PWD}\tests:/app/tests:ro" --user root worker sh -c "python3 -m pip install -q pytest fakeredis fastapi httpx && python3 -m pytest -q -p no:cacheprovider tests/test_media.py tests/test_pipeline_upload.py tests/test_gpu_batcher.py tests/test_device_selection.py tests/test_device_capacity.py"
 ```
 
 **macOS and Linux**
 
 ```bash
-docker compose run --rm --no-deps -v "$PWD/tests:/app/tests:ro" worker sh -c "pip install -q --user pytest && python3 -m pytest -q --noconftest -p no:cacheprovider tests/test_media.py tests/test_pipeline_upload.py tests/test_gpu_batcher.py tests/test_device_selection.py tests/test_device_capacity.py"
+docker compose run --rm --no-deps -v "$PWD/tests:/app/tests:ro" --user root worker sh -c "python3 -m pip install -q pytest fakeredis fastapi httpx && python3 -m pytest -q -p no:cacheprovider tests/test_media.py tests/test_pipeline_upload.py tests/test_gpu_batcher.py tests/test_device_selection.py tests/test_device_capacity.py"
 ```
 
 Run the handler tests in the RunPod image, on the CPU (`CUDA_VISIBLE_DEVICES=`) or with `--gpus all`:

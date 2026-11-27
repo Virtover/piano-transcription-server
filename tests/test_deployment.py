@@ -240,3 +240,29 @@ def test_startup_fails_on_unwritable_directories(directories, monkeypatch):
 
     with pytest.raises(config.ConfigError, match="not writable"):
         config.ensure_valid("cleanup")
+
+
+def test_worker_runs_a_supported_python_from_a_virtual_environment():
+    # yt-dlp runs on untrusted media and drops Python versions past their end
+    # of life: Ubuntu 24.04's Python 3.12, in a venv first on PATH (PEP 668).
+    dockerfile = (ROOT / "Dockerfile.worker").read_text(encoding="utf-8")
+
+    bases = re.findall(r"^FROM nvidia/cuda:\S+-base-(ubuntu[\d.]+) AS base-", dockerfile, re.MULTILINE)
+    assert bases == ["ubuntu24.04", "ubuntu24.04"]
+    assert "ENV VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH" in dockerfile
+    assert '/usr/bin/python3 -m venv "$VIRTUAL_ENV"' in dockerfile
+    assert "--break-system-packages" not in dockerfile
+    # The build checks Python's version and pkg_resources, and prints yt-dlp's.
+    assert "sys.version_info >= (3, 12)" in dockerfile
+    assert "pkg_resources.resource_filename('transkun', 'pretrained/2.0.pt')" in dockerfile
+    assert "yt-dlp $(yt-dlp --version)" in dockerfile
+
+
+def test_worker_setuptools_still_has_pkg_resources():
+    # transkun imports pkg_resources, which setuptools 81 removed; the venv has
+    # no Ubuntu python3-setuptools to fall back on.
+    pins = [line for line in requirement_lines("requirements.worker.txt") if line.startswith("setuptools==")]
+    assert len(pins) == 1
+    assert tuple(int(part) for part in pins[0].split("==")[1].split(".")[:1]) < (81,)
+    dockerfile = (ROOT / "Dockerfile.worker").read_text(encoding="utf-8")
+    assert "--upgrade pip wheel $(grep -E '^setuptools==' requirements.worker.txt)" in dockerfile

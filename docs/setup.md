@@ -149,7 +149,7 @@ Admin commands such as `python scripts/admin.py` run as the same user, so files 
 Verify GPU access before starting the stack:
 
 ```shell
-docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi
 ```
 
 The worker automatically uses CUDA when PyTorch detects a usable NVIDIA GPU. Otherwise it falls back to CPU. CPU execution is significantly slower. On a machine without an NVIDIA GPU, Docker refuses to start a worker that asks for one: `python scripts/server.py start` then sets `WORKER_PROCESSOR=cpu` in `.env`, which adds `docker-compose.cpu.yml` to `COMPOSE_FILE`, so the worker starts without a GPU, also with plain `docker compose` commands. Choose by hand with `python scripts/setup.py set WORKER_PROCESSOR`; see [`WORKER_PROCESSOR`](configuration.md). For a [home cluster's hub](cluster.md#a-hub-without-a-gpu-such-as-a-vps) without a GPU, such as a VPS, the nodes run the jobs.

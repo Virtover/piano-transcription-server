@@ -6,7 +6,7 @@ ARG GPU_BUILD=current
 
 # dettato.cpp for ensemble jobs on the CPU (app/transcription/ensemble/cpu.py):
 # dettato_cpu/server.cpp, built twice, for CPUs with AVX2 and FMA and for any
-# x86-64 CPU, each linked statically, so it runs on the older glibc below.
+# x86-64 CPU, each linked statically, so it runs on any glibc.
 # Its source and ggml's are release tarballs checked against their checksums
 # (a tarball GitHub changed would fail here, not build something else), and
 # its weights a GGUF file at a fixed revision.
@@ -46,8 +46,11 @@ RUN set -e; for variant in avx2 generic; do \
     done \
     && /opt/dettato-cpp/bin/dettato_server-generic 2>&1 | grep -q usage
 
-FROM nvidia/cuda:12.8.1-base-ubuntu22.04 AS base-current
-FROM nvidia/cuda:12.6.3-base-ubuntu22.04 AS base-legacy
+# Ubuntu 24.04 for its Python 3.12: yt-dlp, which runs on untrusted media,
+# drops each Python version once it no longer gets security fixes (3.10's
+# ended in October 2026), and an old yt-dlp stops working.
+FROM nvidia/cuda:12.8.1-base-ubuntu24.04 AS base-current
+FROM nvidia/cuda:12.6.3-base-ubuntu24.04 AS base-legacy
 FROM base-${GPU_BUILD}
 
 ARG GPU_BUILD
@@ -66,7 +69,7 @@ RUN sh /build/apt-mirrors.sh \
     && sh /build/apt_install.sh \
         python3 \
         python3-dev \
-        python3-pip \
+        python3-venv \
         ffmpeg \
         build-essential \
         postgresql-client \
@@ -89,15 +92,26 @@ RUN python3 /build/fetch.py --sha256 "$DENO_SHA256" --sha256 "$DENO_DL_SHA256" -
 
 COPY requirements.worker.txt .
 
+# Python packages go in a virtual environment: Ubuntu 24.04's Python refuses
+# pip installs into its own (PEP 668). First on PATH, so python3, python,
+# pip, and yt-dlp are the environment's for every command and user.
+ENV VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH
+
 # For legacy, torch and torchaudio come from PyTorch's index at the versions
 # pinned in requirements.worker.txt; 2.14.1+cu126 satisfies torch==2.14.1.
-RUN python3 /build/pip_install.py --upgrade pip setuptools wheel \
+# setuptools at its pin in requirements.worker.txt, for pkg_resources, which
+# finds transkun's weights; a new venv does not include it. The last lines
+# check both, and print the versions yt-dlp runs with.
+RUN /usr/bin/python3 -m venv "$VIRTUAL_ENV" \
+    && python3 /build/pip_install.py --upgrade pip wheel $(grep -E '^setuptools==' requirements.worker.txt) \
     && if [ "$GPU_BUILD" = legacy ]; then \
         python3 /build/pip_install.py --torch "$LEGACY_TORCH_BUILD" --no-cache-dir \
             $(grep -E '^(torch|torchaudio)==' requirements.worker.txt) \
         && python3 -c "import torch; flags = torch._C._cuda_getArchFlags(); assert {'sm_60', 'sm_61'} & set(flags.split()), f'torch {torch.__version__} lacks Pascal GPUs: {flags}'"; \
     fi \
-    && python3 /build/pip_install.py --no-cache-dir -r requirements.worker.txt
+    && python3 /build/pip_install.py --no-cache-dir -r requirements.worker.txt \
+    && python3 -c "import pkg_resources, sys; assert sys.version_info >= (3, 12), sys.version; pkg_resources.resource_filename('transkun', 'pretrained/2.0.pt')" \
+    && echo "$(python3 --version), yt-dlp $(yt-dlp --version), $(deno --version | head -n 1)"
 
 # Beat This! beat tracker weights for the MIDI tempo map
 # (app/transcription/tempo.py), checked against their checksum and loaded once.

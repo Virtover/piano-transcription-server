@@ -10,6 +10,10 @@ boto3==1.43.117
 # dispatch task); the same version as the API image.
 requests==2.34.2
 pydantic-settings==2.15.0
+# pkg_resources, which transkun and app/transcription/piano_transcription.py
+# use: setuptools 81 removed it. Ubuntu's python3-setuptools gave it before
+# the image moved to a virtual environment.
+setuptools==80.9.0
 torch==2.14.1
 torchaudio==2.11.0
 transkun==2.0.1
