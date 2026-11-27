@@ -205,7 +205,8 @@ def test_an_ensemble_stays_local_on_an_ensemble_worker_with_outsourcing_on(api_c
 
 @pytest.mark.parametrize(
     ("mode", "filename"),
-    [("ensemble", "ensemble.mid"), ("arrangement", "arrangement.mid"), ("piano", "piano.mid"),
+    # An ensemble job without piano levels downloads its raw file.
+    [("ensemble", "ensemble-raw.mid"), ("arrangement", "arrangement-raw.mid"), ("piano", "piano.mid"),
      ("transcription", "transcription.mid"), (None, "transcription.mid")],
 )
 def test_the_midi_is_named_after_the_submitted_mode(api_context, sent, mode, filename):

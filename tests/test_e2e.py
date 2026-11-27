@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import e2e
+from app import e2e, variants
+from app.transcription.ensemble import piano_levels
 from app.admin.common import AdminError
 from app.worker import tasks
 
@@ -124,7 +125,7 @@ def fake_server(api_context, monkeypatch):
     """Workers that 'transcribe' the stored part correctly, or as told."""
     _, settings, _ = api_context
     sent = []
-    behaviour = {"offset_error": 0.0}
+    behaviour = {"offset_error": 0.0, "levels": True, "level_tempo": None}
 
     def send_job(job_id, backend, *arguments, **options):
         sent.append((job_id, backend))
@@ -136,7 +137,15 @@ def fake_server(api_context, monkeypatch):
         folder.mkdir(parents=True, exist_ok=True)
         result = folder / "transcription.mid"
         result.write_bytes(midi(plucks(start, end, offset=start)))
-        tasks.redis.hset(tasks.job_key(job_id), mapping={"status": "completed", "result": str(result), "node": "hub"})
+        fields = {"status": "completed", "result": str(result), "node": "hub"}
+        if job.get("mode") == tasks.ENSEMBLE and behaviour["levels"]:
+            # The piano levels, as a worker makes them; a level_tempo makes them wrong.
+            source = midi(plucks(start, end, offset=start), tempo=behaviour["level_tempo"] or 500000)
+            made = dict(variants.distinct_levels(source))
+            for level, data in made.items():
+                (folder / variants.file_name(level)).write_bytes(data)
+            fields["variants"] = variants.stored_field(made)
+        tasks.redis.hset(tasks.job_key(job_id), mapping=fields)
 
     monkeypatch.setattr(e2e, "test_audio", lambda path: path.write_bytes(b"ID3audio"))
     monkeypatch.setattr(tasks, "send_job", send_job)
@@ -172,6 +181,43 @@ def test_a_run_of_both_modes_stores_each_as_the_server_does(fake_server, capsys)
     assert set(by_name) == {"piano", "ensemble"}
     # Ensemble jobs are stored as "arrangement", as the API stores them.
     assert by_name["ensemble"]["mode"] == "arrangement" and "mode" not in by_name["piano"]
+
+
+def test_an_ensemble_passes_with_its_levels_and_names_them(fake_server, capsys):
+    e2e.run(args(case="whole", mode="ensemble"))
+
+    output = capsys.readouterr().out
+    assert "All 1 end-to-end checks passed" in output
+    # one plucked part: intermediate and easy are the same as a harder level
+    assert "variants full,advanced,beginner,raw" in output
+
+
+def test_an_ensemble_without_its_levels_fails(fake_server, capsys, monkeypatch):
+    _, _, behaviour = fake_server
+    behaviour["levels"] = False
+    monkeypatch.setattr(e2e, "LEVELS_WAIT", 0.0)
+
+    with pytest.raises(AdminError, match="end-to-end checks failed"):
+        e2e.run(args(case="whole", mode="ensemble"))
+    assert "no piano level full, advanced, beginner" in capsys.readouterr().out
+
+
+def test_a_level_listed_that_equals_a_harder_one_fails(fake_server, capsys, monkeypatch):
+    real = variants.stored_field
+    monkeypatch.setattr(variants, "stored_field", lambda levels: real(variants.LEVELS))
+
+    with pytest.raises(AdminError, match="end-to-end checks failed"):
+        e2e.run(args(case="whole", mode="ensemble"))
+    assert "piano level intermediate, easy listed" in capsys.readouterr().out
+
+
+def test_levels_that_lost_the_tempo_map_fail(fake_server, capsys):
+    _, _, behaviour = fake_server
+    behaviour["level_tempo"] = 400000
+
+    with pytest.raises(AdminError, match="end-to-end checks failed"):
+        e2e.run(args(case="whole", mode="ensemble"))
+    assert "the full level lost the result's tempo map" in capsys.readouterr().out
 
 
 def test_a_wrong_cut_makes_the_run_fail(fake_server, capsys):

@@ -5,7 +5,7 @@
 
 > Download a piano performance and transcribe it to MIDI, or transcribe every instrument of any song into its own MIDI track, and retrieve the result through a simple asynchronous API.
 
-Piano Transcription Server accepts a public video URL or an uploaded audio or video file, runs [Transkun](https://github.com/Yujia-Yan/Transkun) to transcribe a piano recording or [dettato](https://github.com/kobimusic/dettato) to transcribe every instrument of any recording into its own track, and exposes the resulting MIDI file through FastAPI. Redis stores job state and Docker Compose runs the API, worker, cleanup service, and Redis together. The worker uses NVIDIA CUDA when available and falls back to CPU.
+Piano Transcription Server accepts a public video URL or an uploaded audio or video file, runs [Transkun](https://github.com/Yujia-Yan/Transkun) to transcribe a piano recording or [dettato](https://github.com/kobimusic/dettato) to transcribe every instrument of any recording into its own track, and exposes the resulting MIDI file through FastAPI. An ensemble transcription also comes as five piano versions for two hands, from every note (`full`) down to a beginner's tune and bass, with the recording's tempo map. Redis stores job state and Docker Compose runs the API, worker, cleanup service, and Redis together. The worker uses NVIDIA CUDA when available and falls back to CPU.
 
 ## 🚀 Start here
 

@@ -12,9 +12,12 @@ queues it as an unbilled job: no user, nothing charged. The file has four
 10-second sections of plucked notes, two a second: C4, E4, G4, then A4. None
 is another's harmonic, so a part cut in the wrong place shows in the notes.
 The jobs and their files are removed afterwards; the job list keeps them,
-titled "e2e check". See docs/testing.md.
+titled "e2e check". An ensemble job must also have its piano levels
+(app.variants): the distinct ones its result gives, each a MIDI file with
+notes only on the result's own ticks and the result's tempo map. See docs/testing.md.
 """
 
+import io
 import json
 import struct
 import subprocess
@@ -24,7 +27,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app import clips, job_storage
+from app import clips, job_storage, variants
 from app.admin.common import AdminError
 from app.outsource import routing
 from app.worker import tasks
@@ -47,6 +50,10 @@ MODES = ("piano", "ensemble")
 # leave room for it.
 FOUND_SHARE = 0.5
 ONSET_SLACK = 0.25
+# How long after completion an ensemble job's levels may still appear: a
+# RunPod endpoint on an older image returns none, and the remote worker makes
+# them after the job completed.
+LEVELS_WAIT = 180.0
 
 
 @dataclass
@@ -61,6 +68,7 @@ class Result:
     notes: dict[int, int] = field(default_factory=dict)
     onsets: tuple[float, float] | None = None
     problems: list[str] = field(default_factory=list)
+    variants: list[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -236,17 +244,89 @@ def finish(result: Result, part, length: float, deadline: float) -> None:
     if result.seconds is None or abs(result.seconds - length) > 0.01:
         result.problems.append(f"the job was to transcribe {result.seconds} s, not the part's {length:g} s")
     try:
-        # As the MIDI route reads it: from the bucket, or a file of this machine
-        if job_storage.s3_key(job["result"]) is not None:
-            bucket, object_key = job_storage.stored_result(job["result"])
-            data = bucket.read_result(object_key)
-        else:
-            data = Path(job["result"]).read_bytes()
+        data = read_variant(result.job_id, job, variants.RAW)
         notes = midi_notes(data)
     except Exception as error:
         result.problems.append(f"the MIDI could not be read: {type(error).__name__}: {error}")
         return
     check(result, part, length, notes)
+    if result.mode == "ensemble":
+        # The levels the result gives, made here as a worker makes them.
+        wanted = [level for level, _ in variants.distinct_levels(data)]
+        job = wait_for_levels(key, min(deadline, time.time() + LEVELS_WAIT), wanted)
+        check_levels(result, job, data, wanted)
+    result.variants = variants.job_variants(job)
+
+
+def read_variant(job_id: str, job: dict[str, str], variant: str) -> bytes:
+    """A variant's bytes, as the MIDI route finds it: beside the result, in
+    the bucket or in a folder of this machine."""
+    name = variants.file_name(variant)
+    if job_storage.s3_key(job["result"]) is not None:
+        bucket, _ = job_storage.stored_result(job["result"])
+        data = bucket.read_result(job_storage.S3JobStorage.key(job_id, name))
+        if data is None:
+            raise FileNotFoundError(name)
+        return data
+    return (Path(job["result"]).parent / name).read_bytes()
+
+
+def wait_for_levels(key: str, until: float, wanted: list[str]) -> dict[str, str]:
+    while True:
+        job = tasks.redis.hgetall(key)
+        if set(wanted) <= set(variants.job_variants(job)) or time.time() >= until:
+            return job
+        time.sleep(2)
+
+
+def timing(data: bytes) -> tuple[list[tuple[int, str, tuple]], set[int]]:
+    """A MIDI file's tempo map (tempo and time signature changes, by tick)
+    and the ticks its notes start on."""
+    import mido
+
+    conductor, starts = set(), set()
+    for track in mido.MidiFile(file=io.BytesIO(data)).tracks:
+        tick = 0
+        for message in track:
+            tick += message.time
+            if message.type == "set_tempo":
+                conductor.add((tick, message.type, (message.tempo,)))
+            elif message.type == "time_signature":
+                conductor.add((tick, message.type, (message.numerator, message.denominator)))
+            elif message.type == "note_on" and message.velocity:
+                starts.add(tick)
+    return sorted(conductor), starts
+
+
+def check_levels(result: Result, job: dict[str, str], raw: bytes, wanted: list[str]) -> None:
+    """The piano levels the result gives there, and no others, each a MIDI
+    file with notes, the result's tempo map, and notes only where the result
+    has one."""
+    have = variants.job_variants(job)
+    if not wanted:
+        result.problems.append("the result gives no piano level")
+    missing = [level for level in wanted if level not in have]
+    if missing:
+        result.problems.append(f"no piano level {', '.join(missing)}")
+    extra = [level for level in variants.LEVELS if level in have and level not in wanted]
+    if extra:
+        result.problems.append(f"piano level {', '.join(extra)} listed, the same as a harder one or empty")
+    conductor, starts = timing(raw)
+    for level in variants.LEVELS:
+        if level not in have:
+            continue
+        try:
+            data = read_variant(result.job_id, job, level)
+            level_conductor, level_starts = timing(data)
+        except Exception as error:
+            result.problems.append(f"the {level} level could not be read: {type(error).__name__}: {error}")
+            continue
+        if not level_starts:
+            result.problems.append(f"the {level} level has no notes")
+        if level_conductor != conductor:
+            result.problems.append(f"the {level} level lost the result's tempo map")
+        if not level_starts <= starts:
+            result.problems.append(f"the {level} level has notes off the result's ticks")
 
 
 def clean(job_id: str) -> None:
@@ -281,8 +361,9 @@ def run(args) -> None:
             where = f"{result.backend or '?'}" + (f" on {result.node}" if result.node else "")
             notes = ", ".join(f"{pitch}×{count}" for pitch, count in result.notes.items()) or "-"
             onsets = f"{result.onsets[0]}–{result.onsets[1]} s" if result.onsets else "-"
+            levels = f"; variants {','.join(result.variants)}" if result.mode == "ensemble" else ""
             print(f"{'PASS' if result.passed else 'FAIL'}  {result.case:<12} {result.mode:<14} {where:<22} "
-                  f"notes {notes}; onsets {onsets}  [{result.job_id[:8]}]", flush=True)
+                  f"notes {notes}; onsets {onsets}{levels}  [{result.job_id[:8]}]", flush=True)
             for problem in result.problems:
                 print(f"      {problem}", flush=True)
     failed = [result for result in results if not result.passed]

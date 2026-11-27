@@ -7,7 +7,7 @@ import time
 
 from fastapi import HTTPException
 
-from app import clips, job_limits, job_storage
+from app import clips, job_limits, job_storage, variants
 from app.admin.common import (
     AdminError,
     ask_reason,
@@ -100,7 +100,8 @@ def list_jobs(
 def job_details(job: str) -> dict:
     """Everything known about a job, named by its ID or first characters:
     its live Redis fields (None once expired), its diagnostics record with
-    the full error, its reservation, and the files in its folder."""
+    the full error, its reservation, the files in its folder, and, once
+    completed, its result's variants (app.variants)."""
     job_id = find_job(job)
     live = tasks.redis.hgetall(tasks.job_key(job_id))
     records = tasks.billing.read(
@@ -118,6 +119,7 @@ def job_details(job: str) -> dict:
         "record": with_mode(row_dict(records[0])) if records else None,
         "reservation": row_dict(reservations[0]) if reservations else None,
         "files": files,
+        "variants": variants.job_variants(live) if live and live.get("status") == "completed" else None,
     }
 
 
@@ -215,7 +217,7 @@ def requeue(job: str, backend: routing.Backend | None, actor: str, reason: str |
 
     # Back to how a new submission starts: a placeholder that holds a place.
     tasks.redis.hset(key, "status", "preparing")
-    tasks.redis.hdel(key, "error", "error_detail", "result")
+    tasks.redis.hdel(key, "error", "error_detail", "result", "variants")
     try:
         job_limits.acquire(tasks.redis, job_id, user_id, tasks.job_key)
         tasks.billing.reopen_job_record(job_id, f"requeued by {actor}" + (f": {reason}" if reason else ""))
@@ -336,6 +338,8 @@ def run_show(args) -> None:
             f"\nReservation: {reservation['status']}, {reservation['reserved_minutes']} minutes reserved, "
             f"{charged if charged is not None else '-'} charged"
         )
+    if details["variants"] is not None:
+        print(f"\nVariants: {', '.join(details['variants'])}")
     if details["files"] is not None:
         print(f"\nFiles: {', '.join(details['files']) or 'none'}")
 

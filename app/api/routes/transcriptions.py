@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, HttpUrl, StringConstraints
 from redis import Redis
 
-from app import clips, disk, job_limits, job_storage, maintenance, video_check, video_info
+from app import clips, disk, job_limits, job_storage, maintenance, variants, video_check, video_info
 from app.job_storage import StorageUnavailable, delete_job_files
 from app.maintenance import NoticeResponse
 from app.config import settings
@@ -67,6 +67,11 @@ Mode = Literal["piano", "ensemble", "transcription", "arrangement"]
 ENSEMBLE_MODES = ("ensemble", "arrangement")
 # Arrangements once had styles; older apps still send one. Accepted and ignored.
 Style = Annotated[str, StringConstraints(max_length=32)]
+# A result's MIDI files (app.variants): raw, the transcription itself, and an
+# ensemble job's piano levels.
+Variant = Literal["raw", "full", "advanced", "intermediate", "easy", "beginner"]
+assert set(Variant.__args__) == set(variants.ORDER)
+VARIANT_UNAVAILABLE = "variant_unavailable"
 
 
 class CreateTranscriptionRequest(BaseModel):
@@ -137,6 +142,9 @@ class TranscriptionStatusResponse(BaseModel):
     end_seconds: float | None = None
     # A planned server restart or shutdown, if one is pending.
     maintenance: NoticeResponse | None = None
+    # The MIDI files GET /{job_id}/midi?variant= returns, once completed: in
+    # the order of app.variants.ORDER, raw always last. Empty before then.
+    variants: list[str] = []
     # Only for a developer's account.
     developer: DeveloperJobDetails | None = None
 
@@ -702,6 +710,7 @@ def get_transcription(
         style=None,
         **clip_times(job),
         maintenance=current_notice(),
+        variants=variants.job_variants(job) if job.get("status") == "completed" else [],
         developer=developer_details(job_id, job) if billing.is_developer(job.get("user_id")) else None,
     )
 
@@ -743,6 +752,11 @@ def cancel_transcription(
 @router.get("/{job_id}/midi")
 def get_midi(
     job_id: str,
+    variant: Variant | None = Query(
+        None,
+        description="Which MIDI file: raw (the transcription; a piano job's only one), or an ensemble job's piano "
+        "version full, advanced, intermediate, easy, or beginner. By default full for an ensemble job, else raw.",
+    ),
     user: AuthenticatedUser | None = Depends(current_user),
 ):
     job = redis.hgetall(job_key(job_id))
@@ -768,6 +782,19 @@ def get_midi(
             detail="Result path missing",
         )
 
+    ensemble = job.get("mode") == ENSEMBLE
+    variant = variant or variants.default_variant(job, ensemble)
+    if variant not in variants.job_variants(job):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": f"This transcription has no {variant} version",
+                "error_code": VARIANT_UNAVAILABLE,
+            },
+        )
+    filename = result_filename(job, variant)
+    name = variants.file_name(variant)
+
     key = job_storage.s3_key(path)
     if key is not None:
         # Only the job's own result: a worker, which may write jobs, cannot
@@ -776,6 +803,8 @@ def get_midi(
             raise HTTPException(status_code=500, detail="Invalid result path")
         try:
             bucket, key = job_storage.stored_result(path)
+            # A level is kept beside the result, under its fixed name.
+            key = job_storage.S3JobStorage.key(job_id, name)
             # The API sends the file, as with job files on one machine: from
             # the hub's bucket, which only the hub and its nodes reach, and
             # with RESULT_DOWNLOAD=api.
@@ -786,12 +815,12 @@ def get_midi(
                 return Response(
                     body,
                     media_type="audio/midi",
-                    headers={"Content-Disposition": f'attachment; filename="{result_filename(job)}"'},
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'},
                 )
             # A signed link to the bucket: the file does not pass through the API.
             if not bucket.result_exists(key):
                 raise HTTPException(status_code=404, detail="MIDI result is no longer available")
-            return RedirectResponse(bucket.result_link(key, result_filename(job)), status_code=307)
+            return RedirectResponse(bucket.result_link(key, filename), status_code=307)
         except StorageUnavailable as error:
             raise HTTPException(status_code=503, detail=STORAGE_UNAVAILABLE) from error
 
@@ -806,6 +835,8 @@ def get_midi(
             status_code=500,
             detail="Invalid result path",
         ) from error
+    # A level is kept beside the result, under its fixed name.
+    result_path = result_path.parent / name
 
     if not result_path.is_file():
         raise HTTPException(
@@ -816,7 +847,7 @@ def get_midi(
     return FileResponse(
         result_path,
         media_type="audio/midi",
-        filename=result_filename(job),
+        filename=filename,
     )
 
 
@@ -835,5 +866,9 @@ def job_mode_name(job: dict[str, str]) -> str:
     return name if name == "piano" else "transcription"
 
 
-def result_filename(job: dict[str, str]) -> str:
+def result_filename(job: dict[str, str], variant: str = variants.RAW) -> str:
+    """<mode>.mid for a piano job; <mode>-<variant>.mid for an ensemble
+    job, such as ensemble-full.mid. Only the server's fixed words."""
+    if job.get("mode") == ENSEMBLE:
+        return f"{job_mode_name(job)}-{variant}.mid"
     return f"{job_mode_name(job)}.mid"

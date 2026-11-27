@@ -36,6 +36,10 @@ ENSEMBLE_BASE = 350 * MIB
 ENSEMBLE_PER_SECOND = 0.12 * MIB
 ENSEMBLE_PER_SECOND_PAST_HOUR = 0.03 * MIB
 FIRST_USE = {"piano": 900 * MIB, "ensemble": 1700 * MIB}
+# An ensemble job's piano levels (app.variants) are made after its model step, in a child process beside the worker's:
+# measured at 25 MiB with 630 MiB for ten hours of a dense band (19 notes a second). Counted on top, cautiously.
+LEVELS_BASE = 40 * MIB
+LEVELS_PER_SECOND = 0.018 * MIB
 
 CGROUP = Path("/sys/fs/cgroup")
 
@@ -118,7 +122,8 @@ def job_ram_bytes(job: dict[str, str]) -> int:
         seconds = 0.0
     if job_kind(job) == "ensemble":
         return int(ENSEMBLE_BASE + ENSEMBLE_PER_SECOND * min(seconds, 3600)
-                   + ENSEMBLE_PER_SECOND_PAST_HOUR * max(0.0, seconds - 3600))
+                   + ENSEMBLE_PER_SECOND_PAST_HOUR * max(0.0, seconds - 3600)
+                   + LEVELS_BASE + LEVELS_PER_SECOND * seconds)
     return int(PIANO_BASE + PIANO_PER_SECOND * seconds)
 
 

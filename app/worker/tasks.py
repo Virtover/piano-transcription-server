@@ -13,7 +13,7 @@ from dramatiq.brokers.redis import RedisBroker
 from redis import Redis
 from redis.exceptions import WatchError
 
-from app import clips, cluster, error_report, job_limits
+from app import clips, cluster, error_report, job_limits, variants
 from app.job_storage import WORK_FOLDER, bucket, delete_job_files, job_dir, stored_result, storage, uses_bucket
 from app.job_storage import workspace_job_id
 from app.config import settings
@@ -223,10 +223,12 @@ class JobLease:
             logger.exception("Could not update the lease of job %s", self.job_id)
 
 
-def complete_job(job_id: str, result: Path, reference: str | None = None, token: str | None = None) -> bool:
+def complete_job(job_id: str, result: Path, reference: str | None = None, token: str | None = None,
+                 stored_variants: str | None = None) -> bool:
     """Mark the job completed with its MIDI file, checked at result, and
     stored where reference says (by default, at result itself). With the
-    attempt's token, only while that attempt owns the job."""
+    attempt's token, only while that attempt owns the job. stored_variants,
+    for an ensemble job, is its variants field (app.variants.stored_field)."""
     key = job_key(job_id)
 
     while True:
@@ -243,14 +245,14 @@ def complete_job(job_id: str, result: Path, reference: str | None = None, token:
                 check_midi(result)
 
                 pipe.multi()
-                pipe.hset(
-                    key,
-                    mapping={
-                        "status": "completed",
-                        "progress": "1.0",
-                        "result": reference or str(result),
-                    },
-                )
+                mapping = {
+                    "status": "completed",
+                    "progress": "1.0",
+                    "result": reference or str(result),
+                }
+                if stored_variants is not None:
+                    mapping["variants"] = stored_variants
+                pipe.hset(key, mapping=mapping)
                 pipe.expire(key, job_ttl())
                 pipe.execute()
                 return True
@@ -700,6 +702,10 @@ class JobContext:
         # Called once the job's model step has ended: it gives back the
         # job's place on this device's models (app.worker.places).
         self.model_done = model_done or (lambda: None)
+        # The piano levels the backend brought with an ensemble result, as
+        # files in output_dir (a RunPod endpoint's), or None when it brought
+        # none: a local job makes them here, a remote one afterwards.
+        self.levels: list[str] | None = None
 
     def is_cancelled(self) -> bool:
         return is_job_cancelled(self.job_id, self.token)
@@ -1015,14 +1021,25 @@ def run_job(
 
         if superseded(job_id, lease.token):
             raise TranscriptionCancelled()
+        stored_variants, levels_later = None, False
+        if context.ensemble:
+            made = context.levels
+            if made is None and backend == "local":
+                made = variants.make_levels(midi_path, output_dir, job_id)
+            # A RunPod endpoint on an older image returned none: the job is
+            # completed with its raw result, and they follow (levels_later).
+            levels_later = made is None
+            stored_variants = variants.stored_field(store_levels(job_id, output_dir, made or []))
         reference = storage().save_result(job_id, midi_path)
-        if not complete_job(job_id, midi_path, reference, lease.token):
+        if not complete_job(job_id, midi_path, reference, lease.token, stored_variants):
             if superseded(job_id, lease.token):
                 # Another attempt owns the job; it writes its own result.
                 requeued = True
             return
         record_job(job_id)
         billing.settle_success(job_id)
+        if levels_later:
+            start_late_levels(job_id, midi_path, reference)
         storage().discard_inputs(job_id, output_dir)
         if backend == "local":
             local_job_duration.add(time.monotonic() - started)
@@ -1088,6 +1105,70 @@ def run_job(
         # and must not remove the running job from the routing count.
         if not requeued and (claimed or redis.hget(job_key(job_id), "status") != "processing"):
             routing.mark_finished(redis, backend, job_id)
+
+
+def store_levels(job_id: str, folder: Path, levels: list[str]) -> list[str]:
+    """Keep the piano levels made in folder beside the job's result; the
+    ones kept. A level that cannot be stored is left out, never the job."""
+    kept = []
+    for level in variants.ordered(levels):
+        try:
+            storage().save_variant(job_id, folder / variants.file_name(level))
+            kept.append(level)
+        except Exception as error:
+            logger.warning("Job %s: piano level %s not stored (%s)", job_id, level, error)
+    return kept
+
+
+# Levels for results of RunPod endpoints that return none, made by this
+# remote worker after their jobs complete: one at a time per process.
+late_levels = variants.FallbackLevels(limit=1)
+
+
+def start_late_levels(job_id: str, midi_path: Path, reference: str) -> None:
+    """Make an ensemble job's piano levels after it completed with its raw
+    result, in the background (variants.FallbackLevels), from a copy of the
+    result in a scratch folder of its own, which cleanup removes after a
+    crash. Never raises; the job keeps its raw result whatever happens."""
+    folder = Path(settings.service.data_dir) / WORK_FOLDER / f"{job_id}.levels-{uuid.uuid4().hex[:8]}"
+    try:
+        folder.mkdir(parents=True)
+        source = folder / variants.RAW_FILE_NAME
+        shutil.copyfile(midi_path, source)
+    except OSError:
+        logger.exception("Job %s: no piano levels; its result could not be copied", job_id)
+        shutil.rmtree(folder, ignore_errors=True)
+        return
+
+    def work() -> None:
+        try:
+            stored = store_levels(job_id, folder, variants.make_levels(source, folder, job_id))
+            if stored:
+                add_variants(job_id, reference, stored)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    if not late_levels.submit(job_id, work):
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def add_variants(job_id: str, reference: str, levels: list[str]) -> bool:
+    """Announce levels stored after the job completed: only while it is still
+    completed with the same result."""
+    key = job_key(job_id)
+    while True:
+        try:
+            with redis.pipeline() as pipe:
+                pipe.watch(key)
+                status, result = pipe.hmget(key, "status", "result")
+                if status != "completed" or result != reference:
+                    return False
+                pipe.multi()
+                pipe.hset(key, "variants", variants.stored_field(levels))
+                pipe.execute()
+                return True
+        except WatchError:
+            continue
 
 
 def fail_attempt(job_id: str, token: str | None, values: dict[str, str]) -> bool:

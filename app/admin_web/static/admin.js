@@ -736,6 +736,7 @@ async function openJob(job) {
         ["Created", when(record.created_at)], ["Started", when(record.started_at)], ["Finished", when(record.finished_at)],
         ["Length", span(record.duration_seconds)], ["Cost", record.cost_minutes !== undefined && record.cost_minutes !== null ? `${fmt(record.cost_minutes)} minutes` : undefined],
         ["Reservation", details.reservation ? `${details.reservation.status}, ${fmt(details.reservation.reserved_minutes)} reserved` : undefined],
+        ["Variants", details.variants ? details.variants.join(", ") : undefined],
         ["Files", details.files ? details.files.join(", ") || "none" : undefined],
         ["In Redis", details.live ? "yes" : "no: ended over an hour ago, or never queued"]]),
       error ? el("div", { class: "error-item" }, el("strong", { text: "Error · users never see this" }),

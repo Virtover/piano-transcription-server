@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app import variants
 from app.clips import Clip
 from app.config import settings
 from app.outsource.capacity import record_jobs_per_worker
@@ -55,6 +56,35 @@ def decode_midi(output: dict[str, Any]) -> bytes:
     if not midi.startswith(b"MThd"):
         raise RemoteFailed("Remote transcription returned invalid MIDI")
     return midi
+
+
+MAX_LEVEL_BYTES = 16 * 1024 * 1024
+
+
+def write_levels(output: dict[str, Any], folder: Path, job_id: str) -> list[str] | None:
+    """The piano levels in an endpoint's output, written as files in folder
+    (app.variants.file_name), or None when it sent none. One that is not a
+    MIDI file is left out, with a log line; never the job."""
+    levels = output.get(variants.LEVELS_FIELD)
+    if levels is None:
+        return None
+    written = []
+    if not isinstance(levels, dict):
+        logger.warning("Job %s: the endpoint's piano levels are not a mapping; left out", job_id)
+        return written
+    for level in variants.ordered(levels):
+        encoded = levels[level]
+        try:
+            if not isinstance(encoded, str) or len(encoded) > MAX_LEVEL_BYTES * 4 // 3 + 4:
+                raise ValueError("not a short enough string")
+            midi = base64.b64decode(encoded, validate=True)
+            if not midi.startswith(b"MThd"):
+                raise ValueError("not a MIDI file")
+            variants.write_atomically(folder / variants.file_name(level), midi)
+            written.append(level)
+        except (binascii.Error, ValueError, OSError) as error:
+            logger.warning("Job %s: the endpoint's piano level %s left out (%s)", job_id, level, error)
+    return written
 
 
 def wait_for_result(context, provider: RemoteProvider, remote_id: str) -> dict[str, Any]:
@@ -154,6 +184,10 @@ def transcribe_remotely(
         midi_path = output_dir / "transcription.mid"
         midi_path.write_bytes(midi)
         check_midi(midi_path)
+        if ensemble:
+            # Made on the endpoint; None from an older image, whose levels
+            # the job lifecycle makes after it completes.
+            context.levels = write_levels(output, output_dir, context.job_id)
         record_jobs_per_worker(redis_client(), output.get("worker_capacity"))
         timing = output.get("timing")
         if isinstance(timing, dict):

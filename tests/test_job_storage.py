@@ -259,7 +259,7 @@ def test_the_result_is_a_signed_link_to_the_bucket(api_context, bucket):
 
 @pytest.mark.parametrize(
     ("fields", "name"),
-    [({}, "transcription.mid"), ({"mode": "transcription"}, "transcription.mid"), ({"mode": "arrangement", "style": "level2"}, "arrangement.mid")],
+    [({}, "transcription.mid"), ({"mode": "transcription"}, "transcription.mid"), ({"mode": "arrangement", "style": "level2"}, "arrangement-raw.mid")],
 )
 def test_the_signed_link_names_the_download_by_the_jobs_mode(api_context, bucket, fields, name):
     client, _, _ = api_context
@@ -289,7 +289,7 @@ def test_with_api_downloads_the_api_sends_the_file_itself(api_context, bucket):
     assert response.status_code == 200
     assert response.content == b"MThd-bytes"
     assert response.headers["content-type"] == "audio/midi"
-    assert response.headers["content-disposition"] == 'attachment; filename="arrangement.mid"'
+    assert response.headers["content-disposition"] == 'attachment; filename="arrangement-raw.mid"'
     assert response.headers["cache-control"] == "no-store"
     assert bucket.signed == []
 

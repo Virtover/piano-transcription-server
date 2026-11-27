@@ -12,6 +12,9 @@ google-api-python-client==2.201.0
 google-auth==2.62.0
 requests==2.34.2
 boto3==1.43.117
+# The piano levels of ensemble results (app/transcription/ensemble/piano_levels.py),
+# which the remote worker makes for RunPod endpoints that return none.
+mido==1.3.3
 # Encrypts off-site billing backups (age format).
 pyrage==1.4.0
 # Not pinned: video sites change often, and an old yt-dlp stops working.

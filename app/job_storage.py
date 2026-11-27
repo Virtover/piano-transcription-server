@@ -11,7 +11,9 @@ attempt.
 
 A completed job's `result` field says where its MIDI file is: a path on the
 data volume, or `s3:<key>`. It is read by its form, not by JOB_STORAGE, so
-results stored before a change of JOB_STORAGE stay downloadable.
+results stored before a change of JOB_STORAGE stay downloadable. An ensemble
+job's piano levels (app.variants) are kept beside it, in the same folder or
+under the same prefix, and its `variants` field says which exist.
 """
 
 import logging
@@ -22,6 +24,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Protocol
 
+from app import variants
 from app.config import settings
 
 
@@ -29,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 PREFIX = "jobs/"
 S3_REFERENCE = "s3:"
-RESULT_FILE_NAME = "transcription.mid"
+RESULT_FILE_NAME = variants.RAW_FILE_NAME
 # A signed result link is used at once, by the app that asked for it.
 RESULT_LINK_SECONDS = 300
 # The most the API sends of a result with RESULT_DOWNLOAD=api: far more
@@ -70,6 +73,10 @@ class JobStorage(Protocol):
     def save_result(self, job_id: str, path: Path) -> str:
         """Keep the MIDI result and return its reference for the job."""
 
+    def save_variant(self, job_id: str, path: Path) -> None:
+        """Keep a piano level of the result (app.variants), under its name,
+        beside the result: whole or not at all."""
+
     def discard_inputs(self, job_id: str, folder: Path) -> None:
         """Delete everything of the job but the result, after its last attempt."""
 
@@ -100,6 +107,18 @@ class LocalJobStorage:
 
     def save_result(self, job_id: str, path: Path) -> str:
         return str(path)
+
+    def save_variant(self, job_id: str, path: Path) -> None:
+        folder = job_dir(job_id)
+        target = folder / path.name
+        if path.resolve() == target.resolve():
+            # Made in the job's own folder, which is this attempt's workspace.
+            return
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            variants.write_atomically(target, path.read_bytes())
+        except OSError as error:
+            raise StorageUnavailable(f"Could not store {path.name} ({type(error).__name__})") from error
 
     def discard_inputs(self, job_id: str, folder: Path) -> None:
         from app.transcription.audio import remove_audio_files
@@ -223,7 +242,7 @@ class S3JobStorage:
             for key in self._keys(self.key(job_id, "")):
                 name = key.rsplit("/", 1)[-1]
                 destination = folder / name
-                if name == RESULT_FILE_NAME or destination.exists():
+                if variants.is_result_file(name) or destination.exists():
                     continue
                 self.client.download_file(self.bucket, key, str(destination))
                 metadata = self.client.head_object(Bucket=self.bucket, Key=key).get("Metadata", {})
@@ -243,9 +262,19 @@ class S3JobStorage:
             raise StorageUnavailable(f"Could not store the MIDI result ({type(error).__name__})") from error
         return f"{self.reference}{key}"
 
+    def save_variant(self, job_id: str, path: Path) -> None:
+        # An upload replaces the object whole, or not at all.
+        try:
+            self.client.upload_file(
+                str(path), self.bucket, self.key(job_id, path.name), ExtraArgs={"ContentType": "audio/midi"}
+            )
+        except Exception as error:
+            raise StorageUnavailable(f"Could not store {path.name} ({type(error).__name__})") from error
+
     def discard_inputs(self, job_id: str, folder: Path) -> None:
         try:
-            self._delete(key for key in self._keys(self.key(job_id, "")) if not key.endswith(f"/{RESULT_FILE_NAME}"))
+            self._delete(key for key in self._keys(self.key(job_id, ""))
+                         if not variants.is_result_file(key.rsplit("/", 1)[-1]))
         except Exception as error:
             # The bucket's automatic deletion removes them later.
             logger.warning("Could not delete the stored inputs of job %s: %s", job_id, type(error).__name__)
