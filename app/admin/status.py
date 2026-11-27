@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from app import backups, controls, job_limits, leader, maintenance, metrics, video_sites
+from app import disk as disk_space
 from app.admin import web
 from app.admin.common import ago, size, span
 from app.config import settings
@@ -29,12 +30,7 @@ def folder_size(path: Path) -> int:
     return total
 
 
-def in_docker_desktop_vm() -> bool:
-    """Docker Desktop runs containers in a virtual machine (WSL 2 on Windows,
-    LinuxKit on macOS) whose disk can grow up to its limit, not to what the
-    host's drive has free."""
-    release = platform.release().lower()
-    return "microsoft" in release or "linuxkit" in release
+in_docker_desktop_vm = disk_space.in_docker_desktop_vm
 
 
 def collect() -> dict:
@@ -81,9 +77,12 @@ def collect() -> dict:
         disk = {
             "path": str(data_dir),
             "jobs_bytes": folder_size(jobs_dir) if jobs_dir.is_dir() else 0,
-            "free_bytes": usage.free,
+            # What jobs can use: under Docker Desktop, no more than the
+            # host drive has free (app/disk.py).
+            "free_bytes": disk_space.free_bytes(data_dir) if disk_space.free_bytes(data_dir) is not None else usage.free,
             "total_bytes": usage.total,
             "virtual_disk": in_docker_desktop_vm(),
+            "host_free_bytes": disk_space.host_free_bytes(),
         }
 
     local_backups = backups.local_backups(settings.database.backup_dir)
@@ -205,7 +204,11 @@ def render(state: dict) -> str:
             f"of {size(disk['total_bytes'])} on {disk['path']}"
         )
         if disk["virtual_disk"]:
-            lines.append("              Docker Desktop's virtual disk: its limit, not the host's drive, which may have less free")
+            host = disk.get("host_free_bytes")
+            lines.append(f"              Docker Desktop's virtual disk; the host drive has {size(host)} free, the free space above "
+                         "counts no more" if host is not None else
+                         "              Docker Desktop's virtual disk: its limit, not the host's drive, which may have less free "
+                         "(HOST_DISK_PROBE is not set: run python scripts/server.py start)")
         minimum = settings.limits.min_free_disk_gib * 1024**3
         if disk["free_bytes"] < minimum:
             lines.append(f"              FULL: under MIN_FREE_DISK_GIB={settings.limits.min_free_disk_gib:g}; "

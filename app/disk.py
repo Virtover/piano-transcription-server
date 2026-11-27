@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import errno
 import logging
+import os
+import platform
 import shutil
 import time
 from pathlib import Path
@@ -44,12 +46,43 @@ def data_dir() -> Path:
     return Path(settings.service.data_dir)
 
 
-def free_bytes(path: Path | None = None) -> int | None:
-    """Free bytes on the disk of path (the data folder), or None when it cannot be read."""
+# An empty folder on the host's drive, mounted by Docker Compose
+# (HOST_DISK_PROBE): under Docker Desktop, its free space is the host drive's.
+HOST_PROBE = Path("/run/host-disk")
+
+
+def in_docker_desktop_vm() -> bool:
+    """Docker Desktop runs containers in a virtual machine (WSL 2 on Windows,
+    LinuxKit on macOS) whose disk can grow up to its limit, not to what the
+    host's drive has free."""
+    release = platform.release().lower()
+    return "microsoft" in release or "linuxkit" in release
+
+
+def host_free_bytes() -> int | None:
+    """Free bytes on the host drive that holds Docker Desktop's virtual disk,
+    or None outside Docker Desktop or without the probe. On Linux, Docker's
+    volumes are on the host's own disks, which the data folder already
+    measures."""
+    if not in_docker_desktop_vm() or not os.path.ismount(HOST_PROBE):
+        return None
     try:
-        return shutil.disk_usage(path or data_dir()).free
+        return shutil.disk_usage(HOST_PROBE).free
     except OSError:
         return None
+
+
+def free_bytes(path: Path | None = None) -> int | None:
+    """Free bytes the data folder (or path) can still use, or None when it
+    cannot be read: its own disk's free space and, under Docker Desktop, no
+    more than the host drive has, since the virtual disk can only grow into
+    what that drive has free."""
+    try:
+        free = shutil.disk_usage(path or data_dir()).free
+    except OSError:
+        return None
+    host = host_free_bytes()
+    return free if host is None else min(free, host)
 
 
 def min_free_bytes() -> int:

@@ -1,7 +1,12 @@
 from collections.abc import Iterator
 import time
 
+import os
+
 import fakeredis
+
+# The host scripts never look at this machine's Docker Desktop (scripts/stacks.py).
+os.environ["PIANO_NO_HOST_DISK_PROBE"] = "1"
 import pytest
 from fastapi.testclient import TestClient
 

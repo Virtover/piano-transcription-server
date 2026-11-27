@@ -17,6 +17,77 @@ from pathlib import Path
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
+# The folder the services mount at /run/host-disk (HOST_DISK_PROBE), which
+# app/disk.py measures for the free space of the host's drive.
+DISK_PROBE_DEFAULT = ".disk-probe"
+DISK_PROBE_NAME = "piano-disk-probe"
+
+
+def docker_desktop_disk_folder(platform: str | None = None, environ=None, home: Path | None = None) -> Path | None:
+    """The folder of Docker Desktop's virtual disk on this host, or None
+    without Docker Desktop's settings (Docker on Linux keeps its data on the
+    host's own disk). Docker Desktop runs containers in a virtual machine
+    whose disk grows up to its limit, so what is free inside it is not what
+    the host's drive has free."""
+    import json
+    import os
+
+    platform = platform or sys.platform
+    environ = os.environ if environ is None else environ
+    if environ.get("PIANO_NO_HOST_DISK_PROBE"):
+        # The tests: never this machine's Docker Desktop.
+        return None
+    home = home or Path.home()
+    if platform == "win32":
+        appdata, local = environ.get("APPDATA"), environ.get("LOCALAPPDATA")
+        for name in ("settings-store.json", "settings.json"):
+            path = Path(appdata) / "Docker" / name if appdata else None
+            if path and path.is_file():
+                try:
+                    folder = json.loads(path.read_text(encoding="utf-8")).get("CustomWslDistroDir")
+                except (OSError, ValueError):
+                    folder = None
+                if folder:
+                    return Path(folder)
+                break
+        return Path(local) / "Docker" / "wsl" if local and (Path(local) / "Docker").is_dir() else None
+    if platform == "darwin":
+        settings = home / "Library" / "Group Containers" / "group.com.docker" / "settings.json"
+        try:
+            folder = json.loads(settings.read_text(encoding="utf-8")).get("dataFolder")
+        except (OSError, ValueError):
+            folder = None
+        default = home / "Library" / "Containers" / "com.docker.docker" / "Data"
+        return Path(folder) if folder else (default if default.is_dir() else None)
+    return None
+
+
+def prepare_disk_probe(root: Path, env_file: str, **where) -> list[str]:
+    """Point HOST_DISK_PROBE in env_file at an empty folder on the drive of
+    Docker Desktop's virtual disk, so that the services measure that drive's
+    free space (app/disk.py). Elsewhere the default, an empty folder in the
+    checkout, which app/disk.py does not use outside Docker Desktop."""
+    (root / DISK_PROBE_DEFAULT).mkdir(exist_ok=True)
+    folder = docker_desktop_disk_folder(**where)
+    if folder is None:
+        return []
+    probe = folder.parent / DISK_PROBE_NAME
+    try:
+        probe.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        return [f"could not create {probe} to measure the free space of Docker's drive ({error}); "
+                "jobs are checked against Docker's virtual disk only"]
+    value = probe.as_posix()
+    path = root / env_file
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    current = next((line.split("=", 1)[1].strip() for line in lines if line.startswith("HOST_DISK_PROBE=")), None)
+    if current == value:
+        return []
+    lines = [line for line in lines if not line.startswith("HOST_DISK_PROBE=")]
+    lines += [f"HOST_DISK_PROBE={value}"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return [f"set HOST_DISK_PROBE={value} in {env_file}: jobs are checked against the free space of the drive "
+            "that holds Docker Desktop's virtual disk"]
 # A shutdown stops every service, whichever profiles started it.
 ALL_PROFILES = ["*"]
 # redis-cli in the redis container, signed in as operator. A container from
@@ -313,6 +384,9 @@ class NodeStack(ComposeStack):
     def __init__(self, gpu: bool, run=subprocess.run, popen=subprocess.Popen, root: Path = ROOT):
         super().__init__([], run=run, popen=popen, root=root)
         self.gpu = gpu
+
+    def prepare_files(self) -> list[str]:
+        return prepare_disk_probe(self.root, self.ENV_FILE)
 
     def compose(self, profiles: list[str] | None = None) -> list[str]:
         files = ["-f", "docker-compose.node.yml"] + (["-f", "docker-compose.node-gpu.yml"] if self.gpu else [])

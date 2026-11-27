@@ -116,3 +116,67 @@ def test_the_watcher_warns_when_low_and_reports_when_full(free, monkeypatch, cap
     assert any("running low" in record.message for record in caplog.records)
     assert any("refused" in record.message for record in caplog.records)
     assert len(reports) == 1
+
+
+# --- The host drive under Docker Desktop -------------------------------------------------
+
+import importlib.util  # noqa: E402
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location("stacks_for_disk", Path(__file__).resolve().parent.parent / "scripts" / "stacks.py")
+stacks = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(stacks)
+
+
+def test_docker_desktops_disk_folder_comes_from_its_settings(tmp_path):
+    appdata, local = tmp_path / "Roaming", tmp_path / "Local"
+    (appdata / "Docker").mkdir(parents=True)
+    (local / "Docker").mkdir(parents=True)
+    environ = {"APPDATA": str(appdata), "LOCALAPPDATA": str(local)}
+    assert stacks.docker_desktop_disk_folder("win32", environ) == local / "Docker" / "wsl"
+    (appdata / "Docker" / "settings-store.json").write_text(json.dumps({"CustomWslDistroDir": "D:\DockerDisk\WSL"}))
+    assert stacks.docker_desktop_disk_folder("win32", environ) == Path("D:\DockerDisk\WSL")
+    assert stacks.docker_desktop_disk_folder("linux", environ) is None
+    assert stacks.docker_desktop_disk_folder("win32", {**environ, "PIANO_NO_HOST_DISK_PROBE": "1"}) is None
+
+
+def test_docker_desktop_on_macos(tmp_path):
+    data = tmp_path / "Library" / "Containers" / "com.docker.docker" / "Data"
+    data.mkdir(parents=True)
+    assert stacks.docker_desktop_disk_folder("darwin", {}, home=tmp_path) == data
+
+
+def test_the_probe_is_set_once_in_the_env_file(tmp_path):
+    disk_folder = tmp_path / "DockerDisk" / "WSL"
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / ".env").write_text("COMPOSE_PROFILES=\n")
+    where = {"platform": "win32", "environ": {"APPDATA": str(tmp_path / "none"), "LOCALAPPDATA": str(tmp_path / "none")}}
+    assert stacks.prepare_disk_probe(root, ".env", **where) == []      # no Docker Desktop: nothing set
+    assert (root / ".disk-probe").is_dir()
+    settings = tmp_path / "Roaming" / "Docker"
+    settings.mkdir(parents=True)
+    (settings / "settings-store.json").write_text(json.dumps({"CustomWslDistroDir": str(disk_folder)}))
+    where["environ"]["APPDATA"] = str(tmp_path / "Roaming")
+    assert stacks.prepare_disk_probe(root, ".env", **where)
+    probe = (tmp_path / "DockerDisk" / "piano-disk-probe")
+    assert probe.is_dir()
+    assert f"HOST_DISK_PROBE={probe.as_posix()}" in (root / ".env").read_text()
+    assert "COMPOSE_PROFILES=" in (root / ".env").read_text()
+    assert stacks.prepare_disk_probe(root, ".env", **where) == []      # already set: unchanged
+
+
+def test_under_docker_desktop_the_host_drive_limits_the_free_space(monkeypatch, tmp_path):
+    import shutil
+    from collections import namedtuple
+
+    usage = namedtuple("usage", "total used free")
+    sizes = {str(tmp_path): 60 * GIB, str(disk.HOST_PROBE): 5 * GIB}
+    monkeypatch.setattr(disk, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(100 * GIB, 0, sizes[str(path)]))
+    monkeypatch.setattr(disk.os.path, "ismount", lambda path: str(path) == str(disk.HOST_PROBE))
+    monkeypatch.setattr(disk, "in_docker_desktop_vm", lambda: True)
+    assert disk.free_bytes() == 5 * GIB
+    monkeypatch.setattr(disk, "in_docker_desktop_vm", lambda: False)
+    assert disk.free_bytes() == 60 * GIB

@@ -38,6 +38,9 @@ services:
       # The hub's bucket, where JOB_STORAGE=local keeps job files.
       CLUSTER_STORAGE_ENDPOINT: http://${HUB_ADDRESS}:8333
     volumes:
+      # The host drive's free space under Docker Desktop, for app/disk.py:
+      # an empty folder on that drive (HOST_DISK_PROBE, set by scripts/server.py).
+      - ${HOST_DISK_PROBE:-./.disk-probe}:/run/host-disk:ro
       # Each attempt's scratch folder; the bucket keeps the job files.
       - data:/data
       # This node's secrets only: its Redis password, the bucket's keys,

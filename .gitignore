@@ -12,3 +12,6 @@ __pycache__/
 /node.env
 /.env.before-split
 /deploy/kubernetes/local/settings.env
+
+# Empty folder measured for the host drive's free space (HOST_DISK_PROBE)
+/.disk-probe/

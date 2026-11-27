@@ -75,6 +75,9 @@ services:
     env_file: *settings
     environment: *wiring
     volumes:
+      # The host drive's free space under Docker Desktop, for app/disk.py:
+      # an empty folder on that drive (HOST_DISK_PROBE, set by scripts/server.py).
+      - ${HOST_DISK_PROBE:-./.disk-probe}:/run/host-disk:ro
       - data:/data
       # Backups, restores, and the one-time SQLite migration. Only the API
       # gets this folder: the workers process untrusted media and reach
@@ -108,6 +111,9 @@ services:
     env_file: *settings
     environment: *wiring
     volumes:
+      # The host drive's free space under Docker Desktop, for app/disk.py:
+      # an empty folder on that drive (HOST_DISK_PROBE, set by scripts/server.py).
+      - ${HOST_DISK_PROBE:-./.disk-probe}:/run/host-disk:ro
       - data:/data
       - ./secrets:/run/secrets:ro
       # Only this service's Redis password. The other Redis users' passwords,
@@ -143,6 +149,9 @@ services:
     env_file: *settings
     environment: *wiring
     volumes:
+      # The host drive's free space under Docker Desktop, for app/disk.py:
+      # an empty folder on that drive (HOST_DISK_PROBE, set by scripts/server.py).
+      - ${HOST_DISK_PROBE:-./.disk-probe}:/run/host-disk:ro
       - data:/data
       - ./secrets:/run/secrets:ro
       # Only this service's Redis password. The other Redis users' passwords,
