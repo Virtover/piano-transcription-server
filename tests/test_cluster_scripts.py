@@ -1074,3 +1074,22 @@ def test_a_hub_on_linux_is_told_the_one_permission_tailscale_needs(tmp_path, mon
 
     assert any("sudo tailscale set --operator=$USER" in message for message in messages)
     assert sum("--operator" in message for message in messages) == 1
+
+
+@pytest.mark.parametrize("action", ["start", "restart", "update"])
+def test_a_node_prepares_the_host_disk_probe_before_its_worker_starts(tmp_path, monkeypatch, action):
+    """Under Docker Desktop, node.env gets HOST_DISK_PROBE before `up`, so the worker measures the host drive's
+    free space (app/disk.py); every action that starts the worker prepares it."""
+    stack = node(tmp_path)
+    order = []
+    monkeypatch.setattr(server.STACKS, "docker_desktop_disk_folder", lambda **where: tmp_path / "DockerDisk" / "WSL")
+    real_up = stack.up
+
+    def up(*args, **kwargs):
+        order.append(("up", "HOST_DISK_PROBE=" in (tmp_path / "node.env").read_text()))
+        return real_up(*args, **kwargs)
+
+    monkeypatch.setattr(stack, "up", up)
+    assert server.main([action], stack, FakeClock()) == 0
+    assert order == [("up", True)]
+    assert (tmp_path / "DockerDisk" / "piano-disk-probe").is_dir()

@@ -765,6 +765,12 @@ def node_start(args, stack: "NodeStack", clock: Clock, recreate: bool = False) -
         return 1
     if getattr(args, "legacy_gpu", False):
         NODES.set_env_value(stack.root / NODES.NODE_ENV, "WORKER_GPU_BUILD", "legacy")
+    # Under Docker Desktop, the probe of the host drive's free space (app/disk.py).
+    try:
+        for message in stack.prepare_files():
+            say(message)
+    except OSError as error:
+        say(f"could not prepare the folder that measures the host drive's free space: {error}")
     pulled = node_image(stack)
     remove_stale_containers(stack)
     if pulled and stack.pull() != 0:
