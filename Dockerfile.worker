@@ -21,17 +21,19 @@ ARG DETTATO_CPP_SHA256=da52338946ce58a1912314e7948abd919d48f66626c524e706b2e7e7d
 ARG GGML_COMMIT=417a024b4fb6bc3116d41af7c067166a039bdf12
 ARG GGML_SHA256=eb2fb2d60331e78de996f4fd3f9cee955cfcab2546b7ad64100444730f39ede7
 ARG DETTATO_GGUF_REVISION=73f622a5173c8c9112d7cf2081a0402d73746fc7
+# Copies of the GGUF to fall back on (space-separated URLs; fetch.py keeps only the file with the checksum).
+ARG DETTATO_GGUF_MIRRORS=""
 ARG DETTATO_GGUF_SHA256=73f08bfcad22c401c1e584229f2b49cb8097a9b539cc81fd29dca573d7585480
 RUN mkdir -p /src/dettato.cpp /src/ggml /opt/dettato-cpp/bin \
     && python3 /build/fetch.py --sha256 "$DETTATO_CPP_SHA256" --out /tmp/dettato-cpp.tar.gz \
-        "https://github.com/hidude562/dettato.cpp/archive/${DETTATO_CPP_COMMIT}.tar.gz" \
+        "https://github.com/hidude562/dettato.cpp/archive/${DETTATO_CPP_COMMIT}.tar.gz"         "https://web.archive.org/web/2id_/https://codeload.github.com/hidude562/dettato.cpp/tar.gz/${DETTATO_CPP_COMMIT}" \
     && python3 /build/fetch.py --sha256 "$GGML_SHA256" --out /tmp/ggml.tar.gz \
-        "https://github.com/ggml-org/ggml/archive/${GGML_COMMIT}.tar.gz" \
+        "https://github.com/ggml-org/ggml/archive/${GGML_COMMIT}.tar.gz"         "https://web.archive.org/web/2id_/https://codeload.github.com/ggml-org/ggml/tar.gz/${GGML_COMMIT}" \
     && tar -xzf /tmp/dettato-cpp.tar.gz -C /src/dettato.cpp --strip-components=1 \
     && tar -xzf /tmp/ggml.tar.gz -C /src/ggml --strip-components=1 \
     && rm /tmp/*.tar.gz \
     && python3 /build/fetch.py --sha256 "$DETTATO_GGUF_SHA256" --out /opt/dettato-cpp/dettato-f16.gguf \
-        "https://huggingface.co/kobimusic/dettato-gguf/resolve/${DETTATO_GGUF_REVISION}/dettato-f16.gguf"
+        "https://huggingface.co/kobimusic/dettato-gguf/resolve/${DETTATO_GGUF_REVISION}/dettato-f16.gguf"         $DETTATO_GGUF_MIRRORS
 COPY dettato_cpu /src/dettato_cpu
 RUN set -e; for variant in avx2 generic; do \
         if [ "$variant" = avx2 ]; then isa=ON; else isa=OFF; fi; \

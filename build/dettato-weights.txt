@@ -1,6 +1,7 @@
 # dettato's weights (app/transcription/dettato/hub.py), fetched by Dockerfile.worker and Dockerfile.runpod with
 # fetch.py: each file from its Hugging Face repo at a fixed revision, kept only with this sha256.
-# repo revision file sha256
+# Optional further columns: copies of the file (URLs), tried in turn when Hugging Face fails.
+# repo revision file sha256 [copy URLs...]
 kobimusic/dettato a0d1e354d282c4ed458b83b287065587979b053e config.json d56621d0485d9372c96a5a49279217bed7848b3a6c0290af44caf9f63facb0ff
 kobimusic/dettato a0d1e354d282c4ed458b83b287065587979b053e model.safetensors 696d22c5341c6e3df1bdb5670cb7945b65aa36f06811dfa5dfe73dc06cd53be5
 kobimusic/dettato-evidence 5633f28ee330a48bc31bdd3f9f98bb1a71206141 config.json 5052292c6442556ffc86a849842b227f8a78a31580caa69b63057b2462c769cd
