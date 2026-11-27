@@ -22,7 +22,7 @@ ARG GGML_COMMIT=417a024b4fb6bc3116d41af7c067166a039bdf12
 ARG GGML_SHA256=eb2fb2d60331e78de996f4fd3f9cee955cfcab2546b7ad64100444730f39ede7
 ARG DETTATO_GGUF_REVISION=73f622a5173c8c9112d7cf2081a0402d73746fc7
 # Copies of the GGUF to fall back on (space-separated URLs; fetch.py keeps only the file with the checksum).
-ARG DETTATO_GGUF_MIRRORS=""
+ARG DETTATO_GGUF_MIRRORS="https://huggingface.co/Christopher2137/dettato-mirror/resolve/9dc934534f617f70609cb59fbea78e16936db05e/dettato-gguf/dettato-f16.gguf"
 ARG DETTATO_GGUF_SHA256=73f08bfcad22c401c1e584229f2b49cb8097a9b539cc81fd29dca573d7585480
 RUN mkdir -p /src/dettato.cpp /src/ggml /opt/dettato-cpp/bin \
     && python3 /build/fetch.py --sha256 "$DETTATO_CPP_SHA256" --out /tmp/dettato-cpp.tar.gz \
