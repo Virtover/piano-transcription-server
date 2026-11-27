@@ -59,6 +59,11 @@ def _cpu_flags() -> set[str]:
     return set()
 
 
+def installed() -> bool:
+    """Whether dettato.cpp is in this image: the worker image builds it, the RunPod image (GPU only) does not."""
+    return MODEL.is_file() and all(path.is_file() for path in BINARIES.values())
+
+
 def binary() -> Path:
     flags = _cpu_flags()
     return BINARIES["avx2"] if {"avx2", "fma", "f16c"} <= flags else BINARIES["generic"]

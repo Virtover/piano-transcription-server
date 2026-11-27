@@ -70,10 +70,12 @@ def test_select_ensemble_device_refuses_when_no_gpu_has_room(monkeypatch):
 def test_a_float32_gpu_needs_more_room(monkeypatch):
     monkeypatch.setattr(ensemble_transcription, "select_device", lambda: "cuda:0")
     monkeypatch.setattr(piano, "_cuda_capacities", {0: 2})
-    # Room for 2.0 GiB of ensemble models, not for the 2.5 GiB of float32.
-    total = int((device_module.gpu_reserve_gib(ensemble_transcription.settings.worker) + 0.25 + 2.2
+    # Room for one ensemble job in bfloat16, not for the 1.25 times as much of float32.
+    worker = ensemble_transcription.settings.worker
+    total = int((device_module.gpu_reserve_gib(worker) + 0.25 + worker.ensemble_memory_gib + 0.1
                  + device_module.GPU_CONTEXT_GIB) * GiB)
     monkeypatch.setattr(piano, "_cuda_total_memory", {0: total})
+    monkeypatch.setattr(device_module, "_fp32_gpus", False)
 
     assert ensemble_transcription.select_ensemble_device() == "cuda:0"
     monkeypatch.setattr(device_module, "_fp32_gpus", True)
@@ -93,10 +95,24 @@ def test_the_gpu_with_the_most_free_memory_takes_the_job(monkeypatch):
 
 
 def test_the_cpu_takes_ensemble_jobs_only_when_they_are_on(monkeypatch, default_settings):
+    from app.transcription.ensemble import cpu
+
     monkeypatch.setattr(ensemble_transcription, "select_device", lambda: "cpu")
+    monkeypatch.setattr(cpu, "installed", lambda: True)
 
     assert ensemble_transcription.select_ensemble_device() == "cpu"
     default_settings.worker.ensemble = False
+    with pytest.raises(ensemble_transcription.EnsembleUnavailable):
+        ensemble_transcription.select_ensemble_device()
+
+
+def test_the_cpu_refuses_ensemble_jobs_without_dettato_cpp(monkeypatch, default_settings):
+    """The RunPod image has no dettato.cpp: on a host without a usable GPU it refuses, and the job runs elsewhere."""
+    from app.transcription.ensemble import cpu
+
+    monkeypatch.setattr(ensemble_transcription, "select_device", lambda: "cpu")
+    monkeypatch.setattr(cpu, "installed", lambda: False)
+
     with pytest.raises(ensemble_transcription.EnsembleUnavailable):
         ensemble_transcription.select_ensemble_device()
 

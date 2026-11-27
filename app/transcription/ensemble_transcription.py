@@ -103,7 +103,10 @@ def select_ensemble_device() -> str:
     worker runs on it."""
     device = select_device()
     if device == "cpu":
-        if not ensemble_offered("cpu"):
+        from app.transcription.ensemble import cpu
+
+        # without dettato.cpp (the RunPod image, on a host without a usable GPU) refused, so the job runs elsewhere
+        if not ensemble_offered("cpu") or not cpu.installed():
             raise EnsembleUnavailable()
         return device
     with _cuda_capacities_lock:
