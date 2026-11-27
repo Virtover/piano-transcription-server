@@ -22,7 +22,7 @@ from app.transcription.ensemble import piano_levels
 from app.worker import tasks
 
 from test_job_storage import FakeS3
-from test_piano_levels import band, piano_solo
+from test_piano_levels import band, pedalled_piano, piano_solo
 
 URL = "https://example.com/video"
 EVERY = ["full", "advanced", "intermediate", "easy", "beginner", "raw"]
@@ -253,23 +253,60 @@ def test_the_admin_job_view_shows_a_completed_jobs_variants(worker):
     assert admin_jobs.job_details(job_id)["variants"] is None
 
 
-def test_a_piano_job_has_only_its_result(worker, monkeypatch):
+@pytest.mark.parametrize("mode_name", [None, "piano"])
+def test_a_piano_job_gets_levels_but_still_downloads_its_own_result(worker, monkeypatch, mode_name):
     client, _ = worker
-    install_pipeline(monkeypatch, piano_solo())
+    data = pedalled_piano()
+    install_pipeline(monkeypatch, data)
+    queue(ensemble=False)
+    if mode_name:
+        tasks.redis.hset(tasks.job_key("job"), "mode_name", mode_name)
+    word = mode_name or "transcription"
+
+    tasks.transcribe_job.fn("job", URL)
+
+    expected = dict(variants.distinct_levels(data))
+    assert list(expected) == list(variants.LEVELS)
+    assert job()["status"] == "completed" and job()["variants"] == ",".join(EVERY)
+    assert client.get("/api/transcriptions/job").json()["variants"] == EVERY
+    # without a variant, and as raw: Transkun's own result, under its old name, as old apps expect
+    for variant in (None, "raw"):
+        response = client.get("/api/transcriptions/job/midi", params={"variant": variant} if variant else {})
+        assert response.content == data
+        assert f'filename="{word}.mid"' in response.headers["content-disposition"]
+    for level in variants.LEVELS:
+        response = client.get("/api/transcriptions/job/midi", params={"variant": level})
+        assert response.content == expected[level]
+        assert f'filename="{word}-{level}.mid"' in response.headers["content-disposition"]
+    assert client.get("/api/transcriptions/job/midi", params={"variant": "virtuoso"}).status_code == 422
+
+
+def test_a_piano_job_whose_levels_are_the_same_lists_only_those_that_differ(worker, monkeypatch):
+    client, _ = worker
+    install_pipeline(monkeypatch, melody_only())
     queue(ensemble=False)
 
     tasks.transcribe_job.fn("job", URL)
 
-    assert job()["status"] == "completed" and "variants" not in job()
+    assert client.get("/api/transcriptions/job").json()["variants"] == ["full", "raw"]
+    refused = client.get("/api/transcriptions/job/midi", params={"variant": "easy"})
+    assert refused.status_code == 404 and refused.json()["detail"]["error_code"] == "variant_unavailable"
+
+
+def test_a_piano_job_from_before_levels_has_its_result_only(worker):
+    client, _ = worker
+    folder = tasks.job_dir("job")
+    folder.mkdir(parents=True)
+    (folder / "transcription.mid").write_bytes(b"MThd")
+    tasks.redis.hset(tasks.job_key("job"), mapping={"status": "completed", "result": str(folder / "transcription.mid")})
     assert client.get("/api/transcriptions/job").json()["variants"] == ["raw"]
-    assert sorted(path.name for path in tasks.job_dir("job").iterdir()) == ["transcription.mid"]
-    for variant in (None, "raw"):
-        response = client.get("/api/transcriptions/job/midi", params={"variant": variant} if variant else {})
-        assert response.status_code == 200 and 'filename="transcription.mid"' in response.headers["content-disposition"]
     refused = client.get("/api/transcriptions/job/midi", params={"variant": "full"})
-    assert refused.status_code == 404
-    assert refused.json()["detail"]["error_code"] == "variant_unavailable"
-    assert client.get("/api/transcriptions/job/midi", params={"variant": "virtuoso"}).status_code == 422
+    assert refused.status_code == 404 and refused.json()["detail"]["error_code"] == "variant_unavailable"
+
+
+def test_the_server_info_says_piano_jobs_get_levels(worker):
+    client, _ = worker
+    assert client.get("/api/server-info").json()["piano_levels"] is True
 
 
 def test_a_job_has_no_variants_before_it_completes(worker):
@@ -524,6 +561,34 @@ def test_a_busy_fallback_delivers_the_raw_result_only(worker, runpod, monkeypatc
     assert job()["status"] == "completed" and job()["variants"] == "raw"
     assert "Job job: no piano levels" in caplog.text
     assert not list((Path(settings.service.data_dir) / job_storage.WORK_FOLDER).glob("*"))
+
+
+def test_a_runpod_piano_result_with_levels_is_stored_as_it_came(worker, runpod, monkeypatch):
+    data = pedalled_piano()
+    sent = dict(variants.distinct_levels(data))
+    runpod.update(midi_base64=encoded(data), piano_levels_base64={level: encoded(m) for level, m in sent.items()})
+    monkeypatch.setattr(variants, "make_levels", lambda *args, **kwargs: pytest.fail("the levels came with the result"))
+    queue(ensemble=False, backend="remote")
+
+    tasks.transcribe_remote_job.fn("job", URL)
+
+    assert job()["status"] == "completed" and job()["variants"] == ",".join(EVERY)
+    for level, midi in sent.items():
+        assert (tasks.job_dir("job") / variants.file_name(level)).read_bytes() == midi
+
+
+def test_an_older_endpoints_piano_result_gets_its_levels_after_completion(worker, runpod, monkeypatch):
+    client, _ = worker
+    data = pedalled_piano()
+    runpod.update(midi_base64=encoded(data))
+    monkeypatch.setattr(tasks, "late_levels", variants.FallbackLevels(limit=1))
+    queue(ensemble=False, backend="remote")
+
+    tasks.transcribe_remote_job.fn("job", URL)
+
+    assert job()["status"] == "completed"
+    assert wait_for(lambda: job().get("variants") == ",".join(EVERY))
+    assert client.get("/api/transcriptions/job/midi").content == data
 
 
 def test_late_levels_are_not_announced_for_a_job_that_changed(worker):

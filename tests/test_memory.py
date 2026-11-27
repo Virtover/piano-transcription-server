@@ -53,7 +53,7 @@ def test_estimates_follow_mode_and_length():
     assert 0.55 * GIB < ensemble < 1.0 * GIB
     ten_hours = memory.job_ram_bytes({"duration": str(10 * 3600), "mode": "arrangement"})
     assert ten_hours < 2.5 * GIB                      # past an hour it grows little
-    assert memory.job_ram_bytes({"duration": "bad"}) == memory.PIANO_BASE
+    assert memory.job_ram_bytes({"duration": "bad"}) == memory.PIANO_BASE + memory.LEVELS_BASE
 
 
 @pytest.fixture

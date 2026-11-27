@@ -1,8 +1,8 @@
 """The MIDI files of a job's result: its variants.
 
-A piano job has one, raw: Transkun's transcription. An ensemble job has six: raw, dettato's multi-track file with its
-tempo map, and five piano versions of it (app/transcription/ensemble/piano_levels.py), full, advanced, intermediate,
-easy, and beginner. The levels are made once, where the job ran, when its result is stored: by the local or node
+Every job has up to six: raw, its transcription (Transkun's, or dettato's multi-track file with its tempo map), and
+five piano versions of it (app/transcription/ensemble/piano_levels.py), full, advanced, intermediate, easy, and
+beginner. raw stays a piano job's default download. The levels are made once, where the job ran, when its result is stored: by the local or node
 worker that transcribed it, by the RunPod handler for an outsourced job (which returns them with the result), and,
 for a result from a RunPod endpoint on an older image that returns none, by the remote worker that received it
 (FallbackLevels), after the job is completed with its raw result. They are kept next to the result in job storage,

@@ -138,7 +138,7 @@ def fake_server(api_context, monkeypatch):
         result = folder / "transcription.mid"
         result.write_bytes(midi(plucks(start, end, offset=start)))
         fields = {"status": "completed", "result": str(result), "node": "hub"}
-        if job.get("mode") == tasks.ENSEMBLE and behaviour["levels"]:
+        if behaviour["levels"]:
             # The piano levels, as a worker makes them; a level_tempo makes them wrong.
             source = midi(plucks(start, end, offset=start), tempo=behaviour["level_tempo"] or 500000)
             made = dict(variants.distinct_levels(source))
@@ -183,6 +183,12 @@ def test_a_run_of_both_modes_stores_each_as_the_server_does(fake_server, capsys)
     assert by_name["ensemble"]["mode"] == "arrangement" and "mode" not in by_name["piano"]
 
 
+def test_a_piano_job_passes_with_its_levels_and_names_them(fake_server, capsys):
+    e2e.run(args(case="whole", mode="piano"))
+
+    assert "variants full,advanced,beginner,raw" in capsys.readouterr().out
+
+
 def test_an_ensemble_passes_with_its_levels_and_names_them(fake_server, capsys):
     e2e.run(args(case="whole", mode="ensemble"))
 
@@ -192,13 +198,14 @@ def test_an_ensemble_passes_with_its_levels_and_names_them(fake_server, capsys):
     assert "variants full,advanced,beginner,raw" in output
 
 
-def test_an_ensemble_without_its_levels_fails(fake_server, capsys, monkeypatch):
+@pytest.mark.parametrize("mode", ["piano", "ensemble"])
+def test_a_job_without_its_levels_fails(fake_server, capsys, monkeypatch, mode):
     _, _, behaviour = fake_server
     behaviour["levels"] = False
     monkeypatch.setattr(e2e, "LEVELS_WAIT", 0.0)
 
     with pytest.raises(AdminError, match="end-to-end checks failed"):
-        e2e.run(args(case="whole", mode="ensemble"))
+        e2e.run(args(case="whole", mode=mode))
     assert "no piano level full, advanced, beginner" in capsys.readouterr().out
 
 

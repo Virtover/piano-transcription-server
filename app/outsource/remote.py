@@ -184,10 +184,9 @@ def transcribe_remotely(
         midi_path = output_dir / "transcription.mid"
         midi_path.write_bytes(midi)
         check_midi(midi_path)
-        if ensemble:
-            # Made on the endpoint; None from an older image, whose levels
-            # the job lifecycle makes after it completes.
-            context.levels = write_levels(output, output_dir, context.job_id)
+        # Made on the endpoint; None from an older image, whose levels the
+        # job lifecycle makes after it completes.
+        context.levels = write_levels(output, output_dir, context.job_id)
         record_jobs_per_worker(redis_client(), output.get("worker_capacity"))
         timing = output.get("timing")
         if isinstance(timing, dict):

@@ -702,7 +702,7 @@ class JobContext:
         # Called once the job's model step has ended: it gives back the
         # job's place on this device's models (app.worker.places).
         self.model_done = model_done or (lambda: None)
-        # The piano levels the backend brought with an ensemble result, as
+        # The piano levels the backend brought with the result, as
         # files in output_dir (a RunPod endpoint's), or None when it brought
         # none: a local job makes them here, a remote one afterwards.
         self.levels: list[str] | None = None
@@ -1021,15 +1021,14 @@ def run_job(
 
         if superseded(job_id, lease.token):
             raise TranscriptionCancelled()
-        stored_variants, levels_later = None, False
-        if context.ensemble:
-            made = context.levels
-            if made is None and backend == "local":
-                made = variants.make_levels(midi_path, output_dir, job_id)
-            # A RunPod endpoint on an older image returned none: the job is
-            # completed with its raw result, and they follow (levels_later).
-            levels_later = made is None
-            stored_variants = variants.stored_field(store_levels(job_id, output_dir, made or []))
+        # The piano levels of the result, piano and ensemble jobs alike.
+        made = context.levels
+        if made is None and backend == "local":
+            made = variants.make_levels(midi_path, output_dir, job_id)
+        # A RunPod endpoint on an older image returned none: the job is
+        # completed with its raw result, and they follow (levels_later).
+        levels_later = made is None
+        stored_variants = variants.stored_field(store_levels(job_id, output_dir, made or []))
         reference = storage().save_result(job_id, midi_path)
         if not complete_job(job_id, midi_path, reference, lease.token, stored_variants):
             if superseded(job_id, lease.token):
@@ -1126,7 +1125,7 @@ late_levels = variants.FallbackLevels(limit=1)
 
 
 def start_late_levels(job_id: str, midi_path: Path, reference: str) -> None:
-    """Make an ensemble job's piano levels after it completed with its raw
+    """Make a job's piano levels after it completed with its raw
     result, in the background (variants.FallbackLevels), from a copy of the
     result in a scratch folder of its own, which cleanup removes after a
     crash. Never raises; the job keeps its raw result whatever happens."""

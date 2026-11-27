@@ -153,6 +153,10 @@ class ServerInfoResponse(BaseModel):
     # Whether a submission may ask for only a part of its video or file
     # (start_seconds, end_seconds); older servers would transcribe it all.
     trimming: bool = False
+    # Whether piano jobs get piano levels (variants) too, as ensemble jobs do:
+    # a completed piano job listing only raw may still get them shortly after
+    # (from a RunPod endpoint on an older image). Older servers: false.
+    piano_levels: bool = False
     # Subscription plans, lowest level first; only when billing is enabled.
     subscriptions: list[SubscriptionOffer] | None = None
     # Given once to each new account; only when billing is enabled.
@@ -447,6 +451,7 @@ def server_info() -> ServerInfoResponse:
         ensemble=settings.worker.ensemble,
         arrangement=False,
         trimming=True,
+        piano_levels=True,
     )
     # Always present, null when nothing is planned.
     notice = maintenance.current(redis)

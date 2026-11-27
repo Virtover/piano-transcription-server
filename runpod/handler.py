@@ -3,9 +3,9 @@ dettato for its ensemble jobs.
 
 Input:  {"audio_url": "<presigned GET URL on STORAGE_ENDPOINT>", "job_id": "...",
          "mode": "transcription" | "ensemble", "source_rate": <Hz, ensemble only>}
-Output: {"midi_base64": "...", "timing": {...}} or {"error": "..."}; for an ensemble job also
-        "piano_levels_base64": {level: "..."}, its piano levels (app.variants), left out when they
-        would not fit in the output, so the server makes them instead
+Output: {"midi_base64": "...", "piano_levels_base64": {level: "..."}, "timing": {...}} or
+        {"error": "..."}; the piano levels (app.variants) of either mode are left out when they would
+        not fit in the output, so the server makes them instead
 
 The audio is FLAC at 44.1 kHz mono, prepared by the server's remote worker.
 
@@ -123,14 +123,6 @@ def transcribe_job(job: dict) -> dict:
                 transcribed = time.monotonic()
                 ensemble_transcription.write_result(tracks, midi_path, audio, sample_rate, ENSEMBLE_DEVICE)
                 note_count = sum(len(track.notes) for track in tracks)
-                # The piano levels, here rather than on the server: in a child
-                # process of their own, bounded in time and memory.
-                written = time.monotonic()
-                levels = {
-                    level: base64.b64encode((Path(directory) / variants.file_name(level)).read_bytes()).decode("ascii")
-                    for level in variants.make_levels(midi_path, Path(directory), job_id)
-                }
-                leveled = time.monotonic()
             else:
                 model_audio = audio_for_model(MODEL, sample_rate, audio)
                 events = BATCHER.submit(model_audio, Progress(job), None)
@@ -138,6 +130,14 @@ def transcribe_job(job: dict) -> dict:
                 # Beat tracking on the GPU, in memory its job capacity reserves.
                 write_midi(events, midi_path, model_audio, MODEL.fs, DEVICE)
                 note_count = len(events)
+            # The piano levels, of either mode, here rather than on the
+            # server: in a child process of their own, bounded in time and memory.
+            written = time.monotonic()
+            levels = {
+                level: base64.b64encode((Path(directory) / variants.file_name(level)).read_bytes()).decode("ascii")
+                for level in variants.make_levels(midi_path, Path(directory), job_id)
+            }
+            leveled = time.monotonic()
             midi = midi_path.read_bytes()
 
         encoded = base64.b64encode(midi).decode("ascii")
@@ -159,13 +159,12 @@ def transcribe_job(job: dict) -> dict:
                 "mode": "ensemble" if ensemble else "transcription",
             },
         }
-        if ensemble:
-            result["timing"]["levels_seconds"] = round(leveled - written, 2)
-            if len(encoded) + sum(len(level) for level in levels.values()) <= MAX_OUTPUT_BYTES:
-                result[variants.LEVELS_FIELD] = levels
-            else:
-                # Without the field, the server makes them itself.
-                logger.info("Job %s: piano levels left out of the output, which they would make too large", job_id)
+        result["timing"]["levels_seconds"] = round(leveled - written, 2)
+        if len(encoded) + sum(len(level) for level in levels.values()) <= MAX_OUTPUT_BYTES:
+            result[variants.LEVELS_FIELD] = levels
+        else:
+            # Without the field, the server makes them itself.
+            logger.info("Job %s: piano levels left out of the output, which they would make too large", job_id)
         return result
     except (InvalidInput, GpuOutOfMemory) as error:
         return {"error": str(error)}

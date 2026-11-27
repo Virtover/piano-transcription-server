@@ -12,7 +12,7 @@ queues it as an unbilled job: no user, nothing charged. The file has four
 10-second sections of plucked notes, two a second: C4, E4, G4, then A4. None
 is another's harmonic, so a part cut in the wrong place shows in the notes.
 The jobs and their files are removed afterwards; the job list keeps them,
-titled "e2e check". An ensemble job must also have its piano levels
+titled "e2e check". Every job must also have its piano levels
 (app.variants): the distinct ones its result gives, each a MIDI file with
 notes only on the result's own ticks and the result's tempo map. See docs/testing.md.
 """
@@ -50,7 +50,7 @@ MODES = ("piano", "ensemble")
 # leave room for it.
 FOUND_SHARE = 0.5
 ONSET_SLACK = 0.25
-# How long after completion an ensemble job's levels may still appear: a
+# How long after completion a job's levels may still appear: a
 # RunPod endpoint on an older image returns none, and the remote worker makes
 # them after the job completed.
 LEVELS_WAIT = 180.0
@@ -250,11 +250,11 @@ def finish(result: Result, part, length: float, deadline: float) -> None:
         result.problems.append(f"the MIDI could not be read: {type(error).__name__}: {error}")
         return
     check(result, part, length, notes)
-    if result.mode == "ensemble":
-        # The levels the result gives, made here as a worker makes them.
-        wanted = [level for level, _ in variants.distinct_levels(data)]
-        job = wait_for_levels(key, min(deadline, time.time() + LEVELS_WAIT), wanted)
-        check_levels(result, job, data, wanted)
+    # The levels the result gives, piano and ensemble jobs alike, made here
+    # as a worker makes them.
+    wanted = [level for level, _ in variants.distinct_levels(data)]
+    job = wait_for_levels(key, min(deadline, time.time() + LEVELS_WAIT), wanted)
+    check_levels(result, job, data, wanted)
     result.variants = variants.job_variants(job)
 
 
@@ -361,7 +361,7 @@ def run(args) -> None:
             where = f"{result.backend or '?'}" + (f" on {result.node}" if result.node else "")
             notes = ", ".join(f"{pitch}×{count}" for pitch, count in result.notes.items()) or "-"
             onsets = f"{result.onsets[0]}–{result.onsets[1]} s" if result.onsets else "-"
-            levels = f"; variants {','.join(result.variants)}" if result.mode == "ensemble" else ""
+            levels = f"; variants {','.join(result.variants)}"
             print(f"{'PASS' if result.passed else 'FAIL'}  {result.case:<12} {result.mode:<14} {where:<22} "
                   f"notes {notes}; onsets {onsets}{levels}  [{result.job_id[:8]}]", flush=True)
             for problem in result.problems:

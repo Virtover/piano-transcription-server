@@ -754,8 +754,8 @@ def get_midi(
     job_id: str,
     variant: Variant | None = Query(
         None,
-        description="Which MIDI file: raw (the transcription; a piano job's only one), or an ensemble job's piano "
-        "version full, advanced, intermediate, easy, or beginner. By default full for an ensemble job, else raw.",
+        description="Which MIDI file: raw (the transcription itself), or a piano version full, advanced, "
+        "intermediate, easy, or beginner. By default full for an ensemble job, raw for a piano job.",
     ),
     user: AuthenticatedUser | None = Depends(current_user),
 ):
@@ -867,8 +867,9 @@ def job_mode_name(job: dict[str, str]) -> str:
 
 
 def result_filename(job: dict[str, str], variant: str = variants.RAW) -> str:
-    """<mode>.mid for a piano job; <mode>-<variant>.mid for an ensemble
-    job, such as ensemble-full.mid. Only the server's fixed words."""
-    if job.get("mode") == ENSEMBLE:
-        return f"{job_mode_name(job)}-{variant}.mid"
-    return f"{job_mode_name(job)}.mid"
+    """<mode>-<variant>.mid, such as ensemble-full.mid or piano-easy.mid;
+    a piano job's raw result keeps its name from before levels, <mode>.mid.
+    Only the server's fixed words."""
+    if job.get("mode") != ENSEMBLE and variant == variants.RAW:
+        return f"{job_mode_name(job)}.mid"
+    return f"{job_mode_name(job)}-{variant}.mid"
