@@ -89,8 +89,22 @@ class EnvFiles:
         return self.compose if name in SERVER_SCRIPT.COMPOSE_ONLY_VARIABLES else self.server
 
     def save(self) -> None:
+        # COMPOSE_FILE follows WORKER_PROCESSOR, so plain docker compose does too.
+        SERVER_SCRIPT.select_compose_files(self.compose)
         self.server.save(mode_from=self.compose.path)
         self.compose.save()
+
+
+def worker_processor(root: Path) -> tuple[str, str]:
+    """What the worker of this machine's stack runs on, and why, as .env says."""
+    compose = EnvFile(root / COMPOSE_ENV)
+    chosen = compose.get(SERVER_SCRIPT.PROCESSOR_VARIABLE)
+    if SERVER_SCRIPT.processor(compose) == "cpu":
+        return "cpu", ("on the CPU (WORKER_PROCESSOR=cpu, docker-compose.cpu.yml): with invited nodes it leaves piano "
+                       "and ensemble jobs to them and RunPod")
+    if chosen is None:
+        return "gpu", "on the GPU (the default; a start sets WORKER_PROCESSOR from whether nvidia-smi finds one)"
+    return "gpu", "on the GPU (WORKER_PROCESSOR=gpu)"
 
 
 # --- Reading the files people write ------------------------------------------------------
@@ -418,6 +432,7 @@ class Missing:
 # --- A home cluster's checks, on the host --------------------------------------------------
 
 NODES = SERVER_SCRIPT.NODES
+STACKS = SERVER_SCRIPT.STACKS
 
 
 def run_quietly(command: list[str]) -> subprocess.CompletedProcess:
@@ -488,6 +503,19 @@ def cluster_checks(root: Path, features: dict | None, run=run_quietly, platform:
         missing = [port for port in NODES.HUB_PORTS if f":{port}" not in (served.stdout or "")]
         checks.append(ClusterCheck(not missing, "Tailscale serves Redis and the bucket to the tailnet",
                                    f"Run: python scripts/admin.py nodes hub (ports {', '.join(map(str, missing))} are not served)"))
+    processor, text = worker_processor(root)
+    if processor == "cpu":
+        checks.append(ClusterCheck(True, f"the hub's worker {text}"))
+        outsourcing = (features or {}).get("outsourcing")
+        if outsourcing is not None and address:
+            checks.append(ClusterCheck(
+                bool(outsourcing.get("enabled")), "RunPod, for piano and ensemble jobs while no node is up",
+                "Without it they wait for a node: python scripts/setup.py outsourcing", optional=True))
+    elif STACKS.has_nvidia_gpu() is False:
+        checks.append(ClusterCheck(
+            False, "an NVIDIA GPU for the hub's worker (WORKER_PROCESSOR=gpu)",
+            "Docker cannot start the worker without one. Install the NVIDIA driver, or run it on the CPU: "
+            "python scripts/setup.py set WORKER_PROCESSOR"))
     if address:
         cloud = NODES.env_values(root / "server.env").get("JOB_STORAGE") == "s3"
         checks.append(ClusterCheck(
@@ -652,6 +680,8 @@ class Setup:
             say("")
             say(style("Other problems, which keep the server from starting:", "red", "bold"))
             self.show_problems(general)
+        say("")
+        say(style("Worker", "bold") + "  " + worker_processor(self.root)[1])
         say("")
         self.show_cluster(features, brief=True)
         if not commands:

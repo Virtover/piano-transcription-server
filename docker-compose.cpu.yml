@@ -1,0 +1,10 @@
+# The worker without a GPU, on a machine with no NVIDIA GPU, such as a VPS
+# that is a home cluster's hub (docs/cluster.md): docker-compose.yml gives
+# the worker every GPU, which Docker refuses to start without one. Docker
+# Compose adds this file when .env lists it in COMPOSE_FILE, which
+# scripts/server.py writes from WORKER_PROCESSOR=cpu in .env (it detects the
+# choice when it is missing). The worker then runs on the CPU; with invited
+# nodes it leaves piano and ensemble jobs to them and to RunPod.
+services:
+  worker:
+    gpus: !reset null

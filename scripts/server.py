@@ -114,7 +114,7 @@ def remaining_text(seconds: float) -> str:
 COMPOSE_ONLY_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD",
                           "COMPOSE_PROFILES", "ADMIN_WEB_MODE",
                           "HUB_ADDRESS", "HUB_BIND_ADDRESS", "HUB_REGISTRY", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR",
-                          "HOST_DISK_PROBE", "WORKER_MEMORY_LIMIT"}
+                          "HOST_DISK_PROBE", "WORKER_MEMORY_LIMIT", "WORKER_PROCESSOR"}
 COMPOSE_ENV, SERVER_ENV = ".env", "server.env"
 ADDED_HEADER = "# --- Added by scripts/setup.py or scripts/server.py"
 # A line that python-dotenv and Docker Compose read as a setting: also with
@@ -370,7 +370,82 @@ def prepare_files(root: Path) -> list[str]:
     created += STACKS.prepare_disk_probe(root, COMPOSE_ENV)
     # PostgreSQL, Redis, the API, and the rest beside the worker.
     created += STACKS.prepare_memory_limit(root, COMPOSE_ENV, 1.5, 0.15)
+    # The worker on the GPU or, without one, on the CPU (docker-compose.cpu.yml).
+    created += prepare_processor(root)
     return created
+
+
+# What the worker runs on (WORKER_PROCESSOR in .env): gpu, the default, gives
+# it every GPU (docker-compose.yml); cpu adds docker-compose.cpu.yml, which
+# takes them away, since Docker refuses to start it on a machine without one.
+PROCESSOR_VARIABLE = "WORKER_PROCESSOR"
+PROCESSORS = ("gpu", "cpu")
+CPU_FILE = "docker-compose.cpu.yml"
+MAIN_FILE = "docker-compose.yml"
+
+
+def compose_files(compose: "EnvFile") -> list[str]:
+    """The files COMPOSE_FILE names, in order; docker-compose.yml alone
+    without it."""
+    text = compose.get("COMPOSE_FILE")
+    if not text:
+        return [MAIN_FILE]
+    separator = compose.get("COMPOSE_PATH_SEPARATOR") or os.pathsep
+    return [part.strip() for part in text.split(separator) if part.strip()]
+
+
+def processor(compose: "EnvFile") -> str:
+    """The worker's processor as .env chooses it: gpu unless it says cpu."""
+    return "cpu" if (compose.get(PROCESSOR_VARIABLE) or "").strip().lower() == "cpu" else "gpu"
+
+
+def select_compose_files(compose: "EnvFile") -> bool:
+    """Make COMPOSE_FILE name docker-compose.cpu.yml exactly when the worker
+    runs on the CPU, keeping every other file it names, such as the hub's.
+    Plain `docker compose` commands read it too. Returns whether it changed."""
+    files = compose_files(compose)
+    wanted = [name for name in files if name != CPU_FILE] + ([CPU_FILE] if processor(compose) == "cpu" else [])
+    if wanted == files:
+        return False
+    if wanted == [MAIN_FILE]:
+        compose.unset("COMPOSE_FILE")
+        return True
+    compose.set("COMPOSE_FILE", ":".join(wanted))
+    # The same separator on every OS, so the line is portable.
+    compose.set("COMPOSE_PATH_SEPARATOR", ":")
+    return True
+
+
+def prepare_processor(root: Path, detect=None) -> list[str]:
+    """Choose the worker's processor once, when .env has no WORKER_PROCESSOR:
+    gpu where an NVIDIA GPU answers, cpu where none does. The choice is then
+    kept, so a driver that fails one day stops the worker loudly instead of
+    moving it to the CPU; an explicit value is never changed. Then
+    COMPOSE_FILE follows it. Written whole or not at all."""
+    path = root / COMPOSE_ENV
+    if not path.exists():
+        return []
+    compose = EnvFile(path)
+    messages = []
+    current = compose.get(PROCESSOR_VARIABLE)
+    if current is not None and current.strip().lower() not in PROCESSORS:
+        return [f"{PROCESSOR_VARIABLE}={current} in .env is neither gpu nor cpu; the worker gets the GPU"]
+    if current is None:
+        found = (detect or STACKS.has_nvidia_gpu)()
+        if found is not None:
+            compose.set(PROCESSOR_VARIABLE, "gpu" if found else "cpu")
+            messages.append(
+                f"set {PROCESSOR_VARIABLE}=gpu in .env: the worker uses this machine's NVIDIA GPU" if found else
+                f"set {PROCESSOR_VARIABLE}=cpu in .env: no NVIDIA GPU answers here (nvidia-smi), so the worker runs "
+                f"on the CPU ({CPU_FILE}); with invited nodes it leaves piano and ensemble jobs to them and RunPod. "
+                f"Set {PROCESSOR_VARIABLE}=gpu if this machine has one")
+    if select_compose_files(compose):
+        files = compose.get("COMPOSE_FILE")
+        messages.append(f"set COMPOSE_FILE={files} in .env, for the worker on the {processor(compose).upper()}"
+                        if files else "removed COMPOSE_FILE from .env: the worker gets the GPU again")
+    if messages:
+        compose.save()
+    return messages
 
 
 def create_folders(root: Path, folder: Path) -> bool:

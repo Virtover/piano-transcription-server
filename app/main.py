@@ -34,6 +34,7 @@ from app.worker.tasks import (
     WORKER_STOPPED,
     cleanup_stored_jobs,
     fail_abandoned_jobs,
+    outsource_stranded_jobs,
     reconcile_billing,
     recover_active_jobs,
     resend_stale_queued,
@@ -102,8 +103,9 @@ def monitor_backup_health(leader: Leadership | None = None) -> None:
 
 def watch_abandoned_jobs(leader: Leadership | None = None) -> None:
     """Fail and refund processing jobs whose worker stopped, for example
-    after a crash, while the API keeps running, and settle the billing of
-    jobs whose end was not settled, as when a worker crashed right after."""
+    after a crash, while the API keeps running, send to RunPod the queued
+    jobs no live device can take, and settle the billing of jobs whose end
+    was not settled, as when a worker crashed right after."""
     while True:
         time.sleep(ABANDONED_JOB_CHECK_INTERVAL)
         wait_for_lead(leader)
@@ -115,6 +117,10 @@ def watch_abandoned_jobs(leader: Leadership | None = None) -> None:
             resend_stale_queued()
         except Exception:
             logger.exception("Could not check for long-queued jobs")
+        try:
+            outsource_stranded_jobs()
+        except Exception:
+            logger.exception("Could not check for jobs no local device can take")
         try:
             reconcile_billing(min_age=RECONCILE_AFTER)
         except Exception:

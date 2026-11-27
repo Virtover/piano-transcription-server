@@ -62,10 +62,23 @@ def docker_desktop_disk_folder(platform: str | None = None, environ=None, home: 
     return None
 
 
+def _write_whole(path: Path, lines: list[str]) -> None:
+    """Written whole or not at all, as a power cut mid-write must not leave
+    half an env file: to a file beside it, then swapped in."""
+    import os
+    import shutil
+
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if path.exists():
+        shutil.copymode(path, partial)
+    os.replace(partial, path)
+
+
 def _set_env_value(path: Path, name: str, value: str) -> None:
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     lines = [line for line in lines if not line.startswith(f"{name}=")] + [f"{name}={value}"]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _write_whole(path, lines)
 
 
 def _env_value(path: Path, name: str) -> str | None:
@@ -85,6 +98,23 @@ def docker_memory_bytes(run=subprocess.run, environ=None) -> int | None:
         return int(result.stdout.strip()) if result.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+def has_nvidia_gpu(run=subprocess.run, which=None, environ=None) -> bool | None:
+    """Whether an NVIDIA GPU answers on this host (nvidia-smi -L), which
+    Docker's `gpus` needs; None when this is not to be asked, as in the
+    tests. Docker Desktop on Windows has nvidia-smi on the host too."""
+    import os
+    import shutil
+
+    if (os.environ if environ is None else environ).get("PIANO_NO_HOST_PROBES"):
+        return None
+    if (which or shutil.which)("nvidia-smi") is None:
+        return False
+    try:
+        return run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def prepare_memory_limit(root: Path, env_file: str, others_gib: float, others_share: float, total=None) -> list[str]:
@@ -129,7 +159,7 @@ def prepare_disk_probe(root: Path, env_file: str, **where) -> list[str]:
         return []
     lines = [line for line in lines if not line.startswith("HOST_DISK_PROBE=")]
     lines += [f"HOST_DISK_PROBE={value}"]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _write_whole(path, lines)
     return [f"set HOST_DISK_PROBE={value} in {env_file}: jobs are checked against the free space of the drive "
             "that holds Docker Desktop's virtual disk"]
 # A shutdown stops every service, whichever profiles started it.

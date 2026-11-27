@@ -138,17 +138,21 @@ def superseded(job_id: str, token: str) -> bool:
     return current is not None and current != token
 
 
-def claim_job(job_id: str, lease_token: str = "claimed") -> bool:
+def claim_job(job_id: str, lease_token: str = "claimed", backend: routing.Backend | None = None) -> bool:
     """Take a queued job for this attempt: processing, with its lease and
-    token, its attempt counted, and this device added to those that ran it."""
+    token, its attempt counted, and this device added to those that ran it.
+    Given the backend whose queue delivered it, a job moved to the other
+    backend since is not taken: its message here is a leftover."""
     key = job_key(job_id)
 
     while True:
         try:
             with redis.pipeline() as pipe:
                 pipe.watch(key)
-                status, nodes = pipe.hmget(key, "status", "nodes")
+                status, nodes, stored_backend = pipe.hmget(key, "status", "nodes", "backend")
                 if status != "queued":
+                    return False
+                if backend is not None and job_backend({"backend": stored_backend}) != backend:
                     return False
                 node = cluster.node_name()
                 ran_on = [name for name in (nodes or "").split(",") if name]
@@ -980,7 +984,7 @@ def run_job(
             place, requeued = wait_for_place(job_id)
             if place is None:
                 return
-        if not claim_job(job_id, lease.token):
+        if not claim_job(job_id, lease.token, backend):
             return
         claimed = True
         if backend == "local":
@@ -1156,11 +1160,111 @@ def retry_backend(job_id: str, backend: routing.Backend, error: Exception) -> ro
     if (
         isinstance(error, GpuOutOfMemory)
         and routing.outsourcing_enabled()
-        and redis.hget(job_key(job_id), "outsourced") != "1"
+        and may_outsource(redis.hgetall(job_key(job_id)))
         and routing.reserve_remote_slot(redis, job_id)
     ):
         return "remote"
     return None
+
+
+def may_outsource(job: dict[str, str]) -> bool:
+    """Whether the server may still send a local job to RunPod: never twice
+    (outsourced), nor one kept on its own workers (local_only: heavy use of
+    an unlimited plan, or a job an administrator or e2e put there)."""
+    return job.get("outsourced") != "1" and job.get("local_only") != "1"
+
+
+STRANDED = "No device that runs this kind of job is up; sent to RunPod"
+# Seconds without a live local worker for a kind of job before its queued
+# jobs count as stranded: longer than a worker takes to start again, as in
+# a restart, and counted from this process's start, since a worker that
+# restarts with the server publishes its heartbeat only once it is up.
+STRANDED_AFTER = 3 * routing.HEARTBEAT_TTL
+# When this process last saw a live local worker, by ensemble or not.
+_local_seen: dict[bool, float] = {}
+
+
+def outsource_stranded_jobs(now: float | None = None) -> int:
+    """Run periodically by the leading API. A queued local job that no live
+    local worker takes, as when the only device that runs its kind of job
+    lost power or its network mid-job, or a node is off and the hub's worker
+    is on a CPU, goes to RunPod once no such worker was seen for
+    STRANDED_AFTER and the job waited OUTSOURCE_LOCAL_FIRST_MAX_WAIT, as a
+    new job would. Never without outsourcing: then it waits for a
+    device, its message sent again by resend_stale_queued. A job that only
+    waits behind others for a live worker stays, so the queue keeps its order.
+    Reads only the local jobs' set, and nothing while every kind has a worker."""
+    if not routing.outsourcing_enabled():
+        return 0
+    now = time.time() if now is None else now
+    stranded = set()
+    for ensemble in (False, True):
+        if routing.local_capacity(redis, ensemble)[0] > 0 or ensemble not in _local_seen:
+            _local_seen[ensemble] = now
+        elif now - _local_seen[ensemble] >= STRANDED_AFTER:
+            stranded.add(ensemble)
+    if not stranded:
+        return 0
+    moved = 0
+    for job_id in list(redis.sscan_iter(routing.ACTIVE_KEYS["local"])):
+        job = redis.hgetall(job_key(job_id))
+        if job.get("status") != "queued" or job_backend(job) != "local" or not may_outsource(job):
+            continue
+        if is_ensemble(job) not in stranded:
+            continue
+        try:
+            queued_at = float(job.get("queued_at") or job.get("created_at") or now)
+        except ValueError:
+            queued_at = now
+        if now - queued_at < settings.outsource.local_first_max_wait:
+            continue
+        if not routing.reserve_remote_slot(redis, job_id):
+            # RunPod is full: the rest wait for the next round too.
+            break
+        moved += outsource_queued_job(job_id, STRANDED)
+    return moved
+
+
+def outsource_queued_job(job_id: str, reason: str) -> bool:
+    """Move a queued local job, whose remote slot is reserved, to the remote
+    queue. Its local message, if a device still delivers it, is a leftover
+    that claim_job refuses. Returns False, freeing the slot, if the job was
+    taken, cancelled, or changed meanwhile."""
+    key = job_key(job_id)
+    while True:
+        try:
+            with redis.pipeline() as pipe:
+                pipe.watch(key)
+                job = pipe.hgetall(key)
+                if job.get("status") != "queued" or job_backend(job) != "local" or not may_outsource(job):
+                    pipe.unwatch()
+                    if job_backend(job) != "remote":
+                        routing.mark_finished(redis, "remote", job_id)
+                    return False
+                pipe.multi()
+                pipe.hset(key, mapping={
+                    "backend": "remote",
+                    "outsourced": "1",
+                    "requeue_reason": reason,
+                    "queued_at": str(time.time()),
+                })
+                pipe.execute()
+                break
+        except WatchError:
+            continue
+    # The remote set has it already: reserve_remote_slot added it.
+    routing.mark_finished(redis, "local", job_id)
+    record_job(job_id)
+    logger.warning("Job %s moved from local to remote: %s", job_id, reason)
+    try:
+        send_job(job_id, "remote", *job_arguments(job))
+    except Exception:
+        logger.exception("Could not send job %s to the remote queue; it stays local", job_id)
+        update_job(job_id, backend="local", outsourced=job.get("outsourced") or "")
+        routing.move(redis, job_id, "remote", "local")
+        record_job(job_id)
+        return False
+    return True
 
 
 def requeue_job(job_id: str, source: routing.Backend, target: routing.Backend, reason: str) -> bool:

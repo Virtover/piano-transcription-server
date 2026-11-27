@@ -513,8 +513,9 @@ def test_compose_gives_every_service_with_settings_both_files():
 def test_compose_variables_are_used_and_documented():
     compose = "".join((ROOT / name).read_text(encoding="utf-8") for name in ("docker-compose.yml", "docker-compose.hub.yml"))
     documentation = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
-    # Read by Docker Compose itself, and by the hub's scripts.
-    not_interpolated = {"COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR", "HUB_REGISTRY", "HUB_ADDRESS"}
+    # Read by Docker Compose itself, and by the hub's scripts; WORKER_PROCESSOR
+    # by scripts/server.py, which writes COMPOSE_FILE from it.
+    not_interpolated = {"COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR", "HUB_REGISTRY", "HUB_ADDRESS", "WORKER_PROCESSOR"}
 
     for name in config.COMPOSE_VARIABLES:
         assert name in not_interpolated or "${" + name in compose, name
@@ -790,3 +791,37 @@ def test_free_minutes_period_is_a_deprecated_name_of_free_minutes_interval(tmp_p
     env.write_text("FREE_MINUTES_PERIOD=7d\nFREE_MINUTES_INTERVAL=1d\n", encoding="utf-8")
     with pytest.raises(config.ConfigError, match="both set"):
         config.load_settings(env_file=str(env), secrets_dir=None)
+
+
+def test_cpu_file_takes_the_gpus_from_the_worker_alone():
+    import yaml
+
+    class Loader(yaml.SafeLoader):
+        pass
+
+    # Docker Compose's !reset tag, which resets what docker-compose.yml set.
+    Loader.add_constructor("!reset", lambda loader, node: ("reset", loader.construct_scalar(node)))
+    main = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    cpu = yaml.load((ROOT / config.CPU_COMPOSE_FILE).read_text(encoding="utf-8"), Loader=Loader)
+
+    assert main["services"]["worker"]["gpus"] == "all"
+    assert cpu == {"services": {"worker": {"gpus": ("reset", "null")}}}
+    assert [name for name, service in main["services"].items() if "gpus" in service] == ["worker"]
+
+
+
+
+def test_processor_warnings(tmp_path):
+    env = tmp_path / ".env"
+
+    def warnings(*lines):
+        env.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+        return config.processor_warnings([str(env)])
+
+    cpu_files = ("COMPOSE_FILE=docker-compose.yml:docker-compose.cpu.yml", "COMPOSE_PATH_SEPARATOR=:")
+    assert warnings() == []
+    assert warnings("WORKER_PROCESSOR=gpu") == []
+    assert warnings("WORKER_PROCESSOR=cpu", *cpu_files) == []
+    assert "lacks docker-compose.cpu.yml" in warnings("WORKER_PROCESSOR=cpu")[0]
+    assert "names docker-compose.cpu.yml" in warnings("WORKER_PROCESSOR=gpu", *cpu_files)[0]
+    assert "neither gpu nor cpu" in warnings("WORKER_PROCESSOR=tpu")[0]

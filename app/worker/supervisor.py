@@ -52,6 +52,14 @@ DRAIN_FILE = Path("/tmp/worker-drain")
 # How long a drain is kept after its own timeout, for the container to be
 # stopped or replaced.
 DRAIN_HOLD = 5 * 60
+# What the hub's worker on a CPU leaves to the nodes, and to RunPod while no
+# node takes them, once nodes are invited: a CPU that took them would run
+# them many times slower than a node's GPU, and count as local room, which
+# keeps them from RunPod (app.outsource.routing). Switches that name the
+# hub's tasks, as `nodes allow hub transcribe arrange` writes, run them here.
+CPU_HUB_DEFERS = ("transcribe", "arrange")
+CPU_HUB_NOTE = ("on the CPU: piano and ensemble jobs are left to the nodes and RunPod; "
+                "python scripts/admin.py nodes allow hub transcribe arrange runs them here too")
 CHECK_THREADS = 2
 RESTART_BACKOFF = (5, 15, 30, 60)
 HUB_WAIT_REPORT = 60
@@ -134,6 +142,8 @@ class Supervisor:
         self.stopping = False
         self.refused_since: float | None = None
         self.allowed: list[str] = []
+        # Tasks it offers but leaves to others by default (CPU_HUB_DEFERS).
+        self.deferred: list[str] = []
         self.state = "starting"
         self.problem = ""
         self.restart_for_settings = False
@@ -233,7 +243,12 @@ class Supervisor:
 
     def read_switches(self) -> None:
         try:
-            self.allowed = cluster.allowed_tasks(self.redis, self.node, self.offered)
+            allowed = cluster.allowed_tasks(self.redis, self.node, self.offered)
+            deferred = self.cpu_hub_defers()
+            if deferred and deferred != self.deferred:
+                say(CPU_HUB_NOTE)
+            # Both or neither, should Redis go away between the two.
+            self.allowed, self.deferred = [task for task in allowed if task not in deferred], deferred
             self.state = "running" if self.allowed else "off"
             self.refused_since = None
         except AuthenticationError:
@@ -256,6 +271,19 @@ class Supervisor:
         if draining(time.time()):
             self.allowed = []
             self.state = "drained"
+
+    def cpu_hub_defers(self) -> list[str]:
+        """The tasks this service leaves to others now: on the hub's worker,
+        planned on the CPU, while nodes are invited and no switch names the
+        hub's tasks (CPU_HUB_DEFERS). Nothing changes on a single machine."""
+        hardware = self.local_plan.hardware if self.local_plan else {}
+        deferred = []
+        if self.role == "local" and not cluster.is_node() and hardware.get("kind") == "cpu":
+            if cluster.node_config(self.redis, self.node)["tasks"] is None and cluster.has_nodes(self.redis):
+                deferred = [task for task in CPU_HUB_DEFERS if task in self.offered]
+        if self.role == "local":
+            self.problem = CPU_HUB_NOTE if deferred else ""
+        return deferred
 
     def check_hub(self) -> None:
         """On a node: stop taking work while the hub speaks another protocol,
@@ -309,6 +337,7 @@ class Supervisor:
                 "state": self.state,
                 "offered": self.offered,
                 "allowed": self.allowed,
+                "deferred": self.deferred,
                 "running": self.running(),
                 "stopping": [child.group for child in self.children.values() if child.stopping],
                 "summary": summary,

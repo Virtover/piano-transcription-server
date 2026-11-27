@@ -43,6 +43,7 @@ python scripts/kube.py restart 5m                               # server.py's an
 | `app/worker/places.py` | Places on a device's models: a job holds one until its model step ends, and the worker has twice as many threads on a GPU |
 | `app/video_check.py` | Reading a video's length with yt-dlp, by the API or, while a site refuses the hub's address, by a node |
 | `docker-compose.hub.yml`, `docker-compose.node.yml`, `scripts/nodes.py`, `redis/node.acl` | The hub's published services; a node's worker; the host side of hub setup, invites, and join; a node's Redis rules |
+| `docker-compose.cpu.yml` | The worker without a GPU, on a machine without one (a VPS hub): `WORKER_PROCESSOR=cpu` in `.env`, which `scripts/server.py` detects once and keeps `COMPOSE_FILE` in step with |
 | `app/transcription/` | Audio, batching, and the model |
 | `app/transcription/dettato/` | Vendored dettato (Apache-2.0) for ensemble jobs: four models, weights pinned by sha256 in `build/dettato-weights.txt` and fetched at image build; changed only in `hub.py` and `precision.py` (its `__init__.py` says how) |
 | `app/transcription/ensemble_transcription.py`, `ensemble/` | Ensemble jobs: its three GPU phases in the device budget (`pitched.py`: the transcriber pass in a sliding buffer, per-segment repair; `drums.py`: whole-recording drums in pieces; `frames.py`: song-frame times; `midi.py`: the multi-track MIDI), and `cpu.py`, dettato.cpp in a process of its own |

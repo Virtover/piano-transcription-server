@@ -1226,3 +1226,79 @@ def test_the_supervisor_publishes_its_hardware(monkeypatch):
     instance.step()
 
     assert cluster.statuses(redis)[0]["hardware"] == {"kind": "gpu", "places": 3}
+
+
+# --- A hub without a GPU, such as a VPS ------------------------------------------------------
+
+def cpu_plan():
+    return launcher.WorkerPlan(processes=1, threads=4, cpu_threads=4, summary="4 CPU(s)", ensemble=True, places=4,
+                               hardware={"kind": "cpu", "places": 4, "arrangements": True})
+
+
+def test_a_cpu_hub_with_nodes_leaves_piano_and_ensemble_jobs_to_them(monkeypatch):
+    instance, redis, started, _ = make_supervisor(monkeypatch)
+    instance.local_plan = cpu_plan()
+    with_nodes(redis, "desktop")
+
+    instance.step()
+
+    # No local queue: no heartbeat, so no local room that would keep jobs from RunPod.
+    assert started == []
+    status = cluster.statuses(redis)[0]
+    assert status["state"] == "off" and status["deferred"] == ["transcribe", "arrange"]
+    assert "nodes allow hub transcribe arrange" in status["problem"]
+
+
+def test_a_cpu_hub_runs_them_once_its_switches_name_them(monkeypatch, api_context):
+    from app.admin import nodes as admin_nodes
+
+    instance, redis, started, _ = make_supervisor(monkeypatch)
+    monkeypatch.setattr(tasks, "redis", redis)
+    monkeypatch.setattr(admin_nodes, "ensure_audit_log", lambda: None)
+    monkeypatch.setattr(admin_nodes, "audit", lambda *arguments, **options: None)
+    instance.local_plan = cpu_plan()
+    with_nodes(redis, "desktop")
+    instance.step()
+
+    # Denying another task keeps what the hub left to others left.
+    assert admin_nodes.allow("hub", ["dispatch"], False, "admin")["tasks"] == ["check"]
+    instance.step()
+    assert started == []
+    assert admin_nodes.allow("hub", ["transcribe"], True, "admin")["tasks"] == ["transcribe", "check"]
+    instance.step()
+
+    assert [queues(process) for process in started] == [["default"]]
+    assert cluster.statuses(redis)[0]["problem"] == ""
+
+
+def test_a_cpu_machine_without_nodes_runs_its_own_jobs(monkeypatch):
+    instance, redis, started, _ = make_supervisor(monkeypatch)
+    instance.local_plan = cpu_plan()
+
+    instance.step()
+
+    assert [queues(process) for process in started] == [["default", "arrangement"]]
+    assert cluster.statuses(redis)[0]["deferred"] == []
+
+
+def test_a_gpu_hub_with_nodes_runs_its_jobs(monkeypatch):
+    instance, redis, started, _ = make_supervisor(monkeypatch)
+    instance.local_plan = launcher.WorkerPlan(processes=1, threads=6, cpu_threads=None, summary="1 GPU(s)",
+                                              ensemble=True, places=3, hardware={"kind": "gpu"})
+    with_nodes(redis, "desktop")
+
+    instance.step()
+
+    assert [queues(process) for process in started] == [["default", "arrangement"]]
+
+
+def test_a_cpu_node_is_never_held_back(monkeypatch, default_settings):
+    default_settings.service.deployment = "node"
+    default_settings.node.name = "laptop"
+    instance, redis, started, _ = make_supervisor(monkeypatch, role="node", offered=("transcribe",))
+    instance.local_plan = cpu_plan()
+    with_nodes(redis, "laptop")
+
+    instance.step()
+
+    assert [queues(process) for process in started] == [["default"]]

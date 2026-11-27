@@ -214,6 +214,13 @@ def setup_hub(root: Path, server, address: str | None = None, registry: str | No
     compose.set("COMPOSE_FILE", HUB_FILES)
     # The same separator on every OS, so the line is portable.
     compose.set("COMPOSE_PATH_SEPARATOR", ":")
+    # A hub without a GPU, such as a VPS, keeps its worker on the CPU
+    # (WORKER_PROCESSOR=cpu, docker-compose.cpu.yml).
+    server.select_compose_files(compose)
+    if server.processor(compose) == "cpu":
+        messages.append("this hub's worker runs on the CPU (WORKER_PROCESSOR=cpu): it leaves piano and ensemble jobs "
+                        "to the nodes and, while none is up, to RunPod; `nodes allow hub transcribe arrange` runs "
+                        "them here too")
     if registry:
         registry = registry.strip().lower().rstrip(".")
         if not HOSTNAME.match(registry):

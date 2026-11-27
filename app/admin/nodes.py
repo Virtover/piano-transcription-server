@@ -60,6 +60,8 @@ def overview() -> dict:
                     "state": status.get("state"),
                     "offered": status.get("offered") or [],
                     "running": status.get("running") or [],
+                    # Offered but left to other devices until a switch names them.
+                    "deferred": status.get("deferred") or [],
                     "stopping": status.get("stopping") or [],
                     "summary": status.get("summary") or "",
                     # Empty from a service of before it.
@@ -115,13 +117,17 @@ def switch(name: str, enabled: bool, actor: str, reason: str | None = None) -> d
 
 def allow(name: str, names: list[str], allowed: bool, actor: str, reason: str | None = None) -> dict:
     """Allow or deny tasks on a device. A device that never had a list
-    (the hub) starts from every task."""
+    (the hub) starts from every task, but for those its services leave to
+    others until a list names them, as the hub's worker on a CPU does."""
     reason = check_reason(reason)
     name = check_node(name)
     changes = check_tasks(names)
     ensure_audit_log()
     current = cluster.node_config(tasks.redis, name)["tasks"]
-    current = list(cluster.TASKS) if current is None else current
+    if current is None:
+        deferred = {task for status in cluster.statuses(tasks.redis) if status["node"] == name
+                    for task in status.get("deferred") or []}
+        current = [task for task in cluster.TASKS if task not in deferred]
     updated = sorted(set(current) | set(changes) if allowed else set(current) - set(changes),
                      key=cluster.TASKS.index)
     cluster.set_tasks(tasks.redis, name, updated)

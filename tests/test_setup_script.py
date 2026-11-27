@@ -912,3 +912,55 @@ def test_the_menu_fits_a_terminal_80_columns_wide(server):
 
     menu = [line for line in script.said if "changes any setting" in line or "turns it off" in line]
     assert menu and all(len(line) <= 80 for line in menu)
+
+
+# --- The worker's processor (WORKER_PROCESSOR) ---------------------------------------------
+
+def test_setting_the_processor_writes_compose_file_too(server):
+    setup, script = make(server, answers=["tpu", "cpu"])
+
+    assert setup.change("WORKER_PROCESSOR") == 0
+
+    assert compose_env(server).get("WORKER_PROCESSOR") == "cpu"
+    # Plain docker compose commands leave the GPU out too.
+    assert compose_env(server).get("COMPOSE_FILE") == "docker-compose.yml:docker-compose.cpu.yml"
+    assert "WORKER_PROCESSOR is gpu or cpu" in script.text
+
+
+def test_status_shows_what_the_worker_runs_on(server):
+    setup, script = make(server)
+    setup.status()
+    assert any(line.startswith("Worker") and "on the GPU" in line for line in script.said)
+
+    file = compose_env(server)
+    file.set("WORKER_PROCESSOR", "cpu")
+    file.save()
+    setup, script = make(server)
+    setup.status()
+    assert any(line.startswith("Worker") and "on the CPU" in line for line in script.said)
+
+
+def test_a_cpu_hub_is_told_where_its_jobs_go(server, monkeypatch):
+    root, _ = server
+    with (root / ".env").open("a", encoding="utf-8") as stream:
+        stream.write("\nHUB_ADDRESS=100.1.1.1\nCOMPOSE_FILE=docker-compose.yml:docker-compose.hub.yml:docker-compose.cpu.yml"
+                     "\nCOMPOSE_PATH_SEPARATOR=:\nWORKER_PROCESSOR=cpu\n")
+    run = with_tailscale(monkeypatch)
+
+    checks = setup_script.cluster_checks(root, {"outsourcing": {"enabled": False}}, run, platform="linux")
+
+    by_text = {check.text: check for check in checks}
+    assert any(text.startswith("the hub's worker on the CPU") and check.ok for text, check in by_text.items())
+    runpod = by_text["RunPod, for piano and ensemble jobs while no node is up"]
+    assert not runpod.ok and runpod.optional
+
+
+def test_a_gpu_hub_without_a_gpu_is_told_how_to_run_on_the_cpu(server, monkeypatch):
+    root, _ = server
+    monkeypatch.setattr(setup_script.STACKS, "has_nvidia_gpu", lambda: False)
+    run = with_tailscale(monkeypatch)
+
+    checks = setup_script.cluster_checks(root, None, run, platform="linux")
+
+    gpu = next(check for check in checks if check.text.startswith("an NVIDIA GPU for the hub's worker"))
+    assert not gpu.ok and "set WORKER_PROCESSOR" in gpu.fix

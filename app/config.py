@@ -47,7 +47,12 @@ COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA
                      # The host drive's free space under Docker Desktop (app/disk.py).
                      "HOST_DISK_PROBE",
                      # The worker's memory limit under Compose (app/memory.py).
-                     "WORKER_MEMORY_LIMIT"}
+                     "WORKER_MEMORY_LIMIT",
+                     # The worker on the GPU or the CPU (docker-compose.cpu.yml), read by scripts/server.py.
+                     "WORKER_PROCESSOR"}
+# WORKER_PROCESSOR's values, and the file that takes the GPU away from the worker.
+WORKER_PROCESSORS = ("gpu", "cpu")
+CPU_COMPOSE_FILE = "docker-compose.cpu.yml"
 # The two files: .env holds what Docker Compose reads, server.env the
 # server's settings, the same on every deployment. COMPOSE_PROFILES and
 # ADMIN_WEB_MODE are both: Compose starts services by the one and picks the
@@ -882,6 +887,26 @@ def misplaced_settings(env_file: "str | Sequence[str] | None") -> list[str]:
     return warnings
 
 
+def processor_warnings(env_file: "str | Sequence[str] | None") -> list[str]:
+    """WORKER_PROCESSOR in .env, and whether COMPOSE_FILE follows it, which
+    scripts/server.py start and scripts/setup.py make it do."""
+    for path in env_file_paths(env_file):
+        if Path(path).name != COMPOSE_ENV_FILE or not Path(path).is_file():
+            continue
+        values = {key.upper(): (value or "").strip() for key, value in dotenv_values(path).items()}
+        chosen = values.get("WORKER_PROCESSOR", "").lower()
+        if not chosen:
+            return []
+        if chosen not in WORKER_PROCESSORS:
+            return [f"WORKER_PROCESSOR={values['WORKER_PROCESSOR']} in .env is neither gpu nor cpu; the worker gets the GPU"]
+        separator = values.get("COMPOSE_PATH_SEPARATOR") or os.pathsep
+        listed = CPU_COMPOSE_FILE in [part.strip() for part in values.get("COMPOSE_FILE", "").split(separator)]
+        if (chosen == "cpu") != listed:
+            return [f"WORKER_PROCESSOR={chosen} in .env, but COMPOSE_FILE {'lacks' if chosen == 'cpu' else 'names'} "
+                    f"{CPU_COMPOSE_FILE}; python scripts/server.py start or python scripts/setup.py fix writes it"]
+    return []
+
+
 def resolve_aliases(environment: dict[str, str]) -> dict[str, dict[str, str]]:
     """Translate deprecated names into init values for the settings groups."""
     known = known_variables()
@@ -1399,6 +1424,7 @@ def main(arguments: list[str]) -> int:
         print("\n".join(describe(config)))
         warnings = configuration_warnings(config, read_environment(args.env_file or ENV_FILES))
         warnings += misplaced_settings(args.env_file or ENV_FILES)
+        warnings += processor_warnings(args.env_file or ENV_FILES)
         if warnings:
             print("\nWarnings:")
             for warning in warnings:

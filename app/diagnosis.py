@@ -130,6 +130,8 @@ def report(env_file, secrets_dir: str | None, online: bool = False, features: li
         errors += [problem(text, owner.get(text)) for text in app_config.validate_settings(config, "all")]
         warnings += [problem(text) for text in app_config.configuration_warnings(config, environment)]
         warnings += [problem(text, fix={"action": "separate"}) for text in app_config.misplaced_settings(env_file)]
+        # Written by the same preparation as a misplaced line (scripts/server.py prepare_files).
+        warnings += [problem(text, fix={"action": "separate"}) for text in app_config.processor_warnings(env_file)]
     results = None
     if online and config is not None and not errors:
         if run_checks is None:
@@ -164,6 +166,8 @@ def validate_value(name: str, value: str, env_file) -> dict:
     if name not in variables:
         if name not in app_config.COMPOSE_VARIABLES:
             return {**result, "ok": False, "problems": [f"Unknown setting {name}"]}
+        if name == "WORKER_PROCESSOR" and value.strip().lower() not in app_config.WORKER_PROCESSORS:
+            return {**result, "ok": False, "problems": ["WORKER_PROCESSOR is gpu or cpu"]}
         # Docker Compose reads it, which says when a value is wrong.
         return result
     group_name, field = variables[name]

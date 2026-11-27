@@ -433,12 +433,14 @@ def queue_job(
         # From the stored job, which an administrator's requeue keeps.
         ensemble = redis.hget(job_key(job_id), "mode") == ENSEMBLE
         # Heavy use of an unlimited plan never runs up the provider's bill.
-        backend = routing.choose_backend(
-            redis, job_id, ensemble, outsource=not billing.unlimited_heavy_use(current_user)
-        )
+        outsource = not billing.unlimited_heavy_use(current_user)
+        backend = routing.choose_backend(redis, job_id, ensemble, outsource=outsource)
+        local_only = not outsource
     else:
         routing.mark_active(redis, backend, job_id)
-    redis.hset(job_key(job_id), "backend", backend)
+        # An administrator's choice: never moved to RunPod (tasks.may_outsource).
+        local_only = backend == "local"
+    redis.hset(job_key(job_id), mapping={"backend": backend, "local_only": "1" if local_only else ""})
 
     try:
         send_job(job_id, backend, *arguments, **(options or {}))

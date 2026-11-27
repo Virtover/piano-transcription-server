@@ -207,8 +207,8 @@ def queue(case: str, mode: str, backend: str) -> tuple[Result, tuple | None, flo
     else:
         chosen = backend
         if chosen == "local":
-            # Kept on this server's workers: never moved to RunPod.
-            tasks.redis.hset(tasks.job_key(job_id), "outsourced", "1")
+            # Kept on this server's workers: never moved to RunPod (tasks.may_outsource).
+            tasks.redis.hset(tasks.job_key(job_id), "local_only", "1")
         routing.mark_active(tasks.redis, chosen, job_id)
     tasks.redis.hset(tasks.job_key(job_id), "backend", chosen)
     tasks.send_job(job_id, chosen, None, TITLE)

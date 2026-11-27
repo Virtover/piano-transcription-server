@@ -1231,3 +1231,100 @@ def test_a_custom_restart_command_stops_nothing_first():
     code, stack, _ = run(["restart", "0s", "--command", "docker compose up -d api"])
 
     assert ("stop_services", tuple(server.BILLING_SERVICES)) not in stack.calls
+
+
+# --- The worker's processor (WORKER_PROCESSOR, docker-compose.cpu.yml) -----------------
+
+def env_text(root: Path) -> dict:
+    return {name: server.EnvFile(root / ".env").get(name)
+            for name in ("WORKER_PROCESSOR", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR")}
+
+
+def test_a_machine_without_a_gpu_gets_the_cpu_file(tmp_path):
+    (tmp_path / ".env").write_text("# WORKER_PROCESSOR=cpu\n", encoding="utf-8")
+
+    messages = server.prepare_processor(tmp_path, detect=lambda: False)
+
+    assert env_text(tmp_path) == {"WORKER_PROCESSOR": "cpu", "COMPOSE_PATH_SEPARATOR": ":",
+                                  "COMPOSE_FILE": "docker-compose.yml:docker-compose.cpu.yml"}
+    assert "no NVIDIA GPU" in messages[0]
+    # Set on the example's own line, which stays in its block.
+    assert (tmp_path / ".env").read_text(encoding="utf-8").startswith("WORKER_PROCESSOR=cpu\n")
+    # Kept: detection runs only while the choice is missing.
+    assert server.prepare_processor(tmp_path, detect=lambda: True) == []
+    assert env_text(tmp_path)["WORKER_PROCESSOR"] == "cpu"
+
+
+def test_a_machine_with_a_gpu_keeps_docker_compose_yml(tmp_path):
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    assert "uses this machine's NVIDIA GPU" in server.prepare_processor(tmp_path, detect=lambda: True)[0]
+    assert env_text(tmp_path) == {"WORKER_PROCESSOR": "gpu", "COMPOSE_FILE": None, "COMPOSE_PATH_SEPARATOR": None}
+
+
+def test_unknown_detection_writes_nothing(tmp_path):
+    (tmp_path / ".env").write_text("A=1\n", encoding="utf-8")
+
+    assert server.prepare_processor(tmp_path, detect=lambda: None) == []
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == "A=1\n"
+    # The tests' own machine is never asked.
+    assert server.STACKS.has_nvidia_gpu() is None
+
+
+def test_an_explicit_choice_wins_and_compose_file_follows_it(tmp_path):
+    (tmp_path / ".env").write_text(
+        "WORKER_PROCESSOR=gpu\nCOMPOSE_FILE=docker-compose.yml:docker-compose.hub.yml:docker-compose.cpu.yml\n"
+        "COMPOSE_PATH_SEPARATOR=:\n", encoding="utf-8")
+
+    messages = server.prepare_processor(tmp_path, detect=lambda: pytest.fail("an explicit choice is not detected"))
+
+    assert env_text(tmp_path)["COMPOSE_FILE"] == "docker-compose.yml:docker-compose.hub.yml"
+    assert messages == ["set COMPOSE_FILE=docker-compose.yml:docker-compose.hub.yml in .env, for the worker on the GPU"]
+    env = server.EnvFile(tmp_path / ".env")
+    env.set("WORKER_PROCESSOR", "cpu")
+    env.save()
+    server.prepare_processor(tmp_path)
+    assert env_text(tmp_path)["COMPOSE_FILE"] == "docker-compose.yml:docker-compose.hub.yml:docker-compose.cpu.yml"
+
+
+def test_back_on_the_gpu_without_other_files_compose_file_goes(tmp_path):
+    (tmp_path / ".env").write_text(
+        "WORKER_PROCESSOR=gpu\nCOMPOSE_FILE=docker-compose.yml:docker-compose.cpu.yml\nCOMPOSE_PATH_SEPARATOR=:\n",
+        encoding="utf-8")
+
+    assert server.prepare_processor(tmp_path) == ["removed COMPOSE_FILE from .env: the worker gets the GPU again"]
+    assert env_text(tmp_path)["COMPOSE_FILE"] is None
+
+
+def test_an_unknown_processor_is_reported_and_left(tmp_path):
+    (tmp_path / ".env").write_text("WORKER_PROCESSOR=tpu\n", encoding="utf-8")
+
+    assert "neither gpu nor cpu" in server.prepare_processor(tmp_path)[0]
+    assert env_text(tmp_path)["COMPOSE_FILE"] is None
+
+
+def test_prepare_files_chooses_the_processor(tmp_path, monkeypatch):
+    for name in (".env.example",):
+        (tmp_path / name).write_text((Path(server.ROOT) / name).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(server.STACKS, "has_nvidia_gpu", lambda: False)
+
+    messages = server.prepare_files(tmp_path)
+
+    assert any("WORKER_PROCESSOR=cpu" in message for message in messages)
+    assert env_text(tmp_path)["COMPOSE_FILE"] == "docker-compose.yml:docker-compose.cpu.yml"
+
+
+def test_nvidia_smi_decides(tmp_path):
+    stacks = server.STACKS
+    answer = lambda code: (lambda command, **options: SimpleNamespace(returncode=code))
+    assert stacks.has_nvidia_gpu(answer(0), which=lambda name: "/usr/bin/nvidia-smi", environ={}) is True
+    assert stacks.has_nvidia_gpu(answer(9), which=lambda name: "/usr/bin/nvidia-smi", environ={}) is False
+    assert stacks.has_nvidia_gpu(answer(0), which=lambda name: None, environ={}) is False
+
+
+def test_env_values_are_written_whole(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("A=1\n", encoding="utf-8")
+    server.STACKS._set_env_value(path, "B", "2")
+    assert path.read_text(encoding="utf-8") == "A=1\nB=2\n"
+    assert [item.name for item in tmp_path.iterdir()] == [".env"]

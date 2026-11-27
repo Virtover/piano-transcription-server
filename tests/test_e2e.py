@@ -187,7 +187,8 @@ def test_jobs_on_this_servers_workers_are_never_outsourced(fake_server):
     _, sent, _ = fake_server
     e2e.run(args(case="clip", keep=True))
     job_id = sent[0][0]
-    assert tasks.redis.hget(tasks.job_key(job_id), "outsourced") == "1"
+    assert tasks.redis.hget(tasks.job_key(job_id), "local_only") == "1"
+    assert not tasks.may_outsource(tasks.redis.hgetall(tasks.job_key(job_id)))
     assert tasks.redis.hget(tasks.job_key(job_id), "user_id") is None
 
 

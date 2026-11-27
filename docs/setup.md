@@ -152,7 +152,7 @@ Verify GPU access before starting the stack:
 docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
 ```
 
-The worker automatically uses CUDA when PyTorch detects a usable NVIDIA GPU. Otherwise it falls back to CPU. CPU execution is significantly slower; on machines without GPU support, remove `gpus: all` from the worker service in `docker-compose.yml`.
+The worker automatically uses CUDA when PyTorch detects a usable NVIDIA GPU. Otherwise it falls back to CPU. CPU execution is significantly slower. On a machine without an NVIDIA GPU, Docker refuses to start a worker that asks for one: `python scripts/server.py start` then sets `WORKER_PROCESSOR=cpu` in `.env`, which adds `docker-compose.cpu.yml` to `COMPOSE_FILE`, so the worker starts without a GPU, also with plain `docker compose` commands. Choose by hand with `python scripts/setup.py set WORKER_PROCESSOR`; see [`WORKER_PROCESSOR`](configuration.md). For a [home cluster's hub](cluster.md#a-hub-without-a-gpu-such-as-a-vps) without a GPU, such as a VPS, the nodes run the jobs.
 
 By default, one worker process shares one model and batches requests. GPU capacity is estimated from total VRAM, and each job starts only while the VRAM other programs leave holds it, using `WORKER_GPU_RESERVE_GIB` (`auto`: `1.0` GiB reserved for the models and GPU libraries, `1.25` with [ensemble transcriptions](architecture.md#-ensemble-transcriptions)) and `WORKER_MEMORY_PER_JOB_GIB` (`1.1` GiB for each piano job). See [GPU memory and batching](configuration.md#-gpu-memory-and-batching) for measurements and tuning. To measure this machine's actual CPU/GPU performance, see [Benchmarking CPU versus GPU](testing.md#-benchmarking-cpu-versus-gpu).
 

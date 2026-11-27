@@ -1093,3 +1093,14 @@ def test_a_node_prepares_the_host_disk_probe_before_its_worker_starts(tmp_path, 
     assert server.main([action], stack, FakeClock()) == 0
     assert order == [("up", True)]
     assert (tmp_path / "DockerDisk" / "piano-disk-probe").is_dir()
+
+
+def test_setup_hub_keeps_a_cpu_workers_file(tmp_path):
+    """A hub without a GPU, such as a VPS: the hub's file joins the CPU file
+    in COMPOSE_FILE, and nodes hub says where piano and ensemble jobs go."""
+    write(tmp_path / ".env", "WORKER_PROCESSOR=cpu\n")
+    write(tmp_path / "server.env", "")
+    messages = nodes.setup_hub(tmp_path, server, ADDRESS, None, lan=True)
+    values = nodes.env_values(tmp_path / ".env")
+    assert values["COMPOSE_FILE"] == "docker-compose.yml:docker-compose.hub.yml:docker-compose.cpu.yml"
+    assert any("runs on the CPU" in message for message in messages)

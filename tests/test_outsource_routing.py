@@ -265,3 +265,138 @@ def test_api_unavailable_queue_frees_the_slot(api_context, outsourcing, monkeypa
 
     assert response.status_code == 503
     assert tasks.redis.scard(routing.ACTIVE_KEYS["remote"]) == 0
+
+
+# --- Queued local jobs that no live device takes ---------------------------------------------
+
+@pytest.fixture
+def stranded(monkeypatch):
+    monkeypatch.setattr(tasks, "_local_seen", {})
+    sent = []
+    monkeypatch.setattr(tasks, "send_job", lambda job_id, backend, *arguments, **options: sent.append((job_id, backend)))
+    return sent
+
+
+def queued_local(job_id="job", queued_at=1000.0, **fields):
+    tasks.redis.hset(tasks.job_key(job_id), mapping={
+        "status": "queued", "backend": "local", "queued_at": str(queued_at), "source_url": "https://example.com/v",
+        **fields})
+    tasks.redis.sadd(routing.ACTIVE_KEYS["local"], job_id)
+
+
+def sweep(now):
+    return tasks.outsource_stranded_jobs(now=now)
+
+
+def test_a_job_whose_only_device_vanished_goes_to_runpod(outsourcing, stranded):
+    # The node ran it and lost power: the lease lapsed and the hub queued it again locally.
+    queued_local()
+
+    # Seen first: a worker restarting with the server gets STRANDED_AFTER to come back.
+    assert sweep(1000) == 0
+    assert sweep(1000 + tasks.STRANDED_AFTER - 1) == 0
+    assert sweep(1000 + tasks.STRANDED_AFTER) == 1
+
+    job = tasks.redis.hgetall(tasks.job_key("job"))
+    assert job["backend"] == "remote" and job["outsourced"] == "1" and job["requeue_reason"] == tasks.STRANDED
+    assert stranded == [("job", "remote")]
+    assert not tasks.redis.sismember(routing.ACTIVE_KEYS["local"], "job")
+    assert tasks.redis.sismember(routing.ACTIVE_KEYS["remote"], "job")
+    # Moved once only.
+    assert sweep(1000 + 2 * tasks.STRANDED_AFTER) == 0
+
+
+def test_a_job_waiting_behind_others_for_a_live_worker_stays(outsourcing, stranded):
+    heartbeat(capacity=1)
+    queued_local()
+
+    assert sweep(1000) == 0
+    assert sweep(1000 + 10 * tasks.STRANDED_AFTER) == 0
+    assert stranded == []
+
+
+def test_a_fresh_job_waits_the_local_first_threshold(outsourcing, stranded):
+    sweep(0)
+    queued_local(queued_at=tasks.STRANDED_AFTER)
+
+    assert sweep(tasks.STRANDED_AFTER + 60) == 0     # below OUTSOURCE_LOCAL_FIRST_MAX_WAIT (120 s)
+    assert sweep(tasks.STRANDED_AFTER + 120) == 1
+
+
+def test_without_outsourcing_a_stranded_job_waits_for_a_device(api_context, stranded):
+    queued_local()
+
+    assert sweep(1000) == 0 and sweep(1000 + 10 * tasks.STRANDED_AFTER) == 0
+    assert tasks.redis.hget(tasks.job_key("job"), "backend") == "local"
+
+
+@pytest.mark.parametrize("fields", [{"local_only": "1"}, {"outsourced": "1"}, {"status": "processing"},
+                                    {"mode": "arrangement"}])
+def test_jobs_kept_local_or_not_stranded_are_left(outsourcing, stranded, fields):
+    # An ensemble job with a live ensemble worker is not stranded either.
+    routing.publish_heartbeat(tasks.redis, 1, 60.0, ensemble=True, transcription=False)
+    queued_local(**fields)
+
+    sweep(1000)
+    assert sweep(1000 + tasks.STRANDED_AFTER) == 0
+    assert stranded == []
+
+
+def test_only_the_kind_without_a_worker_moves(outsourcing, stranded):
+    # A worker that takes piano jobs but not ensemble ones, as a GPU too small for them.
+    heartbeat(capacity=2)
+    queued_local("piano")
+    queued_local("ensemble", mode="arrangement")
+
+    sweep(1000)
+    assert sweep(1000 + tasks.STRANDED_AFTER) == 1
+    assert stranded == [("ensemble", "remote")]
+
+
+def test_a_full_runpod_leaves_them_for_the_next_round(outsourcing, stranded):
+    outsourcing.outsource.max_concurrency = 1
+    tasks.redis.sadd(routing.ACTIVE_KEYS["remote"], "other")
+    queued_local()
+
+    sweep(1000)
+    assert sweep(1000 + tasks.STRANDED_AFTER) == 0
+    assert tasks.redis.hget(tasks.job_key("job"), "backend") == "local"
+    tasks.redis.srem(routing.ACTIVE_KEYS["remote"], "other")
+    assert sweep(1000 + tasks.STRANDED_AFTER + 30) == 1
+
+
+def test_a_failed_send_keeps_the_job_local(outsourcing, monkeypatch):
+    monkeypatch.setattr(tasks, "_local_seen", {})
+    monkeypatch.setattr(tasks, "send_job", lambda *arguments, **options: (_ for _ in ()).throw(ConnectionError()))
+    queued_local()
+
+    sweep(1000)
+    assert sweep(1000 + tasks.STRANDED_AFTER) == 0
+
+    job = tasks.redis.hgetall(tasks.job_key("job"))
+    assert job["backend"] == "local" and job["status"] == "queued"
+    assert tasks.redis.sismember(routing.ACTIVE_KEYS["local"], "job")
+    assert not tasks.redis.sismember(routing.ACTIVE_KEYS["remote"], "job")
+
+
+def test_the_leftover_local_message_of_a_moved_job_claims_nothing(outsourcing, stranded):
+    queued_local()
+    sweep(1000)
+    sweep(1000 + tasks.STRANDED_AFTER)
+
+    # The node comes back and its queue still delivers the old message.
+    assert not tasks.claim_job("job", "node-attempt", "local")
+    assert tasks.redis.hget(tasks.job_key("job"), "status") == "queued"
+    assert tasks.claim_job("job", "remote-attempt", "remote")
+
+
+def test_heavy_use_is_kept_local(api_context, outsourcing, sent, monkeypatch):
+    client, _, billing = api_context
+    monkeypatch.setattr(billing, "unlimited_heavy_use", lambda user: True)
+    heavy = submit(client)
+    monkeypatch.setattr(billing, "unlimited_heavy_use", lambda user: False)
+    normal = submit(client)
+
+    assert tasks.redis.hget(tasks.job_key(heavy), "local_only") == "1"
+    assert tasks.redis.hget(tasks.job_key(normal), "local_only") == ""
+    assert not tasks.may_outsource(tasks.redis.hgetall(tasks.job_key(heavy)))

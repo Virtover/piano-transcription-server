@@ -18,7 +18,7 @@ For a cluster of cloud machines instead, see [Kubernetes](kubernetes.md).
 * **Nodes reach only Redis, and the bucket.** Each node signs in to the hub's Redis as `node-<name>`, with its own password and rules: it may run jobs and write its own status, and cannot change limits, maintenance notices, other devices' switches, its own included, or Redis itself. It never reaches PostgreSQL: when it ends a job it only names it, and the hub settles the billing by the job's state, as after a crash. A node taken over by a malicious file can therefore not touch balances or purchases.
 * **Settings come from the hub.** The hub's API publishes the server's settings; a node starts with them, and starts again when they change, after its running jobs finish. What depends on the device (`WORKER_THREADS`, `WORKER_ENFORCE_CPU`, `WORKER_GPU_RESERVE_GIB`, `WORKER_CPU_RESERVE_GIB`, `WORKER_BATCH_SIZE`, `WORKER_MAX_CONCURRENCY`) is never taken; set it in the node's `node.env`, which also overrides any other setting for that device.
 * **Switches, per device and task.** Every device, the hub included, has a switch and a list of allowed tasks: `transcribe` (piano jobs), `arrange` (ensemble jobs), `dispatch` (sending jobs to RunPod), and `check` (reading a video's length for the hub while a site refuses the hub's address). The worker reads them every 10 seconds. A task switched off finishes its running jobs first.
-* **A device that goes away loses no job.** A worker renews a lease on each job it runs. When a device loses power or its network, the lease expires within a minute, and the hub queues the job again, keeping its reservation, preferably on another device, up to `JOB_MAX_ATTEMPTS` (3) times; then it fails and is refunded. Each attempt has a token: a device that comes back later finds the job taken, and writes, charges, and deletes nothing.
+* **A device that goes away loses no job.** A worker renews a lease on each job it runs. When a device loses power or its network, the lease expires within a minute, and the hub queues the job again, keeping its reservation, preferably on another device, up to `JOB_MAX_ATTEMPTS` (3) times; then it fails and is refunded. Each attempt has a token: a device that comes back later finds the job taken, and writes, charges, and deletes nothing. While no live device takes a kind of job, for 3 minutes, its queued jobs go to RunPod once they waited `OUTSOURCE_LOCAL_FIRST_MAX_WAIT`, as new ones do, if outsourcing is on; without it they wait for a device. Jobs kept on the server's own workers (heavy use of an unlimited plan, an administrator's `--local`) always wait.
 * **Jobs go where there is room.** Each worker reports how busy its GPU is, by any program, and how much VRAM is free. A device at `WORKER_BUSY_UTILIZATION` (90%) or more, or without the VRAM one more job needs, leaves a new job to a less busy device with a free place and room; a GPU device only to another GPU device. A place is held only until the job's model step ends, and a job that finds none free here waits, still queued, for the first device to have one. When all are busy, the job runs where it landed.
 * **Rate limits per address.** Video sites limit addresses, not devices. Each device learns its public address, and every video site's rate limit, pacing, and download places are kept per address. A job a site refuses moves to a device that reaches it from another address; the API asks such a device to check a link while the site refuses the hub. Only when every address is refused does the job fail, with "try again later" and no charge. Devices behind one router share one address, so this helps only with devices elsewhere: a laptop at work, a phone's hotspot, a VPN. `NODE_EGRESS` names a device's address by hand.
 
@@ -64,6 +64,26 @@ For a test without Tailscale, `python scripts/admin.py nodes hub --lan <this mac
 Results in the hub's bucket are sent by the API, as on one machine: apps need nothing new, and the bucket stays private. With `JOB_STORAGE=s3`, `RESULT_DOWNLOAD` decides, as without a cluster; see [Job storage](configuration.md#job-storage).
 
 RunPod reads audio from the `STORAGE_` bucket, which must be reachable from the internet: keep your cloud bucket for it. Job files stay in the hub's bucket.
+
+### A hub without a GPU, such as a VPS
+
+The hub needs no GPU: an always-on VPS can be the hub, with your GPU machines as nodes and RunPod for when none is up. On a machine where `nvidia-smi` finds no NVIDIA GPU, the first `python scripts/server.py start` (or any `python scripts/setup.py` command) sets `WORKER_PROCESSOR=cpu` in `.env` and adds `docker-compose.cpu.yml` to `COMPOSE_FILE`, beside the hub's file: Docker refuses to start a worker that asks for a GPU the machine lacks. `nodes hub` keeps that file when it writes `COMPOSE_FILE`. To choose by hand, `python scripts/setup.py set WORKER_PROCESSOR`; a choice in `.env` is never changed.
+
+* **The hub's CPU worker leaves piano and ensemble jobs to the nodes**, once a node is invited: it would run them many times slower than a GPU, and as local room it would keep them from RunPod. While no node is up, they go to RunPod with `OUTSOURCE_ROUTING=local_first`, the default, and outsourcing set up ([RunPod](runpod.md)); without it they wait for a node. `python scripts/admin.py nodes allow hub transcribe arrange` lets the hub's CPU run them too; `nodes` shows what the hub leaves to others. A machine without nodes runs its jobs on its CPU as before.
+* **The `STORAGE_` bucket must be reachable from the internet**, such as Cloudflare R2: RunPod reads each outsourced job's audio from it. The hub's own bucket (`JOB_STORAGE=local`) stays on the tailnet, for the nodes.
+* **Job scratch files stay on the device that runs the job**, in its own `data` volume: a node downloads and converts its jobs there, and the hub only for what its remote worker sends to RunPod. A VPS's disk holds the billing database, Redis, the bucket of job files and results, and the remote worker's scratch; size it for those, with `MIN_FREE_DISK_GIB` free.
+* **Tailscale on the VPS too:** nodes reach its Redis and bucket only over the tailnet, as on any hub. The tunnel (`docs/cloudflare-tunnel.md`) serves the API to apps, so the VPS needs no open port.
+
+Set it up as any hub: install Docker Engine, Tailscale, and this repository on the VPS, set up outsourcing and the tunnel, then:
+
+```shell
+python scripts/server.py start
+python scripts/admin.py nodes hub
+python scripts/server.py restart 1m
+python scripts/admin.py nodes invite desktop --tasks transcribe,arrange
+```
+
+Then join the GPU machine with its invite, as in [Adding a device](#-adding-a-device), and check with `python scripts/admin.py nodes` and `python scripts/admin.py e2e --backend auto`.
 
 ## ➕ Adding a device
 
