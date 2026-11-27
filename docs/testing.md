@@ -160,6 +160,7 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 | `test_ensemble_api.py`, `test_ensemble_tasks.py` | Ensemble transcriptions through the API and the job lifecycle: the `mode` request field and its old names, the ignored `style`, routing, the status and file name, the server info flags, which actor takes a job, restarts, retries on another backend, and the worker's heartbeat. |
 | `test_grouper_decode.py` | The grouper's clustering against dettato's own algorithm: the same merges, ties included, and the path for recordings of several hours. Needs torch. |
 | `test_source_sample_rate.py` | The source's sample rate read before the conversion, and handed to the ensemble drums. |
+| `test_memory.py` | RAM for local jobs: the container's real room (cgroup v1 and v2, file cache counted as free), job estimates, admission without counting memory in use twice, a job alone always starting, and the worker's memory limit the host scripts set. |
 | `test_disk.py` | Running out of disk space: jobs wait for room and fail clearly after half an hour, a job whose disk filled up is tried once more, submissions get `503 storage_full`, and the watcher warns. |
 | `test_apt_install.py` | `build/apt_install.sh`: a hung `apt-get install` is ended and tried again. Needs a POSIX shell; skipped on Windows. |
 | `test_e2e.py` | The end-to-end checks of `admin e2e`: reading MIDI, what passes and fails, and a run against fake workers. |

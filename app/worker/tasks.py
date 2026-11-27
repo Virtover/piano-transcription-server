@@ -920,6 +920,39 @@ def waits_for_disk(job_id: str, backend: routing.Backend) -> bool:
         return False
 
 
+RAM_WAIT_DELAY = 30.0
+
+
+def waits_for_ram(job_id: str, backend: routing.Backend) -> bool:
+    """Whether a queued local job must wait for RAM instead of starting here:
+    its need (app.memory) beside what this worker's running jobs reserved
+    would leave less than WORKER_MIN_FREE_RAM_GIB free. It is then sent again
+    after RAM_WAIT_DELAY, still queued, so this or another device takes it
+    once there is room. Otherwise its need stays reserved until run_job ends.
+    A job with nothing else running here always starts."""
+    if backend != "local":
+        return False
+    from app import memory
+
+    try:
+        job = redis.hgetall(job_key(job_id))
+        if job.get("status") != "queued":
+            return False
+        started, need, free = memory.ledger.reserve(job_id, job)
+        if started:
+            return False
+        waits = redis.hincrby(job_key(job_id), "ram_waits", 1)
+        log = logger.warning if waits % 10 == 1 else logger.info
+        log("Job %s waits for RAM: %.1f GiB free, it needs %.1f GiB beside the running jobs' and WORKER_MIN_FREE_RAM_GIB=%g",
+            job_id, (free or 0) / memory.GIB, need / memory.GIB, settings.worker.min_free_ram_gib)
+        send_job(job_id, backend, *job_arguments(job), delay=int(RAM_WAIT_DELAY * 1000))
+        return True
+    except Exception:
+        # The check must never lose a job: it runs here as before.
+        logger.exception("Could not check the RAM for job %s", job_id)
+        return False
+
+
 def run_job(
     job_id: str,
     backend: routing.Backend,
@@ -934,6 +967,8 @@ def run_job(
     if pass_job(job_id, backend):
         return
     if waits_for_disk(job_id, backend):
+        return
+    if waits_for_ram(job_id, backend):
         return
     output_dir = storage().workspace(job_id)
     requeued = False
@@ -1035,6 +1070,10 @@ def run_job(
         record_job(job_id)
         storage().discard_inputs(job_id, output_dir)
     finally:
+        if backend == "local":
+            from app import memory
+
+            memory.ledger.release(job_id)
         if place is not None:
             place.release()
         if claimed:

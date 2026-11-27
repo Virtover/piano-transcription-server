@@ -47,6 +47,7 @@ python scripts/kube.py restart 5m                               # server.py's an
 | `app/transcription/dettato/` | Vendored dettato (Apache-2.0) for ensemble jobs: four models, weights pinned by sha256 in `build/dettato-weights.txt` and fetched at image build; changed only in `hub.py` and `precision.py` (its `__init__.py` says how) |
 | `app/transcription/ensemble_transcription.py`, `ensemble/` | Ensemble jobs: its three GPU phases in the device budget (`pitched.py`: the transcriber pass in a sliding buffer, per-segment repair; `drums.py`: whole-recording drums in pieces; `frames.py`: song-frame times; `midi.py`: the multi-track MIDI), and `cpu.py`, dettato.cpp in a process of its own |
 | `app/transcription/stream_audio.py` | Long recordings from disk: the converted WAV read a window at a time, resampled copies as files read through np.memmap (soxr's streaming output equals its one-shot output) |
+| `app/memory.py` | `WORKER_MIN_FREE_RAM_GIB`: a local job starts only when its estimated RAM leaves that free in the container's real room (cgroup limit, `WORKER_MEMORY_LIMIT`); only the unused part of running jobs' reservations is held back |
 | `app/disk.py` | `MIN_FREE_DISK_GIB`: jobs wait for disk room, a job whose disk filled up is tried once more, the API refuses submissions while the disk is full, and warns while it is low |
 | `dettato_cpu/` | `server.cpp`, the dettato.cpp tool CPU workers run, built in `Dockerfile.worker`'s `dettato-cpp` stage |
 | `app/transcription/budget.py` | The per-device memory budget that piano and ensemble steps share |

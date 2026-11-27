@@ -37,6 +37,9 @@ services:
       DATA_DIR: /data
       # The hub's bucket, where JOB_STORAGE=local keeps job files.
       CLUSTER_STORAGE_ENDPOINT: http://${HUB_ADDRESS}:8333
+    # The worker's memory limit (WORKER_MEMORY_LIMIT, set by scripts/server.py):
+    # running out ends only the worker, never the database; 0 is none.
+    mem_limit: ${WORKER_MEMORY_LIMIT:-0}
     volumes:
       # The host drive's free space under Docker Desktop, for app/disk.py:
       # an empty folder on that drive (HOST_DISK_PROBE, set by scripts/server.py).

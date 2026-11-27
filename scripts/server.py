@@ -114,7 +114,7 @@ def remaining_text(seconds: float) -> str:
 COMPOSE_ONLY_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA_GROUP", "WORKER_GPU_BUILD",
                           "COMPOSE_PROFILES", "ADMIN_WEB_MODE",
                           "HUB_ADDRESS", "HUB_BIND_ADDRESS", "HUB_REGISTRY", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR",
-                          "HOST_DISK_PROBE"}
+                          "HOST_DISK_PROBE", "WORKER_MEMORY_LIMIT"}
 COMPOSE_ENV, SERVER_ENV = ".env", "server.env"
 ADDED_HEADER = "# --- Added by scripts/setup.py or scripts/server.py"
 # A line that python-dotenv and Docker Compose read as a setting: also with
@@ -368,6 +368,8 @@ def prepare_files(root: Path) -> list[str]:
         created.append(f"created the empty folder {TUNNEL_TOKEN_FOLDER}, for a Cloudflare Tunnel's token")
     # The host drive's free space under Docker Desktop (app/disk.py).
     created += STACKS.prepare_disk_probe(root, COMPOSE_ENV)
+    # PostgreSQL, Redis, the API, and the rest beside the worker.
+    created += STACKS.prepare_memory_limit(root, COMPOSE_ENV, 1.5, 0.15)
     return created
 
 

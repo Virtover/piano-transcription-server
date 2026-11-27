@@ -34,7 +34,7 @@ def docker_desktop_disk_folder(platform: str | None = None, environ=None, home: 
 
     platform = platform or sys.platform
     environ = os.environ if environ is None else environ
-    if environ.get("PIANO_NO_HOST_DISK_PROBE"):
+    if environ.get("PIANO_NO_HOST_PROBES"):
         # The tests: never this machine's Docker Desktop.
         return None
     home = home or Path.home()
@@ -60,6 +60,50 @@ def docker_desktop_disk_folder(platform: str | None = None, environ=None, home: 
         default = home / "Library" / "Containers" / "com.docker.docker" / "Data"
         return Path(folder) if folder else (default if default.is_dir() else None)
     return None
+
+
+def _set_env_value(path: Path, name: str, value: str) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    lines = [line for line in lines if not line.startswith(f"{name}=")] + [f"{name}={value}"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _env_value(path: Path, name: str) -> str | None:
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    return next((line.split("=", 1)[1].strip() for line in lines if line.startswith(f"{name}=")), None)
+
+
+def docker_memory_bytes(run=subprocess.run, environ=None) -> int | None:
+    """The memory Docker's containers share: the host's, or under Docker
+    Desktop its virtual machine's. None when Docker cannot tell."""
+    import os
+
+    if (os.environ if environ is None else environ).get("PIANO_NO_HOST_PROBES"):
+        return None
+    try:
+        result = run(["docker", "info", "--format", "{{.MemTotal}}"], capture_output=True, text=True, timeout=30)
+        return int(result.stdout.strip()) if result.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def prepare_memory_limit(root: Path, env_file: str, others_gib: float, others_share: float, total=None) -> list[str]:
+    """Give the worker a memory limit (WORKER_MEMORY_LIMIT in env_file) unless
+    one is set: what Docker has, less what the other services on this machine
+    need (others_gib, or others_share of it, whichever is more). Under it the
+    worker's own out-of-memory ends only the worker, never PostgreSQL or Redis,
+    and app/memory.py reads it as the room jobs have. 0 means no limit."""
+    path = root / env_file
+    if _env_value(path, "WORKER_MEMORY_LIMIT") is not None:
+        return []
+    total = docker_memory_bytes() if total is None else total
+    if not total:
+        return []
+    gib = max(1.0, total / 1024**3 - max(others_gib, others_share * total / 1024**3))
+    value = f"{int(gib * 1024)}m"
+    _set_env_value(path, "WORKER_MEMORY_LIMIT", value)
+    return [f"set WORKER_MEMORY_LIMIT={value} in {env_file}: the worker's memory limit, of the {total / 1024**3:.1f} GiB "
+            "Docker has, so that running out of memory ends only the worker"]
 
 
 def prepare_disk_probe(root: Path, env_file: str, **where) -> list[str]:
@@ -386,7 +430,8 @@ class NodeStack(ComposeStack):
         self.gpu = gpu
 
     def prepare_files(self) -> list[str]:
-        return prepare_disk_probe(self.root, self.ENV_FILE)
+        # A node runs only the worker.
+        return prepare_disk_probe(self.root, self.ENV_FILE) + prepare_memory_limit(self.root, self.ENV_FILE, 1.0, 0.10)
 
     def compose(self, profiles: list[str] | None = None) -> list[str]:
         files = ["-f", "docker-compose.node.yml"] + (["-f", "docker-compose.node-gpu.yml"] if self.gpu else [])

@@ -45,7 +45,9 @@ COMPOSE_VARIABLES = {"API_BIND_ADDRESS", "POSTGRES_DATA_LOCATION", "BILLING_DATA
                      # A home cluster's hub (docker-compose.hub.yml, docs/cluster.md).
                      "HUB_ADDRESS", "HUB_BIND_ADDRESS", "HUB_REGISTRY", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR",
                      # The host drive's free space under Docker Desktop (app/disk.py).
-                     "HOST_DISK_PROBE"}
+                     "HOST_DISK_PROBE",
+                     # The worker's memory limit under Compose (app/memory.py).
+                     "WORKER_MEMORY_LIMIT"}
 # The two files: .env holds what Docker Compose reads, server.env the
 # server's settings, the same on every deployment. COMPOSE_PROFILES and
 # ADMIN_WEB_MODE are both: Compose starts services by the one and picks the
@@ -323,6 +325,9 @@ class WorkerSettings(BaseSettings):
     max_concurrency: AutoInt = None
     # Give the MIDI the beats and bars of the recording (app/transcription/tempo.py).
     tempo_map: bool = True
+    # RAM always left free on the worker's machine or container (app/memory.py):
+    # a local job that would leave less waits until running jobs end.
+    min_free_ram_gib: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     # In a home cluster: a device whose GPU (or CPU) is at least this busy,
     # by any program, leaves a new job to a device that is less busy and has
     # a free place and room in VRAM.

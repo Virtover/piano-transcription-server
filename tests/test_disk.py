@@ -138,7 +138,7 @@ def test_docker_desktops_disk_folder_comes_from_its_settings(tmp_path):
     (appdata / "Docker" / "settings-store.json").write_text(json.dumps({"CustomWslDistroDir": "D:\DockerDisk\WSL"}))
     assert stacks.docker_desktop_disk_folder("win32", environ) == Path("D:\DockerDisk\WSL")
     assert stacks.docker_desktop_disk_folder("linux", environ) is None
-    assert stacks.docker_desktop_disk_folder("win32", {**environ, "PIANO_NO_HOST_DISK_PROBE": "1"}) is None
+    assert stacks.docker_desktop_disk_folder("win32", {**environ, "PIANO_NO_HOST_PROBES": "1"}) is None
 
 
 def test_docker_desktop_on_macos(tmp_path):
