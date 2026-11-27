@@ -202,33 +202,77 @@ def make_long(drums):
     return drums
 
 
+HEADS = ("kit", "kit_vel", "drum", "timpani", "vel")
+
+
 @torch.no_grad()
-def probabilities(drums, feats) -> dict:
-    """DrumTranscriber.probabilities of feats (T, 280; an array or a file): in one call up to LONG_S, as the package;
-    beyond it in blocks of LONG_S with LONG_MARGIN_S of context each side, the router from the adapter states pooled
-    over every block (each block's mean over its input, weighted by its input's length)."""
+def _probabilities(drums, feats) -> dict:
+    """DrumTranscriber.probabilities, with less host memory and the same numbers: the features go to the device as
+    they are stored (float16 to float32 is exact either way) instead of as a float32 copy on the host, and the three
+    orchestral experts' outputs are averaged as they come, in the order np.mean adds them, instead of side by side."""
+    T = feats.shape[0] // 2 * 2
+    dev = drums.device
+    x = torch.from_numpy(np.ascontiguousarray(feats[:T])).to(dev)[None].float()
+    with drums._autocast():
+        zk, vk = drums.kit(x[..., :160])
+    out = {"kit": torch.sigmoid(zk[0].float()).cpu().numpy(), "kit_vel": torch.sigmoid(vk[0].float()).cpu().numpy()}
+    del zk, vk
+    sums, routers, n = None, [], None
+    for ex in drums.experts:
+        with drums._autocast():
+            o = ex(x)
+        base = o["base"][0].float()
+        parts = (torch.sigmoid(base + (o["drum"][0].float() - base)), torch.sigmoid(o["timpani"][0].float()),
+                 torch.sigmoid(o["velocity"][0].float()))
+        routers.append(float(torch.sigmoid(o["router"][0].float())))
+        del o, base
+        n = min(n, parts[0].shape[0]) if n is not None else parts[0].shape[0]
+        sums = list(parts) if sums is None else [a[:n] + b[:n] for a, b in zip(sums, parts)]
+    del x
+    for name, total in zip(("drum", "timpani", "vel"), sums):
+        # Divided on the host: CUDA divides by a number as a product with its inverse, a rounding apart.
+        out[name] = total[:n].cpu().numpy() / np.float32(len(drums.experts))
+    out["router"] = float(np.mean(routers))
+    return out
+
+
+def _store(work: Path | None, name: str, shape, dtype=np.float32):
+    if work is None:
+        return np.zeros(shape, dtype)
+    return np.lib.format.open_memmap(work / f"{name}.npy", mode="w+", dtype=dtype, shape=shape)
+
+
+@torch.no_grad()
+def probabilities(drums, feats, work: Path | None = None) -> dict:
+    """The drum probabilities of feats (T, 280; an array or a file): in one call up to LONG_S, as the package; beyond it
+    in blocks of LONG_S with LONG_MARGIN_S of context each side, written into arrays (files in work, if given), the
+    router from the adapter states pooled over every block (each block's mean over its input, weighted by its input's
+    length)."""
     T = feats.shape[0] // 2 * 2
     block, margin = int(LONG_S * FPS_IN), int(LONG_MARGIN_S * FPS_IN)
     if T <= block + 2 * margin:
-        return drums.probabilities(np.asarray(feats[:T], np.float32))
+        return _probabilities(drums, feats)
     pooled: list[list] = [[] for _ in drums.experts]
     hooks = [ex.gate.register_forward_hook(lambda m, inp, out, i=i: pooled[i].append(inp[0].detach().float().cpu()))
              for i, ex in enumerate(drums.experts)]
-    parts: dict = {k: [] for k in ("kit", "kit_vel", "drum", "timpani", "vel")}
+    out: dict = {}
     weights = []
     try:
         for c0 in range(0, T, block):
             c1 = min(T, c0 + block)
             a, b = max(0, c0 - margin), min(T, c1 + margin)
-            P = drums.probabilities(np.asarray(feats[a:b], np.float32))
+            P = _probabilities(drums, feats[a:b])
             lo, n = (c0 - a) // 2, (c1 - c0) // 2
-            for k in parts:
-                parts[k].append(P[k][lo:lo + n])
+            for k in HEADS:
+                if k not in out:
+                    out[k] = _store(work, k, (T // 2, P[k].shape[1]))
+                piece = P[k][lo:lo + n]
+                out[k][c0 // 2:c0 // 2 + len(piece)] = piece
             weights.append(b - a)
+            del P
     finally:
         for hook in hooks:
             hook.remove()
-    out = {k: np.concatenate(v) for k, v in parts.items()}
     wts = torch.tensor(weights, dtype=torch.float32)[:, None]
     routers = []
     for i, ex in enumerate(drums.experts):
@@ -237,6 +281,54 @@ def probabilities(drums, feats) -> dict:
         routers.append(float(torch.sigmoid(ex.gate(mean.to(param.device, param.dtype)).float())[0, 0]))
     out["router"] = float(np.mean(routers))
     return out
+
+
+def _peaks(prob, th: float, gap: int = 3, block: int = int(LONG_S * 50)) -> tuple[np.ndarray, np.ndarray]:
+    """dettato.drums.infer.peaks over prob (an array or a file) in blocks of rows: the same hits, as each frame is
+    compared with its neighbours (one row of overlap) and each lane's last hit carries over."""
+    T, L = prob.shape
+    last = np.full(L, -10, np.int64)
+    fr, ln = [], []
+    for a in range(0, T, block):
+        b = min(T, a + block)
+        lo, hi = max(0, a - 1), min(T, b + 1)
+        seg = np.asarray(prob[lo:hi], np.float32)
+        left = np.vstack([seg[:1], seg[:-1]])
+        right = np.vstack([seg[1:], seg[-1:]])
+        cand = ((seg >= th) & (seg >= left) & (seg >= right))[a - lo:a - lo + (b - a)]
+        for t in np.nonzero(cand.any(1))[0]:
+            g = int(t) + a
+            m = cand[t] & (g - last > gap - 1)
+            for lane in np.nonzero(m)[0]:
+                fr.append(g)
+                ln.append(int(lane))
+            last = np.where(m, g, last)
+    return np.array(fr, int), np.array(ln, int)
+
+
+def decode(drums, P: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
+    """DrumTranscriber.decode with the hit picking in blocks (_peaks), for probabilities that may be files."""
+    from app.transcription.dettato.drums.infer import FPS
+    from app.transcription.dettato.drums.model import KEYS, TIMPANI_KEYS
+
+    if P["router"] < drums.th_router:
+        fr, ln = _peaks(P["kit"], drums.th_kit)
+        return fr / FPS, np.array([KEYS[lane] for lane in ln], np.int64), np.asarray(P["kit_vel"][fr, ln]), "drum-kit"
+    fd, ld = _peaks(P["drum"], drums.th_drum)
+    on, ks, vs = list(fd / FPS), [KEYS[lane] for lane in ld], list(np.asarray(P["vel"][fd, ld]))
+    seen: dict[int, list] = {}
+    for o, k in zip(on, ks):
+        seen.setdefault(k, []).append(o)
+    ft, lt = _peaks(P["timpani"], drums.th_timpani)
+    for f, lane in zip(ft, lt):
+        o, k = f / FPS, TIMPANI_KEYS[int(lane)]
+        if any(abs(o - q) <= 0.04 for q in seen.get(k, [])):
+            continue
+        on.append(o)
+        ks.append(k)
+        vs.append(float(np.clip(P["timpani"][f, lane], 0.3, 1.0)))
+    order = np.argsort(on, kind="stable")
+    return np.array(on)[order], np.array(ks, np.int64)[order], np.array(vs)[order], "orchestral"
 
 
 @torch.no_grad()
@@ -251,10 +343,13 @@ def transcribe(drums, x44, source_rate: int | None, work_dir: Path | None = None
     if len(reader) < SR // 10:
         return [], {"router": None, "model": None}
     with stream_audio.scratch(work_dir, "drums-") as directory:
-        P = probabilities(drums, features(reader, Path(directory) if work_dir is not None else None))
-    on, keys, vel, which = drums.decode(P)
+        work = Path(directory) if work_dir is not None else None
+        P = probabilities(drums, features(reader, work), work)
+        on, keys, vel, which = decode(drums, P)
+        router = P["router"]
+        del P                                   # its files close before the folder goes
     # rounded as the package rounds them (DrumTranscriber.transcribe, then Dettato.transcribe)
     hits = [{"onset": round(float(a), 4), "offset": round(float(a) + 0.1, 4), "pitch": int(k),
              "velocity": max(1, min(127, int(round(round(float(np.clip(v, 0.05, 1.0)), 3) * 127))))}
             for a, k, v in zip(on, keys, vel)]
-    return hits, {"router": P["router"], "model": which}
+    return hits, {"router": router, "model": which}

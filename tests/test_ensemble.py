@@ -226,7 +226,7 @@ def networks(monkeypatch, budget):
         "hits": [{"onset": 0.5, "offset": 0.6, "pitch": 36, "velocity": 100}],
     }
 
-    def transcribe(models, x, progress, cancelled, stats):
+    def transcribe(models, x, progress, cancelled, stats, work_dir=None):
         seen["x16"] = x
         progress(0.5)
         progress(1.0)
@@ -235,7 +235,7 @@ def networks(monkeypatch, budget):
     def group(models, state, prediction):
         return answers["groups"], {"tuning_cents": 1.0}
 
-    def drum_hits(drums, x44, source_rate):
+    def drum_hits(drums, x44, source_rate, work_dir=None):
         seen["x44"], seen["source_rate"] = x44, source_rate
         return answers["hits"], {"model": "drum-kit"}
 
@@ -294,8 +294,9 @@ def test_other_rates_and_channels_are_converted_to_mono_44100(networks):
 
     assert networks["source_rate"] is None
     assert abs(len(networks["x44"]) - 44100) <= 2 and abs(len(networks["x16"]) - 16000) <= 2
-    assert networks["x44"].dtype == np.float32 and networks["x16"].dtype == np.float32
-    assert np.allclose(networks["x44"][2000:-2000], 0.125, atol=0.01)
+    x44 = networks["x44"].read(0, len(networks["x44"]))        # the drums read the 44.1 kHz audio a block at a time
+    assert x44.dtype == np.float32 and np.asarray(networks["x16"]).dtype == np.float32
+    assert np.allclose(x44[2000:-2000], 0.125, atol=0.01)
 
 
 def test_a_job_cancelled_after_the_notes_stops_before_the_drums(networks, monkeypatch):
@@ -354,6 +355,7 @@ def test_a_file_becomes_midi_with_its_progress(monkeypatch, tmp_path):
     monkeypatch.setattr(ensemble_transcription, "transcribe_ensemble", transcribe)
     monkeypatch.setattr(ensemble_transcription, "write_result", write)
     output = tmp_path / "transcription.mid"
+    (tmp_path / "audio.wav").write_bytes(b"not a PCM WAV")          # not streamed: read whole by read_audio
 
     ensemble_transcription.transcribe_ensemble_file(
         tmp_path / "audio.wav", output, source_rate=48000, progress_callback=progress.append,

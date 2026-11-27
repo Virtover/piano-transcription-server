@@ -218,7 +218,9 @@ def test_the_blocked_features_are_the_features_of_the_package(monkeypatch):
     monkeypatch.setattr(drums, "FEATURE_BLOCK_S", 5.0)       # four blocks in 20 s
     x44 = synthetic(20.0, 44100)
 
-    blocked = drums.features(x44).astype(np.float32)
+    from app.transcription import stream_audio
+
+    blocked = drums.features(stream_audio.ArrayReader(x44, 44100)).astype(np.float32)
     whole = package_features(x44).astype(np.float32)
 
     assert blocked.shape == whole.shape
@@ -258,3 +260,76 @@ def test_a_long_cq_branch_is_the_branch_it_replaces():
 
     assert found.shape == expected.shape
     assert torch.allclose(found, expected, atol=1e-3)
+
+
+# --- The drums with less host memory: the package's numbers and hits ------------------------------------------
+
+
+def test_blocked_hit_picking_is_the_packages():
+    from app.transcription.dettato.drums.infer import peaks
+
+    rng = np.random.default_rng(1)
+    for _ in range(20):
+        prob = rng.random((rng.integers(1, 400), 5)).astype(np.float32) ** 3
+        expected = peaks(prob, 0.3)
+        for block in (1, 2, 7, 64, 1000):
+            found = drums._peaks(prob, 0.3, block=block)
+            assert np.array_equal(found[0], expected[0]) and np.array_equal(found[1], expected[1]), block
+
+
+@needs_weights
+@pytest.mark.parametrize("device", DEVICES)
+def test_the_drum_probabilities_and_hits_are_the_packages(device):
+    from app.transcription.dettato.drums import DrumTranscriber
+    from app.transcription.dettato.drums.features import features
+
+    model = DrumTranscriber.from_pretrained(device)
+    feats = features(synthetic(20.0, 44100))        # float16, as the server stores them
+    expected = model.probabilities(feats.astype(np.float32))
+    found = drums.probabilities(model, feats)
+
+    assert found["router"] == expected["router"]
+    for name in drums.HEADS:
+        assert np.array_equal(found[name], expected[name]), name
+    for router in (0.0, 1.0):                       # both models' decoding
+        P = dict(expected, router=router)
+        for a, b in zip(drums.decode(model, P), model.decode(P)):
+            assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
+@needs_weights
+def test_long_drum_probabilities_go_to_files_in_blocks(tmp_path, monkeypatch):
+    from app.transcription.dettato.drums import DrumTranscriber
+    from app.transcription.dettato.drums.features import features
+
+    monkeypatch.setattr(drums, "LONG_S", 6.0)
+    monkeypatch.setattr(drums, "LONG_MARGIN_S", 2.0)
+    model = DrumTranscriber.from_pretrained("cpu")
+    feats = features(synthetic(20.0, 44100))
+    whole = model.probabilities(feats.astype(np.float32))
+
+    found = drums.probabilities(model, feats, tmp_path)
+
+    assert 0.0 <= found["router"] <= 1.0
+    for name in drums.HEADS:
+        assert isinstance(found[name], np.memmap) and (tmp_path / f"{name}.npy").is_file(), name
+        assert found[name].shape == whole[name].shape, name
+    in_memory = {k: (np.asarray(v) if k in drums.HEADS else v) for k, v in found.items()}
+    for a, b in zip(drums.decode(model, found), model.decode(in_memory)):
+        assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
+@needs_weights
+def test_the_drum_stage_gives_the_packages_hits(tmp_path):
+    from app.transcription import stream_audio
+    from app.transcription.dettato.drums import DrumTranscriber
+
+    model = DrumTranscriber.from_pretrained("cpu")
+    x44 = synthetic(20.0, 44100)
+    expected = model.transcribe(x44)
+
+    hits, info = drums.transcribe(model, stream_audio.ArrayReader(x44, 44100), 48000, tmp_path)
+
+    assert info == {"router": model.last_info["router"], "model": model.last_info["model"]}
+    assert [(h["onset"], h["pitch"]) for h in hits] == [(h["onset"], h["pitch"]) for h in expected]
+    assert list(tmp_path.iterdir()) == []               # the scratch folder is gone
