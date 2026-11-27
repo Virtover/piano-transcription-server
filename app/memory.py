@@ -27,13 +27,13 @@ logger = logging.getLogger(__name__)
 GIB = 1024**3
 MIB = 1024**2
 # Measured on an RTX 3060 Ti worker (RssAnon of the process). Piano (Transkun) keeps the whole recording: 0.14 GiB for
-# 4 minutes, 1.7 GiB for an hour. Ensemble keeps per-note data and, for the drums, up to an hour at once: 0.38 GiB for
-# 4 minutes, 1.1 GiB for an hour; beyond an hour little more. The first job of each kind loads its libraries' kernels
+# 4 minutes, 1.7 GiB for an hour. Ensemble keeps per-note data and the drum stage's results: 0.38 GiB for 4 minutes,
+# 0.52 GiB for an hour, 0.34 GiB for 90 minutes (past an hour the drums' results are files); counted with a margin. The first job of each kind loads its libraries' kernels
 # and buffers into the process, which keeps them: about 0.85 GiB for piano, 1.6 GiB for ensemble.
 PIANO_BASE = 150 * MIB
 PIANO_PER_SECOND = 0.5 * MIB
 ENSEMBLE_BASE = 350 * MIB
-ENSEMBLE_PER_SECOND = 0.22 * MIB
+ENSEMBLE_PER_SECOND = 0.12 * MIB
 ENSEMBLE_PER_SECOND_PAST_HOUR = 0.03 * MIB
 FIRST_USE = {"piano": 900 * MIB, "ensemble": 1700 * MIB}
 

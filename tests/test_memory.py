@@ -50,7 +50,7 @@ def test_estimates_follow_mode_and_length():
     piano = memory.job_ram_bytes({"duration": "3600"})
     ensemble = memory.job_ram_bytes({"duration": "3600", "mode": "arrangement"})
     assert 1.5 * GIB < piano < 2.2 * GIB
-    assert 0.9 * GIB < ensemble < 1.4 * GIB
+    assert 0.55 * GIB < ensemble < 1.0 * GIB
     ten_hours = memory.job_ram_bytes({"duration": str(10 * 3600), "mode": "arrangement"})
     assert ten_hours < 2.5 * GIB                      # past an hour it grows little
     assert memory.job_ram_bytes({"duration": "bad"}) == memory.PIANO_BASE
