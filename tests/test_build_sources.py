@@ -167,7 +167,11 @@ def test_every_download_of_a_build_has_fallbacks(dockerfile):
     text = dockerfile.read_text(encoding="utf-8")
     runs = [line.strip() for line in text.splitlines() if not line.lstrip().startswith("#")]
 
-    assert "COPY build /build" in text
+    # the shared tools only; one step's own files are copied just before it, so a change to them rebuilds no earlier layer
+    assert "COPY build/apt-mirrors.sh build/apt_install.sh build/fetch.py build/pip_install.py /build/" in text
+    assert "COPY build /build" not in text
+    if "fetch_dettato.sh /opt/dettato" in text:
+        assert text.index("COPY build/dettato-weights.txt") > text.index("pip_install.py --no-cache-dir -r requirements.")
     # apt: the mirror lists, before its first update.
     assert text.index("sh /build/apt-mirrors.sh") < text.index("apt-get update") < text.index("COPY requirements")
     # pip: only through pip_install.py.

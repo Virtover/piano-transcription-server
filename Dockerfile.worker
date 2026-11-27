@@ -11,7 +11,8 @@ ARG GPU_BUILD=current
 # (a tarball GitHub changed would fail here, not build something else), and
 # its weights a GGUF file at a fixed revision.
 FROM ubuntu:24.04 AS dettato-cpp
-COPY build /build
+COPY build/apt /build/apt
+COPY build/apt-mirrors.sh build/apt_install.sh build/fetch.py build/pip_install.py /build/
 RUN sh /build/apt-mirrors.sh \
     && apt-get update \
     && sh /build/apt_install.sh cmake g++ make python3 ca-certificates \
@@ -20,20 +21,16 @@ ARG DETTATO_CPP_COMMIT=19d5dc209e66809ca6059f952864db3e775cef2d
 ARG DETTATO_CPP_SHA256=da52338946ce58a1912314e7948abd919d48f66626c524e706b2e7e7dba08634
 ARG GGML_COMMIT=417a024b4fb6bc3116d41af7c067166a039bdf12
 ARG GGML_SHA256=eb2fb2d60331e78de996f4fd3f9cee955cfcab2546b7ad64100444730f39ede7
-ARG DETTATO_GGUF_REVISION=73f622a5173c8c9112d7cf2081a0402d73746fc7
-# Copies of the GGUF to fall back on (space-separated URLs; fetch.py keeps only the file with the checksum).
-ARG DETTATO_GGUF_MIRRORS="https://huggingface.co/Christopher2137/dettato-mirror/resolve/9dc934534f617f70609cb59fbea78e16936db05e/dettato-gguf/dettato-f16.gguf"
-ARG DETTATO_GGUF_SHA256=73f08bfcad22c401c1e584229f2b49cb8097a9b539cc81fd29dca573d7585480
 RUN mkdir -p /src/dettato.cpp /src/ggml /opt/dettato-cpp/bin \
     && python3 /build/fetch.py --sha256 "$DETTATO_CPP_SHA256" --out /tmp/dettato-cpp.tar.gz \
-        "https://github.com/hidude562/dettato.cpp/archive/${DETTATO_CPP_COMMIT}.tar.gz"         "https://web.archive.org/web/2id_/https://codeload.github.com/hidude562/dettato.cpp/tar.gz/${DETTATO_CPP_COMMIT}" \
+        "https://github.com/hidude562/dettato.cpp/archive/${DETTATO_CPP_COMMIT}.tar.gz" \
+        "https://web.archive.org/web/2id_/https://codeload.github.com/hidude562/dettato.cpp/tar.gz/${DETTATO_CPP_COMMIT}" \
     && python3 /build/fetch.py --sha256 "$GGML_SHA256" --out /tmp/ggml.tar.gz \
-        "https://github.com/ggml-org/ggml/archive/${GGML_COMMIT}.tar.gz"         "https://web.archive.org/web/2id_/https://codeload.github.com/ggml-org/ggml/tar.gz/${GGML_COMMIT}" \
+        "https://github.com/ggml-org/ggml/archive/${GGML_COMMIT}.tar.gz" \
+        "https://web.archive.org/web/2id_/https://codeload.github.com/ggml-org/ggml/tar.gz/${GGML_COMMIT}" \
     && tar -xzf /tmp/dettato-cpp.tar.gz -C /src/dettato.cpp --strip-components=1 \
     && tar -xzf /tmp/ggml.tar.gz -C /src/ggml --strip-components=1 \
-    && rm /tmp/*.tar.gz \
-    && python3 /build/fetch.py --sha256 "$DETTATO_GGUF_SHA256" --out /opt/dettato-cpp/dettato-f16.gguf \
-        "https://huggingface.co/kobimusic/dettato-gguf/resolve/${DETTATO_GGUF_REVISION}/dettato-f16.gguf"         $DETTATO_GGUF_MIRRORS
+    && rm /tmp/*.tar.gz
 COPY dettato_cpu /src/dettato_cpu
 RUN set -e; for variant in avx2 generic; do \
         if [ "$variant" = avx2 ]; then isa=ON; else isa=OFF; fi; \
@@ -47,6 +44,14 @@ RUN set -e; for variant in avx2 generic; do \
         rm -rf /tmp/build-$variant; \
     done \
     && /opt/dettato-cpp/bin/dettato_server-generic 2>&1 | grep -q usage
+# The CPU model in a step of its own after the compile: a change to its sources recompiles nothing.
+ARG DETTATO_GGUF_REVISION=73f622a5173c8c9112d7cf2081a0402d73746fc7
+# Copies of the GGUF to fall back on (space-separated URLs; fetch.py keeps only the file with the checksum).
+ARG DETTATO_GGUF_MIRRORS="https://huggingface.co/Christopher2137/dettato-mirror/resolve/9dc934534f617f70609cb59fbea78e16936db05e/dettato-gguf/dettato-f16.gguf"
+ARG DETTATO_GGUF_SHA256=73f08bfcad22c401c1e584229f2b49cb8097a9b539cc81fd29dca573d7585480
+RUN python3 /build/fetch.py --sha256 "$DETTATO_GGUF_SHA256" --out /opt/dettato-cpp/dettato-f16.gguf \
+        "https://huggingface.co/kobimusic/dettato-gguf/resolve/${DETTATO_GGUF_REVISION}/dettato-f16.gguf" \
+        $DETTATO_GGUF_MIRRORS
 
 # Ubuntu 24.04 for its Python 3.12: yt-dlp, which runs on untrusted media,
 # drops each Python version once it no longer gets security fixes (3.10's
@@ -64,7 +69,8 @@ WORKDIR /app
 
 # The build's own tools: apt's mirror lists, and fetch.py and pip_install.py,
 # which take each download from the next source when one fails.
-COPY build /build
+COPY build/apt /build/apt
+COPY build/apt-mirrors.sh build/apt_install.sh build/fetch.py build/pip_install.py /build/
 
 RUN sh /build/apt-mirrors.sh \
     && apt-get update \
@@ -132,6 +138,8 @@ RUN mkdir -p /opt/beat-this \
 # dettato's weights for ensemble jobs (app/transcription/arrangement.py), each
 # file checked against its checksum (build/dettato-weights.txt); safetensors
 # hold tensors only, never code. dettato.cpp and its weights for the CPU.
+# Only dettato's own build files here, so a change to them (a new copy) rebuilds no earlier layer.
+COPY build/dettato-weights.txt build/fetch_dettato.sh /build/
 RUN sh /build/fetch_dettato.sh /opt/dettato
 COPY --from=dettato-cpp /opt/dettato-cpp /opt/dettato-cpp
 # Lets PyTorch's GPU memory pool grow and shrink in place: the models' steps

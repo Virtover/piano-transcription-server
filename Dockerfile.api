@@ -4,7 +4,8 @@ WORKDIR /app
 
 # The build's own tools: apt's mirror lists, and fetch.py and pip_install.py,
 # which take each download from the next source when one fails.
-COPY build /build
+COPY build/apt /build/apt
+COPY build/apt-mirrors.sh build/apt_install.sh build/fetch.py build/pip_install.py /build/
 
 # yt-dlp runs deno for YouTube. A fixed version, checked against its
 # published checksum: from GitHub, else Deno's own server, which builds each

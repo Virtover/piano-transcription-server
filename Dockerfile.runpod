@@ -10,7 +10,8 @@ WORKDIR /app
 # this Python and is built from source.
 # The build's own tools: apt's mirror lists, and fetch.py and pip_install.py,
 # which take each download from the next source when one fails.
-COPY build /build
+COPY build/apt /build/apt
+COPY build/apt-mirrors.sh build/apt_install.sh build/fetch.py build/pip_install.py /build/
 
 RUN sh /build/apt-mirrors.sh \
     && apt-get update \
@@ -58,6 +59,8 @@ RUN mkdir -p /opt/beat-this \
 # dettato's weights for ensemble jobs (app/transcription/arrangement.py), each
 # file checked against its checksum (build/dettato-weights.txt); safetensors
 # hold tensors only, never code.
+# Only dettato's own build files here, so a change to them (a new copy) rebuilds no earlier layer.
+COPY build/dettato-weights.txt build/fetch_dettato.sh /build/
 RUN sh /build/fetch_dettato.sh /opt/dettato
 # See Dockerfile.worker.
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
