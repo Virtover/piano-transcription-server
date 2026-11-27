@@ -16,8 +16,11 @@ Melody (the most lead-like part per 4 beats), bass, and chords from the other pa
 level's limits. Drums and effects are dropped; timing (every note starts on a source note's tick) and the tempo map
 are kept exactly, and the piano version lasts exactly as long as the source.
 
-The standalone script multitrack_to_piano.py, brought into the server: for the same input, every level's file is
-byte-identical to the script's (tests/test_piano_levels.py keeps it so). What differs is speed, not output: the file is
+The standalone script multitrack_to_piano.py, brought into the server: for the same input without a sustain pedal of its
+own (every ensemble result), every level's file is byte-identical to the script's (tests/test_piano_levels.py keeps it
+so). A source with its own pedal, as a piano transcription, differs on purpose: full, advanced, and intermediate keep
+that pedal on both hands' channels, with the notes it held at their written lengths (full writes no pedal of its own
+then), where the script lengthens them to where the pedal lifts; beginner and easy are still the script's. What differs is speed, not output: the file is
 read once and its analysis (parts, roles, the melody's path) shared by the levels (all_levels); MIDI bytes are read and
 written directly rather than through mido's message objects; and no step is quadratic in the number of notes. Only
 mido and the standard library: no torch, no GPU, and nothing of the server's settings.
@@ -76,6 +79,9 @@ class Note(NamedTuple):
     offset: float       # seconds
     key: int = 0        # unique per source note, so equal notes of two parts stay two notes
     role: str = ""      # in the piano version: "melody", "bass", "octave" (the bass's lower octave), or "chord"
+    # For a source note the source's sustain pedal held past its release: the tick of that release (its written
+    # end); 0 for every other note, so sources without pedal read as they always did.
+    written: int = 0
 
 
 @dataclass
@@ -107,6 +113,7 @@ class Level:
     doubling: bool = False              # chord tones doubled in another octave while the right hand has room
     all_notes: bool = False             # every note kept, for the sound: the full level
     pedal: bool = False                 # sustain pedal at harmony changes
+    source_pedal: bool = False          # a source's own sustain pedal kept, with its notes' written lengths
 
 
 LEVELS: dict[str, Level] = {level.name: level for level in (
@@ -118,13 +125,14 @@ LEVELS: dict[str, Level] = {level.name: level for level in (
           bass_range=(36, 55), hand_span=12, max_leap=12, legato=0.5),
     Level("intermediate", chord_notes=3, right_hand_notes=4, left_hand_notes=3,
           melody_gap=0.25, bass_gap=0.25, chord_gap=0.25, melody_range=(55, 91), melody_center=(60, 84),
-          bass_range=(28, 54), hand_span=14, left_extra=1),
+          bass_range=(28, 54), hand_span=14, left_extra=1, source_pedal=True),
     Level("advanced", chord_notes=5, right_hand_notes=5, left_hand_notes=4,
           melody_gap=0.125, bass_gap=0.125, chord_gap=0.125, melody_range=(52, 96), melody_center=(60, 86),
-          bass_range=(24, 52), hand_span=16, left_extra=2, octave_bass=True, doubling=True),
+          bass_range=(24, 52), hand_span=16, left_extra=2, octave_bass=True, doubling=True, source_pedal=True),
     Level("full", chord_notes=FULL_MAX_KEYS, right_hand_notes=FULL_MAX_KEYS, left_hand_notes=FULL_MAX_KEYS,
           melody_gap=0, bass_gap=0, chord_gap=0, melody_range=(LOWEST, HIGHEST), melody_center=(60, 84),
-          bass_range=(LOWEST, HIGHEST), hand_span=HIGHEST - LOWEST, all_notes=True, pedal=True),
+          bass_range=(LOWEST, HIGHEST), hand_span=HIGHEST - LOWEST, all_notes=True, pedal=True,
+          source_pedal=True),
 )}
 
 
@@ -577,9 +585,13 @@ class _Song:
     candidates and path, the harmony weights, and per melody center the melody and its derived bass. Made once for
     all levels; each level then only reduces."""
 
-    def __init__(self, parts: list[Part], ticks_per_beat: int, meter: Meter):
+    def __init__(self, parts: list[Part], ticks_per_beat: int, meter: Meter,
+                 pedal: list[tuple[int, int]] | None = None, clock: Clock | None = None):
         self.ticks_per_beat = ticks_per_beat
         self.meter = meter
+        # the source's own sustain pedal, which the levels with source_pedal keep
+        self.pedal = list(pedal or [])
+        self.clock = clock or Clock(ticks_per_beat, [])
         self.pitched = _normalized([p for p in parts if not is_left_out(p)])
         self._melodies: dict[tuple[int, int], list[Note]] = {}
         self._derived: dict[tuple[int, int], list[Note]] = {}
@@ -623,17 +635,37 @@ class _Song:
             self._weights = {n.key: harmony_weight(p.program) for p in self.pitched for n in p.notes}
         return self._weights
 
+    def written(self) -> list[Part]:
+        """The pitched parts with their notes at their written lengths, as under the source's own pedal."""
+        clock = self.clock
+        return [Part(p.name, p.program, p.is_drum,
+                     [n._replace(end=n.written, offset=clock.at(n.written), written=0) if n.written else n
+                      for n in p.notes]) for p in self.pitched]
+
     def arrange(self, level: Level) -> Hands:
         if not self.pitched:
             return Hands([], [])
         melody = self.melody(level.melody_center)
+        # A source with a sustain pedal of its own (a piano transcription) keeps it where the level does: the notes at
+        # their written lengths and the source's pedal, instead of notes lengthened to where the pedal lifts.
+        own_pedal = bool(self.pedal) and level.source_pedal
         if level.all_notes:
-            hands = _full(self.pitched, self.bass_parts, melody)
+            hands = _full(self.written() if own_pedal else self.pitched, self.bass_parts, melody)
         else:
             hands = _reduce(self, melody, level)
-        if level.pedal:
+            if own_pedal:
+                hands = Hands(_at_written_length(hands.right), _at_written_length(hands.left))
+        if own_pedal:
+            hands.pedal = list(self.pedal)
+        elif level.pedal:
             hands.pedal = _pedal(hands.right + hands.left, self.ticks_per_beat)
         return hands
+
+
+def _at_written_length(notes: list[Note]) -> list[Note]:
+    """A reduced hand's notes that the source's pedal held, ended where the source released them (when that is still
+    after their start), as the pedal sounds them on."""
+    return [n._replace(end=n.written) if n.start < n.written < n.end else n for n in notes]
 
 
 def arrange(parts: list[Part], ticks_per_beat: int, options: Options = Options(), meter: Meter | None = None) -> Hands:
@@ -1271,10 +1303,11 @@ def read(midi: mido.MidiFile) -> tuple[list[Part], list[tuple[int, mido.MetaMess
     return _parts(midi.ticks_per_beat, [_mido_events(track) for track in midi.tracks], conductor), conductor
 
 
-def _parts(ticks_per_beat: int, tracks, conductor: list[tuple[int, mido.MetaMessage]], as_written: bool = False
-           ) -> list[Part]:
+def _parts(ticks_per_beat: int, tracks, conductor: list[tuple[int, mido.MetaMessage]], as_written: bool = False,
+           pedal_spans: list[tuple[int, int]] | None = None) -> list[Part]:
     """The parts of tracks of events (_mido_events, or _parse's), by track and channel. as_written: the notes as the
-    file has them, neither held by the sustain pedal nor lengthened."""
+    file has them, neither held by the sustain pedal nor lengthened. pedal_spans, when given, gets the (down, up) ticks
+    of the sustain pedal on the pitched channels."""
     clock = Clock(ticks_per_beat, [(tick, m.tempo) for tick, m in conductor if m.type == "set_tempo"])
     shortest = 0 if as_written else max(1, ticks_per_beat // 16)
 
@@ -1285,19 +1318,23 @@ def _parts(ticks_per_beat: int, tracks, conductor: list[tuple[int, mido.MetaMess
         # (channel, pitch) -> [(start tick, velocity)], first in, first out
         sounding: dict[tuple[int, int], list[tuple[int, int]]] = {}
         pedal: dict[int, bool] = {}
-        # notes released while the pedal holds them: (channel, pitch) -> [(start, velocity)]
-        pedalled: dict[tuple[int, int], list[tuple[int, int]]] = {}
-        notes: dict[int, list[tuple[int, int, int, int]]] = {}
+        pressed: dict[int, int] = {}         # channel -> where its pedal went down
+        # notes released while the pedal holds them: (channel, pitch) -> [(start, velocity, release tick)]
+        pedalled: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
+        notes: dict[int, list[tuple[int, int, int, int, int]]] = {}
         last = 0
 
-        def finish(channel: int, pitch: int, start: int, end: int, velocity: int) -> None:
-            notes.setdefault(channel, []).append((start, max(end, start + shortest), pitch, velocity))
+        def finish(channel: int, pitch: int, start: int, end: int, velocity: int, released: int | None = None) -> None:
+            end = max(end, start + shortest)
+            # the written end of a note the pedal held longer
+            written = 0 if released is None else max(released, start + shortest)
+            notes.setdefault(channel, []).append((start, end, pitch, velocity, written if written < end else 0))
 
         def release(channel: int, tick: int) -> None:
             for (c, pitch), held in list(pedalled.items()):
                 if c == channel:
-                    for start, velocity in held:
-                        finish(c, pitch, start, tick, velocity)
+                    for start, velocity, released in held:
+                        finish(c, pitch, start, tick, velocity, released)
                     del pedalled[(c, pitch)]
 
         for tick, kind, channel, first, second in events:
@@ -1311,31 +1348,55 @@ def _parts(ticks_per_beat: int, tracks, conductor: list[tuple[int, mido.MetaMess
                 down = second >= 64
                 if pedal.get(channel) and not down:
                     release(channel, tick)
+                    if channel in pressed and pedal_spans is not None and channel != DRUM_CHANNEL:
+                        pedal_spans.append((pressed.pop(channel), tick))
+                elif down and not pedal.get(channel):
+                    pressed[channel] = tick
                 pedal[channel] = down
             elif kind == NOTE_ON:
                 key = (channel, first)
-                for start, velocity in pedalled.pop(key, []):
-                    finish(channel, first, start, tick, velocity)    # struck again under the pedal
+                for start, velocity, released in pedalled.pop(key, []):
+                    finish(channel, first, start, tick, velocity, released)    # struck again under the pedal
                 sounding.setdefault(key, []).append((tick, second))
             elif kind == NOTE_OFF:
                 key = (channel, first)
                 if sounding.get(key):
                     start, velocity = sounding[key].pop(0)
                     if pedal.get(channel):
-                        pedalled.setdefault(key, []).append((start, velocity))
+                        pedalled.setdefault(key, []).append((start, velocity, tick))
                     else:
                         finish(channel, first, start, tick, velocity)
-        for (channel, pitch), held in list(sounding.items()) + list(pedalled.items()):
+        for (channel, pitch), held in sounding.items():
             for start, velocity in held:
                 finish(channel, pitch, start, last, velocity)
+        for (channel, pitch), held in pedalled.items():
+            for start, velocity, released in held:
+                finish(channel, pitch, start, last, velocity, released)
+        if pedal_spans is not None:
+            # a pedal still down at the end of its track
+            pedal_spans.extend((down, last) for channel, down in pressed.items()
+                               if pedal.get(channel) and channel != DRUM_CHANNEL and last > down)
 
         for channel, raw in sorted(notes.items()):
             part = parts.setdefault((index, channel), Part(name or f"Track {index}", programs.get(channel, 0),
                                                            channel == DRUM_CHANNEL))
             at = clock.at
-            for start, end, pitch, velocity in sorted(raw):
-                part.notes.append(Note(start, end, pitch, velocity, at(start), at(end)))
+            for start, end, pitch, velocity, written in sorted(raw):
+                part.notes.append(Note(start, end, pitch, velocity, at(start), at(end), written=written))
     return list(parts.values())
+
+
+def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Pedal spans of several channels or tracks as one: down while any is."""
+    out: list[tuple[int, int]] = []
+    for down, up in sorted(spans):
+        if up <= down:
+            continue
+        if out and down <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], up))
+        else:
+            out.append((down, up))
+    return out
 
 
 @dataclass
@@ -1346,6 +1407,12 @@ class Source:
     parts: list[Part]
     conductor: list[tuple[int, mido.MetaMessage]]
     end: int
+    # The source's own sustain pedal on its pitched parts, (down, up) ticks, merged; empty without one.
+    pedal: list[tuple[int, int]] = field(default_factory=list)
+
+    @property
+    def clock(self) -> Clock:
+        return Clock(self.ticks_per_beat, [(tick, m.tempo) for tick, m in self.conductor if m.type == "set_tempo"])
 
     @property
     def note_count(self) -> int:
@@ -1463,8 +1530,9 @@ def _parse(data: bytes, as_written: bool = False) -> Source:
                     append((tick, OTHER, 0, 0, 0))
             tracks.append(events)
             end = max(end, tick)
-    parts = _parts(ticks_per_beat, tracks, conductor, as_written)
-    return Source(midi_type, ticks_per_beat, parts, conductor, end)
+    spans: list[tuple[int, int]] = []
+    parts = _parts(ticks_per_beat, tracks, conductor, as_written, spans)
+    return Source(midi_type, ticks_per_beat, parts, conductor, end, _merged(spans))
 
 
 def played_notes(data: bytes) -> tuple[tuple[int, int, int, int], ...]:
@@ -1480,8 +1548,11 @@ def played_notes(data: bytes) -> tuple[tuple[int, int, int, int], ...]:
 
 
 def _source(midi: mido.MidiFile) -> Source:
-    parts, conductor = read(midi)
-    return Source(midi.type, midi.ticks_per_beat, parts, conductor, song_end(midi))
+    conductor = [(tick, m) for track in midi.tracks for tick, m in _absolute(track)
+                 if m.is_meta and m.type in CONDUCTOR_EVENTS]
+    spans: list[tuple[int, int]] = []
+    parts = _parts(midi.ticks_per_beat, [_mido_events(track) for track in midi.tracks], conductor, False, spans)
+    return Source(midi.type, midi.ticks_per_beat, parts, conductor, song_end(midi), _merged(spans))
 
 
 def _varint(value: int) -> bytes:
@@ -1592,8 +1663,8 @@ def _check_type(midi_type: int) -> None:
 def piano_version(midi: mido.MidiFile, options: Options = Options()) -> mido.MidiFile:
     _check_type(midi.type)
     source = _source(midi)
-    hands = arrange(source.parts, source.ticks_per_beat, options, _meter(source))
-    return write(hands, source.ticks_per_beat, source.conductor, source.end)
+    song = _Song(source.parts, source.ticks_per_beat, _meter(source), source.pedal, source.clock)
+    return write(song.arrange(options.resolved()), source.ticks_per_beat, source.conductor, source.end)
 
 
 class TooManyNotes(ValueError):
@@ -1620,7 +1691,7 @@ def levels(data: bytes, names=None, max_notes: int | None = None, **overrides) -
     ticks_per_beat, end = source.ticks_per_beat, source.end
     meter = _meter(source)
     conductor_track = _conductor_track(source.conductor, end)
-    song = _Song(source.parts, ticks_per_beat, meter)
+    song = _Song(source.parts, ticks_per_beat, meter, source.pedal, source.clock)
     del source
     for level in resolved:
         yield level.name, _write_bytes(song.arrange(level), ticks_per_beat, conductor_track, end)

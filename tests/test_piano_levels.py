@@ -475,7 +475,7 @@ def test_command_line(tmp_path, band_data):
 # --- the same bytes as the script --------------------------------------------------------------------------------
 
 
-def song(seed: int, bars: int = 24, bass_part: bool = True, midi_type: int = 1) -> bytes:
+def song(seed: int, bars: int = 24, bass_part: bool = True, midi_type: int = 1, pedal: bool = True) -> bytes:
     """A band of random but repeatable parts: a lead with leaps and specks, a bass part or none (then a low guitar is
     the bass), strummed chords, a pad, a string section, keys under the sustain pedal, drums, and tempo and meter
     changes. Only random() is drawn, whose values Python keeps across versions."""
@@ -505,23 +505,32 @@ def song(seed: int, bars: int = 24, bass_part: bool = True, midi_type: int = 1) 
         keys.append((t0, TPB // 3, root + 12, 64))
         for t in range(0, bar, TPB // 2):
             drums.append((t0 + t + 7, 30, 36 + int(rng.random() * 10), 100))
-    pedal = [(4, (b * bar, mido.Message("control_change", channel=4, control=64, value=127))) for b in range(0, bars, 2)]
-    pedal += [(4, (b * bar + bar - 20, mido.Message("control_change", channel=4, control=64, value=0)))
+    presses = [(4, (b * bar, mido.Message("control_change", channel=4, control=64, value=127))) for b in range(0, bars, 2)]
+    presses += [(4, (b * bar + bar - 20, mido.Message("control_change", channel=4, control=64, value=0)))
               for b in range(0, bars, 2)]
     low = (33, 1, bass) if bass_part else (25, 1, [(s, n, p - 12, v) for s, n, p, v in bass])
     parts = [(54, 0, lead), low, (27, 2, guitar), (89, 3, pad), (0, 4, keys), (48, 5, strings), (0, 9, drums)]
     return build(parts, tempos=((0, 500_000), (8 * bar, 420_000), (16 * bar + TPB, 650_000)),
                  signatures=((0, 4, 4), (12 * bar, 3, 4), (12 * bar + 6 * TPB, 6, 8)), midi_type=midi_type,
-                 extra=pedal)
+                 extra=presses if pedal else ())
 
 
+# Sources without a sustain pedal of their own, as every ensemble result: every level is the script's.
 GOLDEN_SOURCES = {
     "band": band,
     "piano solo": piano_solo,
+    "song 1 without pedal": lambda: song(1, pedal=False),
+    "song 2 without a bass part or pedal": lambda: song(2, bass_part=False, pedal=False),
+    "song 3 of type 0 without pedal": lambda: song(3, midi_type=0, pedal=False),
+}
+# Sources with their own pedal (the keys part's), as a piano transcription has: full, advanced, and intermediate keep it
+# (the module's own output since then); beginner and easy are still the script's.
+PEDALLED_SOURCES = {
     "song 1": lambda: song(1),
     "song 2 without a bass part": lambda: song(2, bass_part=False),
     "song 3 of type 0": lambda: song(3, midi_type=0),
 }
+SCRIPT_LEVELS_WITH_PEDAL = ("beginner", "easy")
 # sha256 of multitrack_to_piano.py's own output (the user's version of 2026-11-27), per source and level.
 GOLDEN: dict[str, dict[str, str]] = {
     'band': {
@@ -538,26 +547,50 @@ GOLDEN: dict[str, dict[str, str]] = {
         'advanced': '9f76f7655983dd7fd5357d9a445f50a2385ae2f0da7e43e6813de40b49ad1357',
         'full': '246d85cef85f923366b4a143a2ac3a047d33bdd34cf36847708e0f3861c41ba2',
     },
+    'song 1 without pedal': {
+        'beginner': 'cbda5a014d98936c7c1a0e1f5a037260e65e26dcb9de511bcf03f3218626e332',
+        'easy': 'aa15098a3ccc31c122ca772f5cddfe6a813bc42be015aecc378252d73d2f1ae2',
+        'intermediate': '801ce94ce0d0dde79f85d518007b823fc5ac304c750ccc50ccf0350bf87f7c56',
+        'advanced': 'a010416913fde62a863a847575340875b9d8fcebc530fb971bc535652eb26223',
+        'full': 'e9653abaf2a8a1b4c674350dd8c6587e629aa1b693f7fea0660d38a919c413f8',
+    },
+    'song 2 without a bass part or pedal': {
+        'beginner': '62350631c2223bd1ace6e527ae15ed7af6d3d35aa48eeb4fd31e1ec94a57fd0c',
+        'easy': '72a217193cc4abd66e17f289f3e413b9e9fc5dfd87da3cecc89cd3a0b6abfed2',
+        'intermediate': 'bf8c93b9c750ff155354e02958f8a97a871b79995afc7b5b0bfec0757134ec59',
+        'advanced': '808c39538063b7b526150e0377b3b4eb408e791c946e028ca29c2fe8a4234399',
+        'full': '5665d90d4ca897f5a3ccc1c5297b084230b2b9af5c36c31608583881ff9b567c',
+    },
+    'song 3 of type 0 without pedal': {
+        'beginner': '0864238102411f03bff540cae796de9c494008620abf0416bd138a65a1d496cb',
+        'easy': '464bbf083bc17850dc5984ff46d1ec7c7f24b5fdc26ebe31dc850b2e85cec688',
+        'intermediate': 'f2e61b3f7e170b8c157de243ed2e3fabd6e6f7b32bb5f8c25d81a307040b68f7',
+        'advanced': 'cc4e0aef1b461dbc12441fea358615bf6b3d24b02967ff1f83ff9fd0c8a0635f',
+        'full': '0092b7a262e47bfc32d80777438cc960a4753b9a666380d49cf84a1216c6f987',
+    },
+}
+# sha256 of the module's output for the pedalled sources; beginner's and easy's are the script's.
+PEDALLED: dict[str, dict[str, str]] = {
     'song 1': {
         'beginner': 'cbda5a014d98936c7c1a0e1f5a037260e65e26dcb9de511bcf03f3218626e332',
         'easy': 'b6332683ede09fc15e85b0a0ad0a4950208c7ab3be3a21d5f5d99ffa15b57eba',
-        'intermediate': 'f09ad238028c4824331b600e8251235bf34e3bd8c2d3d02508c6fda61d3e02a7',
-        'advanced': 'cb260bfda63ef668bc03027dd6067e16272196e61b7b1d1128f648f497f659fe',
-        'full': 'e9653abaf2a8a1b4c674350dd8c6587e629aa1b693f7fea0660d38a919c413f8',
+        'intermediate': 'b59de222d4b5769151d6569d4288fabf02acbe9d433930b5b6f8482622bbc9d5',
+        'advanced': 'f79465554a9cd9115d8eeab887ffa4a1c87f04e618dff7fa291f2032375b5eb6',
+        'full': '63a5ab340177f43cde5306cb7c4b641f4af6ea9d77f8f1d03498423433690654',
     },
     'song 2 without a bass part': {
         'beginner': '62350631c2223bd1ace6e527ae15ed7af6d3d35aa48eeb4fd31e1ec94a57fd0c',
         'easy': '8699a5ad4c75e2e075779f349940bf4c0847b02163f611f2d65e353dc7d6f373',
-        'intermediate': '1a374dc528bec61a3c1cc537ccd012a874a48842d8f1c3ef4b00eeb43af78e37',
-        'advanced': '0786a4b3671e1dbc966cb6ff5e0f0523af330d6b0f7896e490419c9f5c480adb',
-        'full': '5665d90d4ca897f5a3ccc1c5297b084230b2b9af5c36c31608583881ff9b567c',
+        'intermediate': '9089c75ecbcb81b6ca1f302147e7f75bb37af3770505f5afd7fbff53b9a3d4d4',
+        'advanced': '77f6e1f0cace0d1e34eb8ccde1c5ac8963ee794373f3718c90d9112551c56f08',
+        'full': 'e3fd23cb3b5e57a42efea0ccdb2f910f051d6095e6887534c7d6b77410549d34',
     },
     'song 3 of type 0': {
         'beginner': '0864238102411f03bff540cae796de9c494008620abf0416bd138a65a1d496cb',
         'easy': '28953057cfdc3e9839c3eddad3da402a7361944cdbcf917790260289629501d8',
-        'intermediate': '2c2613b8c940be4949f893a2ce46ef34e52885764f73ad4df9708eb048706a94',
-        'advanced': 'c17fa14a8a9f48fce867bea5f55795bd11ece18b230487cb63199725c1277567',
-        'full': '0092b7a262e47bfc32d80777438cc960a4753b9a666380d49cf84a1216c6f987',
+        'intermediate': 'ebd1bd398fe556fc156ea53c0f2dabf87d16a87a86faa143d821e2cdcd007542',
+        'advanced': '2698de14d1060b00ef2bee7985b9ba4b5fcb41e3638c37cc99fd2610fb5e5e09',
+        'full': '6988cb2ca8739241728cfd87d9ca4b3bd3cf0977399f39a054e4bf3bfa6dfc16',
     },
 }
 
@@ -577,21 +610,27 @@ def test_every_level_is_byte_identical_to_the_script(source):
         assert convert(data, level) == made[level]
 
 
+@pytest.mark.parametrize("source", list(PEDALLED_SOURCES))
+def test_a_pedalled_source_keeps_its_digests(source):
+    made = m2p.all_levels(PEDALLED_SOURCES[source]())
+    assert {level: digest(midi) for level, midi in made.items()} == PEDALLED[source]
+
+
 @pytest.mark.skipif(not os.environ.get("PIANO_LEVELS_REFERENCE"), reason="PIANO_LEVELS_REFERENCE is not set")
-@pytest.mark.parametrize("source", list(GOLDEN_SOURCES))
+@pytest.mark.parametrize("source", list(GOLDEN_SOURCES) + list(PEDALLED_SOURCES))
 def test_the_reference_script_gives_the_same_bytes(source):
     spec = importlib.util.spec_from_file_location("multitrack_to_piano_reference", os.environ["PIANO_LEVELS_REFERENCE"])
     reference = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = reference
     spec.loader.exec_module(reference)
-    data = GOLDEN_SOURCES[source]()
+    data = {**GOLDEN_SOURCES, **PEDALLED_SOURCES}[source]()
     made = m2p.all_levels(data)
-    for level in m2p.LEVELS:
+    for level in m2p.LEVELS if source in GOLDEN_SOURCES else SCRIPT_LEVELS_WITH_PEDAL:
         assert reference.convert(data, reference.Options(level=level)) == made[level], level
 
 
 def test_the_fast_reader_reads_as_mido_does():
-    for make in GOLDEN_SOURCES.values():
+    for make in [*GOLDEN_SOURCES.values(), *PEDALLED_SOURCES.values()]:
         data = make()
         fast = m2p.read_source(data)
         parts, conductor = m2p.read(mido.MidiFile(file=io.BytesIO(data), clip=True))
@@ -637,3 +676,81 @@ def test_time_grows_linearly_with_the_length():
 
     short, long = seconds(24), seconds(96)
     assert long < 7 * short, (short, long)
+
+
+# --- a source's own sustain pedal -------------------------------------------------------------------------------
+
+
+def pedalled_piano() -> bytes:
+    """A piano transcription's shape: one part, short written notes, and the pianist's pedal each bar."""
+    notes = []
+    for b in range(8):
+        for i in range(8):
+            notes.append((b * 4 * TPB + i * TPB // 2, TPB // 4, 72 + (i * 3 + b) % 8, 80))
+            notes.append((b * 4 * TPB + i * TPB // 2, TPB // 4, [48, 55, 52, 55][i % 4], 60))
+    presses = [(0, (b * 4 * TPB + 5, mido.Message("control_change", channel=0, control=64, value=127))) for b in range(8)]
+    presses += [(0, ((b + 1) * 4 * TPB - 10, mido.Message("control_change", channel=0, control=64, value=0)))
+                for b in range(8)]
+    return build([(0, 0, notes)], extra=presses)
+
+
+def pedal_events(data: bytes) -> dict[int, list[tuple[int, int]]]:
+    out: dict[int, list[tuple[int, int]]] = {}
+    for track in load(data).tracks:
+        tick = 0
+        for m in track:
+            tick += m.time
+            if m.type == "control_change" and m.control == 64:
+                out.setdefault(m.channel, []).append((tick, m.value))
+    return out
+
+
+SOURCE_PEDAL = [(b * 4 * TPB + 5, 127) for b in range(8)] + [((b + 1) * 4 * TPB - 10, 0) for b in range(8)]
+
+
+def test_the_source_pedal_is_read_with_the_written_ends():
+    source = m2p.read_source(pedalled_piano())
+    assert source.pedal == [(b * 4 * TPB + 5, (b + 1) * 4 * TPB - 10) for b in range(8)]
+    notes = source.parts[0].notes
+    # every note the pedal held: lengthened to its lift, its written end kept
+    held = [n for n in notes if n.written]
+    assert held and all(n.end > n.written and n.written - n.start == TPB // 4 for n in held)
+
+
+@pytest.mark.parametrize("level", ["full", "advanced", "intermediate"])
+def test_the_source_pedal_is_kept_at_the_fuller_levels(level):
+    out = convert(pedalled_piano(), level)
+    events = pedal_events(out)
+    # the source's own pedal on both hands' channels, not the full level's harmony pedal
+    assert sorted(events[0]) == sorted(SOURCE_PEDAL) and sorted(events[1]) == sorted(SOURCE_PEDAL)
+    # the notes at their written lengths under it
+    lengths = {e - s for notes in hand_notes(out).values() for s, e, _, _ in notes}
+    assert TPB // 4 in lengths and max(lengths) < 4 * TPB
+
+
+def test_full_plays_every_source_note_at_its_written_length():
+    data = pedalled_piano()
+    full = {(s, e, p) for notes in hand_notes(convert(data, "full")).values() for s, e, p, _ in notes}
+    written = {(s, s + TPB // 4, p) for notes in source_notes(data).values() for s, _, p in notes}
+    assert full == written
+
+
+@pytest.mark.parametrize("level", ["easy", "beginner"])
+def test_the_easier_levels_have_no_pedal_and_hold_the_notes(level):
+    out = convert(pedalled_piano(), level)
+    assert pedal_events(out) == {}
+    # held as the pedal held them: longer than written
+    assert max(e - s for notes in hand_notes(out).values() for s, e, _, _ in notes) > TPB // 4
+
+
+def test_without_a_source_pedal_full_still_makes_its_own():
+    events = pedal_events(convert(piano_solo(), "full"))
+    assert events and sorted(events[0]) != sorted(SOURCE_PEDAL)
+    assert pedal_events(convert(piano_solo(), "advanced")) == {}
+
+
+def test_a_pedal_on_the_drum_channel_is_no_source_pedal():
+    presses = [(1, (0, mido.Message("control_change", channel=9, control=64, value=127))),
+               (1, (4 * TPB, mido.Message("control_change", channel=9, control=64, value=0)))]
+    data = build([(0, 0, [(i * TPB, TPB, 60 + i, 80) for i in range(8)]), (0, 9, [(0, 30, 36, 100)])], extra=presses)
+    assert m2p.read_source(data).pedal == []
