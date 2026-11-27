@@ -14,7 +14,7 @@ from redis.exceptions import RedisError
 
 from app.billing import Billing, SubscriptionOwned, transcription_cost
 from app.config import settings
-from app import clips, controls, google_play, maintenance, video_check, video_sites
+from app import clips, controls, google_play, maintenance, video_check, video_info, video_sites
 from app.errors import SourceBusy, SourceError, SourceRefused, SourceTimedOut, SourceUnsupported
 from app.errors import SourceVideoUnavailable
 from app.maintenance import NoticeResponse
@@ -74,6 +74,13 @@ class CostResponse(BaseModel):
     # The part's length, when start_seconds or end_seconds asked for one;
     # cost_minutes is then its cost.
     clip_seconds: float | None = None
+    # For a link only, from the same check (video_info.link_preview), each
+    # when known: what the app shows of the pasted link. Links only https
+    # ones that are safe to show.
+    title: str | None = None
+    channel: str | None = None
+    thumbnail: str | None = None
+    webpage_url: str | None = None
 
 
 class GooglePurchaseRequest(BaseModel):
@@ -521,15 +528,20 @@ def cost(
         source_url=str(source_url) if source_url is not None else None,
     )
     user_id = user.user_id if user else None
+    preview = {}
     if source_url is not None:
-        duration = video_duration(source_url, user_id, check_client(connection, user))
+        # One check, cached: its info also gives the link's preview.
+        video = check_video(source_url, user_id, check_client(connection, user))
+        duration = video.duration
+        preview = video_info.link_preview(video.info)
     else:
         duration = ensure_allowed_length(duration_seconds, user_id)
     clip = checked_clip(start_seconds, end_seconds, duration)
     if clip is None:
-        return CostResponse(duration_seconds=duration, cost_minutes=transcription_cost(duration))
+        return CostResponse(duration_seconds=duration, cost_minutes=transcription_cost(duration), **preview)
     length = clip.length(duration)
-    return CostResponse(duration_seconds=duration, cost_minutes=transcription_cost(length), clip_seconds=length)
+    return CostResponse(duration_seconds=duration, cost_minutes=transcription_cost(length), clip_seconds=length,
+                        **preview)
 
 
 def checked_clip(start: float | None, end: float | None, duration: float) -> clips.Clip | None:

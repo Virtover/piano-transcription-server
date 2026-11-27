@@ -30,6 +30,34 @@ def _is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return ip.is_global and not ip.is_multicast
 
 
+def client_link(url: object) -> str | None:
+    """url, if it is safe to show to a client as a link or an image (a
+    thumbnail from a site's info): https, of bounded length, without
+    credentials, whitespace, or control characters, on the default port, and
+    to a host that is no local name or non-public address. Nothing is looked
+    up: the server never opens it. None otherwise."""
+    if not isinstance(url, str) or not url or len(url) > MAX_URL_LENGTH:
+        return None
+    if any(ord(c) <= 0x20 or ord(c) == 0x7F for c in url):
+        return None
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme.lower() != "https" or parts.username or parts.password or port not in (None, 443):
+        return None
+    host = (parts.hostname or "").rstrip(".").lower()
+    if not host or host == "localhost" or host.endswith(BLOCKED_SUFFIXES):
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # A name: it must look like one, with a dot, as public hosts have.
+        return url if "." in host else None
+    return url if _is_public(address) else None
+
+
 def ensure_safe_source_url(url: str) -> str:
     url = url.strip()
     if not url or len(url) > MAX_URL_LENGTH:

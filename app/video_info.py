@@ -50,12 +50,42 @@ def format_upload_date(value: str | None) -> str | None:
     return f"{value[:4]}-{value[4:6]}-{value[6:]}"
 
 
+# The longest title or channel name kept for clients, as the job's metadata
+# and the cost's preview give them.
+MAX_TEXT_LENGTH = 300
+
+
+def capped_text(value: Any) -> str | None:
+    """A text of a site's info for clients: stripped, at most MAX_TEXT_LENGTH
+    characters, or None when it is no text or empty."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value[:MAX_TEXT_LENGTH] or None
+
+
+def link_preview(info: dict[str, Any]) -> dict[str, str]:
+    """What an app shows of a pasted link before it is submitted, from the
+    checked video's info: its title, channel (or uploader), thumbnail, and
+    page. Each only when present; the links only when safe to show
+    (url_safety.client_link)."""
+    from app.url_safety import client_link
+
+    preview = {
+        "title": capped_text(info.get("title")),
+        "channel": capped_text(info.get("channel")) or capped_text(info.get("uploader")),
+        "thumbnail": client_link(info.get("thumbnail")),
+        "webpage_url": client_link(info.get("webpage_url")),
+    }
+    return {name: value for name, value in preview.items() if value is not None}
+
+
 def video_metadata(info: dict[str, Any], source_url: str) -> dict[str, Any]:
     """The job metadata clients see, from yt-dlp's info."""
     return {
-        "title": info.get("title"),
-        "author": info.get("uploader") or info.get("channel"),
-        "channel": info.get("channel"),
+        "title": capped_text(info.get("title")),
+        "author": capped_text(info.get("uploader")) or capped_text(info.get("channel")),
+        "channel": capped_text(info.get("channel")),
         "channel_id": info.get("channel_id"),
         "channel_url": info.get("channel_url"),
         "upload_date": format_upload_date(info.get("upload_date")),
