@@ -19,3 +19,5 @@ soundfile==0.14.0
 psutil==7.2.2
 pydantic-settings==2.15.0
 requests==2.34.2
+# pkg_resources, which transkun uses to find its weights: setuptools 81 removed it (see requirements.worker.txt).
+setuptools==80.9.0

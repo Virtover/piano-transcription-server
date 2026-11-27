@@ -2,7 +2,7 @@
 #   docker build -f Dockerfile.runpod -t <registry>/piano-transcription-runpod:<version> .
 # CUDA 12.8+ lets RunPod schedule the image on its newest GPUs too. The base
 # image has no cuDNN or CUDA libraries: torch installs its own.
-FROM nvidia/cuda:12.8.1-base-ubuntu22.04
+FROM nvidia/cuda:12.8.1-base-ubuntu24.04
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ RUN sh /build/apt-mirrors.sh \
     && sh /build/apt_install.sh \
         python3 \
         python3-dev \
-        python3-pip \
+        python3-venv \
         build-essential \
     && rm -rf /var/lib/apt/lists/*
 
@@ -27,7 +27,11 @@ COPY requirements.runpod.txt .
 # image's CUDA version. Install torch for that version, from PyTorch's index
 # for it (download.pytorch.org/whl/cu128) or a mirror, not the PyPI default
 # (CUDA 13), or it fails on hosts whose driver supports only 12.8.
-RUN python3 /build/pip_install.py --upgrade pip setuptools wheel \
+# Ubuntu 24.04's Python 3.12 takes pip installs only into a venv (PEP 668); first on PATH, as in
+# Dockerfile.worker. setuptools at its pin in requirements.runpod.txt, for pkg_resources (transkun).
+ENV VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH
+RUN /usr/bin/python3 -m venv "$VIRTUAL_ENV" \
+    && python3 /build/pip_install.py --upgrade pip wheel $(grep -E '^setuptools==' requirements.runpod.txt) \
     && python3 /build/pip_install.py --torch cu128 --no-cache-dir torch==2.11.0 torchaudio==2.11.0 \
     && python3 /build/pip_install.py --no-cache-dir -r requirements.runpod.txt
 
@@ -35,7 +39,7 @@ RUN python3 -c "import torch; assert torch.version.cuda.startswith('12.8'), f'to
 
 # The model weights ship inside the transkun package, so they are part of the
 # image. Fail the build if they are missing or unreadable.
-RUN python3 -c "import pkg_resources, torch; torch.load(pkg_resources.resource_filename('transkun', 'pretrained/2.0.pt'), map_location='cpu')"
+RUN python3 -c "import pkg_resources, sys, torch; assert sys.version_info >= (3, 12), sys.version; torch.load(pkg_resources.resource_filename('transkun', 'pretrained/2.0.pt'), map_location='cpu')"
 
 # Beat This! beat tracker weights for the MIDI tempo map
 # (app/transcription/tempo.py), checked against their checksum and loaded once.
