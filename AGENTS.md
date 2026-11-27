@@ -44,9 +44,12 @@ python scripts/kube.py restart 5m                               # server.py's an
 | `app/video_check.py` | Reading a video's length with yt-dlp, by the API or, while a site refuses the hub's address, by a node |
 | `docker-compose.hub.yml`, `docker-compose.node.yml`, `scripts/nodes.py`, `redis/node.acl` | The hub's published services; a node's worker; the host side of hub setup, invites, and join; a node's Redis rules |
 | `app/transcription/` | Audio, batching, and the model |
-| `app/transcription/amt_apc/` | Vendored AMT-APC inference (MIT), for piano arrangements; weights `apc.pth` are fetched, with a sha256, at image build |
-| `app/transcription/arrangement.py`, `styles.py` | The arrangement batcher, and the styles a request may ask for |
-| `app/transcription/budget.py` | The per-device memory budget that transcription and arrangement steps share |
+| `app/transcription/dettato/` | Vendored dettato (Apache-2.0) for ensemble jobs: four models, weights pinned by sha256 in `build/dettato-weights.txt` and fetched at image build; changed only in `hub.py` and `precision.py` (its `__init__.py` says how) |
+| `app/transcription/ensemble_transcription.py`, `ensemble/` | Ensemble jobs: its three GPU phases in the device budget (`pitched.py`: the transcriber pass in a sliding buffer, per-segment repair; `drums.py`: whole-recording drums in pieces; `frames.py`: song-frame times; `midi.py`: the multi-track MIDI), and `cpu.py`, dettato.cpp in a process of its own |
+| `app/transcription/stream_audio.py` | Long recordings from disk: the converted WAV read a window at a time, resampled copies as files read through np.memmap (soxr's streaming output equals its one-shot output) |
+| `app/disk.py` | `MIN_FREE_DISK_GIB`: jobs wait for disk room, a job whose disk filled up is tried once more, the API refuses submissions while the disk is full, and warns while it is low |
+| `dettato_cpu/` | `server.cpp`, the dettato.cpp tool CPU workers run, built in `Dockerfile.worker`'s `dettato-cpp` stage |
+| `app/transcription/budget.py` | The per-device memory budget that piano and ensemble steps share |
 | `app/announcements.py` | Announcements for the apps: checks, who sees which, and the API's cache; written by `app/admin/announce.py` and the admin web page, read by `app/api/routes/announcements.py` |
 | `app/billing.py` | Billing database (PostgreSQL; SQLite only for legacy installs), also job diagnostics |
 | `app/backups.py` | `python -m app.backups`: billing backups, which are kept, and the encrypted off-site copies |
@@ -92,9 +95,16 @@ People can run `python scripts/setup.py`. For guided setup by an agent, use the 
 
 - `Set-Content -NoNewline <file> <value>` swaps its arguments in Windows PowerShell 5.1 and creates a file named after the secret. Always use `Set-Content -Path <file> -Value <value> -NoNewline`.
 - The worker venv's tests import `torch` and `transkun`; in the repo `.venv` they are skipped (`pkg_resources` is missing). Run them in a worker image (`docs/testing.md`).
-- AMT-APC input must be resampled with torchaudio's `Resample`, not soxr: with soxr about 30% of the notes change.
-- Piano arrangements are on by default (`WORKER_ARRANGEMENT`). An arrangement job runs only on a worker that consumes the `arrangement` queue: the setting on, and room on a GPU (or a CPU worker). Otherwise it waits.
-- The RunPod endpoint must run an image with `apc.pth` and reads the same `WORKER_ARRANGEMENT` default; with `false` there it fails the arrangements sent to it.
+- The server serves many users at once: every change keeps memory per job bounded (independent of the recording's length), throughput per GPU high, jobs interleaved fairly, and job handling restart-safe.
+- Ensemble jobs (`mode` `ensemble`, dettato) replaced piano arrangements (AMT-APC piano covers with styles). Where a name is stored or sent between versions it keeps the old word: the queue and stored mode `arrangement`, the actor name `arrange_job`, the cluster task `arrange` (also accepted as `ensemble`), the heartbeat field `arrangement`, the node hardware key `arrangements`, the error code `arrangement_unavailable`. Never rename those; `WORKER_ARRANGEMENT*` are deprecated aliases of `WORKER_ENSEMBLE*`.
+- Ensemble jobs are on by default (`WORKER_ENSEMBLE`). One runs only on a worker that consumes the `arrangement` queue: the setting on, and room on a GPU for `WORKER_ENSEMBLE_MEMORY_GIB` (1.25 times as much where float32), or a CPU worker. Otherwise it waits.
+- dettato runs in bfloat16 only where it is native (compute capability 8.0 or more, `dettato/precision.py`); older GPUs run float32. Never force bfloat16 on them: cuDNN's GRU fails there.
+- dettato's drum router decides one model from the whole recording, and the networks span it: never split the drums into independent chunks (on one song the router moved from 0.54 to 0.42, the other model). `ensemble/drums.py` runs the whole computation in pieces instead.
+- Note ends often fall on half frames: compute times and indices from song frame numbers as the package does (`ensemble/frames.py`), never from times relative to a slice, or ends round to the other frame.
+- dettato's track grouping is a clustering that a few changed notes can reshuffle (in the package itself, a float32 versus float64 sum moved the track agreement to 0.66). Compare ensemble results by their notes before grouping, not by their tracks.
+- The RunPod endpoint must run an image with dettato's weights and reads the same `WORKER_ENSEMBLE` default; with `false` there it fails the ensemble jobs sent to it. Servers send mode `ensemble`, which endpoints on an older image refuse: update the endpoint first.
+- Never load a whole recording into memory in the ensemble path: read it through `stream_audio` and keep copies as files in the job's folder; a recording may be hours long. Keep any whole-recording step linear in time and memory (dettato's grouper decode was cubic).
+- dettato's drums need a source recorded at 40 kHz or more; the server converts to 44.1 kHz, so the source's own rate (`DownloadedAudio.source_rate`) decides, never the converted file's.
 - Only `secrets/` is git-ignored for secrets: check `git status` for stray files after writing one.
 - The services run as user ID 10001. The `prepare` Compose service (`app/prepare.py`) gives them `/data` and `billing-data` before every start; it must never touch the PostgreSQL cluster.
 - Starting without `secrets/postgres_password` or a file in `secrets/redis` makes Docker create an empty folder in its place. `scripts/server.py start` and `restart` replace it with a generated password.

@@ -4,7 +4,7 @@ the nodes of a home cluster (app/cluster.py, docs/cluster.md).
 It runs Dramatiq as child processes, one per kind of work, with the queues
 the cluster's switches allow this device's service now:
 
-* `local`: the default and arrangement queues (transcribe, arrange)
+* `local`: the default (piano) and ensemble queues (transcribe, arrange)
 * `checks`: link checks for the hub (check), on nodes only
 * `remote`: the remote queue, which sends jobs to RunPod (dispatch)
 
@@ -154,7 +154,7 @@ class Supervisor:
             self.local_plan = launcher.plan_worker(*launcher.measure_gpus())
             for warning in self.local_plan.warnings:
                 say(f"Warning: {warning}")
-            if not self.local_plan.arrangement:
+            if not self.local_plan.ensemble:
                 offered = [task for task in offered if task != "arrange"]
         if "check" in offered and not cluster.is_node():
             # The hub checks links itself, from its own address.
@@ -183,7 +183,7 @@ class Supervisor:
         wanted = {}
         allowed = set(self.allowed)
         local_queues = tuple(
-            queue for task, queue in (("transcribe", launcher.LOCAL_QUEUE), ("arrange", launcher.ARRANGEMENT_QUEUE))
+            queue for task, queue in (("transcribe", launcher.LOCAL_QUEUE), ("arrange", launcher.ENSEMBLE_QUEUE))
             if task in allowed
         )
         if local_queues and self.local_plan is not None:
@@ -295,7 +295,7 @@ class Supervisor:
         from app.worker import launcher
 
         tasks = set()
-        by_queue = {launcher.LOCAL_QUEUE: "transcribe", launcher.ARRANGEMENT_QUEUE: "arrange",
+        by_queue = {launcher.LOCAL_QUEUE: "transcribe", launcher.ENSEMBLE_QUEUE: "arrange",
                     launcher.CHECK_QUEUE: "check", launcher.REMOTE_QUEUE: "dispatch"}
         for child in self.children.values():
             if not child.stopping:

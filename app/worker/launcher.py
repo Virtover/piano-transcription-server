@@ -10,8 +10,10 @@ from dataclasses import dataclass, field
 from app.config import ensure_valid, settings
 from app.error_report import SERVICE_ENVIRONMENT
 from app.worker.places import GPU_THREADS_PER_PLACE, PLACES_VARIABLE
+import app.transcription.device as device_module
 from app.transcription.device import (
-    arrangement_fits,
+    ensemble_fits,
+    ensemble_memory_gib,
     cpu_batch_size,
     cpu_model_name,
     cpu_thread_count,
@@ -32,7 +34,8 @@ MiB = 1024**2
 # so that this module starts without connecting to Redis.
 LOCAL_QUEUE = "default"
 REMOTE_QUEUE = "remote"
-ARRANGEMENT_QUEUE = "arrangement"
+# Its name from when ensemble jobs were piano arrangements (app.worker.tasks).
+ENSEMBLE_QUEUE = "arrangement"
 CHECK_QUEUE = "checks"
 
 
@@ -46,8 +49,8 @@ class WorkerPlan:
     cpu_threads: int | None
     summary: str
     warnings: tuple[str, ...] = ()
-    # Whether it consumes the arrangement queue (WORKER_ARRANGEMENT, and room on a GPU).
-    arrangement: bool = False
+    # Whether it consumes the ensemble queue (WORKER_ENSEMBLE, and room on a GPU).
+    ensemble: bool = False
     # Local jobs before or in their model step at once (app.worker.places);
     # None for the remote dispatcher.
     places: int | None = None
@@ -72,11 +75,12 @@ class WorkerPlan:
         return environment
 
 
-# Run by measure_gpus in a process of its own: (capacities, names) as JSON.
+# Run by measure_gpus in a process of its own: (capacities, names, whether
+# a GPU runs the ensemble models in float32) as JSON.
 MEASURE_SCRIPT = """
 import json
-from app.transcription.device import cuda_device_names, cuda_job_capacities
-print(json.dumps({"capacities": cuda_job_capacities(), "names": cuda_device_names()}))
+from app.transcription.device import cuda_device_names, cuda_job_capacities, fp32_gpus
+print(json.dumps({"capacities": cuda_job_capacities(), "names": cuda_device_names(), "fp32": fp32_gpus()}))
 """
 
 
@@ -94,6 +98,8 @@ def measure_gpus(run=subprocess.run) -> tuple[list[tuple[int, int, int, int]] | 
         data = json.loads(result.stdout.strip().splitlines()[-1])
         capacities = [tuple(int(value) for value in item) for item in data["capacities"]] \
             if data["capacities"] is not None else None
+        # So that ensemble_memory_gib needs no CUDA in this process.
+        device_module._fp32_gpus = bool(data.get("fp32", False))
         return capacities, {int(index): str(name) for index, name in data["names"].items()}
     except Exception as error:
         print(f"Warning: could not measure the GPUs in a process of their own ({error}); measuring here",
@@ -117,9 +123,9 @@ def gpu_capacity(
     parts = []
     for index, capacity, free_memory, total_memory in capacities:
         batch = f"batch {gpu_batch_size(capacity)[0]}, " if capacity > 0 else ""
-        arranges = "arrangements, " if capacity > 0 and arrangement_fits(usable_memory(total_memory)) else ""
+        ensembles = "ensemble jobs, " if capacity > 0 and ensemble_fits(usable_memory(total_memory)) else ""
         name = f" ({names[index]})" if names.get(index) else ""
-        parts.append(f"GPU {index}{name}: up to {capacity} job(s), {batch}{arranges}"
+        parts.append(f"GPU {index}{name}: up to {capacity} job(s), {batch}{ensembles}"
                      f"{total_memory / 1024**3:.2f} GiB, {free_memory / 1024**3:.2f} GiB free now")
     summary = ", ".join(parts)
     return len(device_capacities), total_capacity, summary
@@ -142,13 +148,13 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None, names: dict[
         places, limited_by = gpu_jobs, None
         if settings.worker.max_concurrency and settings.worker.max_concurrency < places:
             places, limited_by = settings.worker.max_concurrency, "WORKER_MAX_CONCURRENCY"
-        arrangement = any(
-            capacity > 0 and arrangement_fits(usable_memory(total_memory)) for _, capacity, _, total_memory in capacities
+        ensemble = any(
+            capacity > 0 and ensemble_fits(usable_memory(total_memory)) for _, capacity, _, total_memory in capacities
         )
-        if settings.worker.arrangement and not arrangement:
-            warnings += ("WORKER_ARRANGEMENT is on, but no GPU has room for arrangements "
-                         f"(WORKER_ARRANGEMENT_MEMORY_GIB={settings.worker.arrangement_memory_gib:g} "
-                         "beside the reserves); arrangement jobs go to other workers or RunPod",)
+        if settings.worker.ensemble and not ensemble:
+            warnings += ("WORKER_ENSEMBLE is on, but no GPU has room for ensemble jobs "
+                         f"(WORKER_ENSEMBLE_MEMORY_GIB={ensemble_memory_gib():g} GiB "
+                         "beside the reserves); ensemble jobs go to other workers or RunPod",)
         return WorkerPlan(
             processes=1,
             # The others finish jobs past their model step (app.worker.places).
@@ -157,7 +163,7 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None, names: dict[
             summary=f"{device_count} GPU(s), up to {gpu_jobs} job(s) by total VRAM, as other programs "
                     f"leave room ({gpu_summary})",
             warnings=warnings,
-            arrangement=arrangement,
+            ensemble=ensemble,
             places=places,
             measured=measured_text(capacities),
             hardware={
@@ -165,7 +171,10 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None, names: dict[
                 "places": places,
                 # Why fewer places than jobs fit in VRAM, if so.
                 "limited_by": limited_by,
-                "arrangements": arrangement,
+                # Whether it takes ensemble jobs; "arrangements", its name from
+                # when they were piano arrangements, so nodes and hubs of
+                # either version read each other.
+                "arrangements": ensemble,
                 "gpus": [
                     {
                         "index": index,
@@ -175,7 +184,7 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None, names: dict[
                         "free_mib": round(free_memory / MiB),
                         # The most that fit, when no other program uses the GPU.
                         "jobs": capacity,
-                        "arrangements": capacity > 0 and arrangement_fits(usable_memory(total_memory)),
+                        "arrangements": capacity > 0 and ensemble_fits(usable_memory(total_memory)),
                     }
                     for index, capacity, free_memory, total_memory in capacities
                 ],
@@ -187,14 +196,14 @@ def plan_worker(capacities: list[tuple[int, int, int, int]] | None, names: dict[
         threads=cpu_batch_size(),
         cpu_threads=cpu_thread_count(),
         summary=f"{physical_cpu_count()} CPU(s), no CUDA GPU detected, batch {cpu_batch_size()}",
-        arrangement=settings.worker.arrangement,
+        ensemble=settings.worker.ensemble,
         # On the CPU, the last steps compete with the model for the same
         # cores: a thread per place.
         places=cpu_batch_size(),
         hardware={
             "kind": "cpu",
             "places": cpu_batch_size(),
-            "arrangements": settings.worker.arrangement,
+            "arrangements": settings.worker.ensemble,
             "name": cpu_model_name(),
             "cores": physical_cpu_count(),
             "threads": cpu_thread_count(),
@@ -267,7 +276,7 @@ def main(arguments: list[str] | None = None) -> None:
     else:
         ensure_valid("worker")
         plan = plan_worker(*measure_gpus())
-        queues = [LOCAL_QUEUE, ARRANGEMENT_QUEUE] if plan.arrangement else [LOCAL_QUEUE]
+        queues = [LOCAL_QUEUE, ENSEMBLE_QUEUE] if plan.ensemble else [LOCAL_QUEUE]
 
     # Read by app.worker.tasks in each Dramatiq process, which reports its errors.
     os.environ[SERVICE_ENVIRONMENT] = "remote-worker" if role == "remote" else "worker"

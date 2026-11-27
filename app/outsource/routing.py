@@ -49,7 +49,7 @@ def publish_heartbeat(
     capacity: int,
     average_job_seconds: float | None,
     worker: str | None = None,
-    arrangement: bool = False,
+    ensemble: bool = False,
     transcription: bool = True,
     node: str = "",
     running: int = 0,
@@ -58,8 +58,10 @@ def publish_heartbeat(
     gpu: bool = False,
 ) -> None:
     """Called periodically by each GPU worker. Expires if the worker stops.
-    arrangement and transcription: whether it consumes the arrangement
-    queue, and the local one, which a cluster switch can turn off. node,
+    ensemble and transcription: whether it consumes the ensemble queue, and
+    the local one (piano jobs), which a cluster switch can turn off. The
+    heartbeat calls the first "arrangement", its name from when ensemble jobs
+    were piano arrangements, so workers of either version read each other. node,
     running, utilization, free_mib, and gpu: its device, the jobs it runs,
     and how busy the device is, for placing jobs across a home cluster."""
     worker = worker or worker_id()
@@ -70,7 +72,7 @@ def publish_heartbeat(
             mapping={
                 "capacity": capacity,
                 "average_job_seconds": average_job_seconds or "",
-                "arrangement": "1" if arrangement else "0",
+                "arrangement": "1" if ensemble else "0",
                 "transcription": "1" if transcription else "0",
                 "node": node,
                 "running": running,
@@ -125,7 +127,7 @@ def local_workers(redis: Redis) -> list[dict]:
             "id": worker,
             "capacity": capacity,
             "average_job_seconds": average,
-            "arrangement": heartbeat.get("arrangement") == "1",
+            "ensemble": heartbeat.get("arrangement") == "1",
             # Missing from workers of before cluster switches: they transcribe.
             "transcription": heartbeat.get("transcription", "1") == "1",
             "node": heartbeat.get("node") or "",
@@ -145,12 +147,12 @@ def _number(value, kind):
         return None
 
 
-def local_capacity(redis: Redis, arrangement: bool = False) -> tuple[int, float]:
-    """(job capacity, average job seconds) of the local workers that
-    transcribe, together, or with arrangement of those that arrange.
+def local_capacity(redis: Redis, ensemble: bool = False) -> tuple[int, float]:
+    """(job capacity, average job seconds) of the local workers that take
+    piano jobs, together, or with ensemble of those that take ensemble jobs.
     Capacity is 0 without a heartbeat. The average weighs each worker by its
     capacity, because it runs that share of the jobs."""
-    workers = [worker for worker in local_workers(redis) if worker["arrangement" if arrangement else "transcription"]]
+    workers = [worker for worker in local_workers(redis) if worker["ensemble" if ensemble else "transcription"]]
     capacity = sum(worker["capacity"] for worker in workers)
     timed = [worker for worker in workers if worker["average_job_seconds"] and worker["capacity"] > 0]
     weight = sum(worker["capacity"] for worker in timed)
@@ -159,11 +161,11 @@ def local_capacity(redis: Redis, arrangement: bool = False) -> tuple[int, float]
     return capacity, sum(worker["average_job_seconds"] * worker["capacity"] for worker in timed) / weight
 
 
-def estimated_local_wait(redis: Redis, arrangement: bool = False) -> float:
-    """Seconds a new local job would wait before it starts; with arrangement,
-    on the workers that arrange, which share their capacity with
-    transcriptions."""
-    capacity, average = local_capacity(redis, arrangement)
+def estimated_local_wait(redis: Redis, ensemble: bool = False) -> float:
+    """Seconds a new local job would wait before it starts; with ensemble,
+    on the workers that take ensemble jobs, which share their capacity with
+    piano jobs."""
+    capacity, average = local_capacity(redis, ensemble)
     if capacity < 1:
         return math.inf
     active = redis.scard(ACTIVE_KEYS["local"])
@@ -206,15 +208,15 @@ def reserve_remote_slot(redis: Redis, job_id: str) -> bool:
             continue
 
 
-def arrangement_workers(redis: Redis) -> tuple[int, int]:
-    """(live local workers, those of them that arrange)."""
+def ensemble_workers(redis: Redis) -> tuple[int, int]:
+    """(live local workers, those of them that take ensemble jobs)."""
     workers = local_workers(redis)
-    return len(workers), sum(1 for worker in workers if worker["arrangement"])
+    return len(workers), sum(1 for worker in workers if worker["ensemble"])
 
 
-def choose_backend(redis: Redis, job_id: str, arrangement: bool = False, outsource: bool = True) -> Backend:
+def choose_backend(redis: Redis, job_id: str, ensemble: bool = False, outsource: bool = True) -> Backend:
     """Pick the backend for a newly queued job and count it as active there.
-    An arrangement goes remote when no live local worker arranges, as when
+    An ensemble job goes remote when no live local worker takes them, as when
     the local wait is too long. outsource False keeps it local whatever the
     mode, for heavy use of an unlimited plan."""
     if not outsource:
@@ -227,7 +229,7 @@ def choose_backend(redis: Redis, job_id: str, arrangement: bool = False, outsour
             return "remote"
         redis.sadd(ACTIVE_KEYS["local"], job_id)
         return "local"
-    if outsourcing_enabled() and estimated_local_wait(redis, arrangement) > settings.outsource.local_first_max_wait:
+    if outsourcing_enabled() and estimated_local_wait(redis, ensemble) > settings.outsource.local_first_max_wait:
         if reserve_remote_slot(redis, job_id):
             return "remote"
     redis.sadd(ACTIVE_KEYS["local"], job_id)

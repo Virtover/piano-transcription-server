@@ -410,13 +410,23 @@ class _Tracker:
         self.model = load_model(str(CHECKPOINT), self.device)
         self.spectrogram = _Spectrogram()
 
-    def __call__(self, audio, sample_rate: int):
-        """The beat and downbeat probability of each frame, FPS a second."""
+    def __call__(self, audio, sample_rate: int, work_dir: Path | None = None):
+        """The beat and downbeat probability of each frame, FPS a second.
+        audio is an array, or a reader of app.transcription.stream_audio (a
+        long recording read from disk), which is resampled into a file in
+        work_dir, so memory does not grow with its length."""
         import numpy as np
         import soxr
-        import torch
-        from beat_this.inference import aggregate_prediction, split_piece
 
+        from app.transcription import stream_audio
+
+        if hasattr(audio, "read"):
+            # Too short for MIN_BEATS beats.
+            if len(audio) < MIN_BEATS * MIN_BEAT_SECONDS * audio.rate:
+                return np.zeros(0), np.zeros(0)
+            with stream_audio.scratch(work_dir, "beats-") as directory:
+                signal = stream_audio.resample(audio, SPECTROGRAM_RATE, Path(directory) / "beats.f32", quality="HQ")
+                return self._predict(signal)
         signal = np.asarray(audio, dtype=np.float32)
         if signal.ndim == 2:
             signal = signal.mean(axis=1)
@@ -425,8 +435,14 @@ class _Tracker:
             return np.zeros(0), np.zeros(0)
         if sample_rate != SPECTROGRAM_RATE:
             signal = soxr.resample(signal, sample_rate, SPECTROGRAM_RATE)
+        return self._predict(np.ascontiguousarray(signal, dtype=np.float32))
+
+    def _predict(self, signal):
+        import torch
+        from beat_this.inference import aggregate_prediction, split_piece
+
         with torch.inference_mode():
-            spectrogram = self.spectrogram(np.ascontiguousarray(signal, dtype=np.float32))
+            spectrogram = self.spectrogram(signal)
             chunks, starts = split_piece(spectrogram, CHUNK_FRAMES, border_size=BORDER_FRAMES, avoid_short_end=True)
             predictions = []
             for chunk in chunks:
@@ -457,12 +473,13 @@ def preload_tracker(device: str) -> None:
             _tracker(device)
 
 
-def detect_beats(audio, sample_rate: int, device: str) -> tuple[list[float], list[float]]:
-    """Beat and downbeat times in seconds of audio (samples, or samples x channels)."""
+def detect_beats(audio, sample_rate: int, device: str, work_dir: Path | None = None) -> tuple[list[float], list[float]]:
+    """Beat and downbeat times in seconds of audio (samples, or samples x
+    channels, or a stream_audio reader, resampled into work_dir)."""
     # One at a time: its GPU memory is reserved once, and on CPU it uses
     # every thread.
     with _lock:
-        beat, downbeat = _tracker(device)(audio, sample_rate)
+        beat, downbeat = _tracker(device)(audio, sample_rate, work_dir)
     beats, downbeats, contrast = beat_decoder.decode(beat, downbeat, MIN_BEAT_SECONDS, MAX_BEAT_SECONDS)
     if beats and not downbeats:
         logger.info(
@@ -480,13 +497,13 @@ def add_tempo_map(midi_path: Path, audio, sample_rate: int, device: str = "cpu")
     try:
         started = time.monotonic()
         try:
-            beats, downbeats = detect_beats(audio, sample_rate, device)
+            beats, downbeats = detect_beats(audio, sample_rate, device, midi_path.parent)
         except Exception as error:
             if device == "cpu" or "out of memory" not in str(error).lower():
                 raise
             # Another program took the memory reserved for it.
             logger.warning("%s ran out of memory for beat tracking; tracking on CPU", device)
-            beats, downbeats = detect_beats(audio, sample_rate, "cpu")
+            beats, downbeats = detect_beats(audio, sample_rate, "cpu", midi_path.parent)
         detected = time.monotonic()
         tempo_map = build_tempo_map(beats, downbeats)
         if tempo_map is None:

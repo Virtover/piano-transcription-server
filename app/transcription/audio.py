@@ -61,6 +61,29 @@ SITE_WAIT = 60 * 60
 class DownloadedAudio:
     path: Path
     metadata: dict[str, Any]
+    # The sample rate of the source before its conversion to 44.1 kHz, for
+    # models that read high frequencies (the ensemble drums need >= 40 kHz);
+    # None when it could not be read.
+    source_rate: int | None = None
+
+
+def source_sample_rate(path: Path, upload: bool = False) -> int | None:
+    """The sample rate of path's first audio stream, or None. An upload is
+    read only by the demuxers of the formats uploads may have."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                *(UPLOAD_INPUT_OPTIONS if upload else ["-protocol_whitelist", "file"]),
+                "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "csv=p=0",
+                "--", str(path),
+            ],
+            capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+        )
+        rate = int(result.stdout.strip().split(",")[0].split()[0])
+    except (subprocess.SubprocessError, OSError, ValueError, IndexError):
+        return None
+    return rate if 0 < rate <= 1_000_000 else None
 
 
 def ffmpeg_thread_count() -> int:
@@ -135,6 +158,7 @@ def download_audio(
             "yt-dlp did not produce an audio file"
         )
 
+    source_rate = source_sample_rate(downloaded_path)
     wav_path = convert_to_wav(
         downloaded_path,
         output_dir,
@@ -148,6 +172,7 @@ def download_audio(
     return DownloadedAudio(
         path=wav_path,
         metadata=video_metadata(info, source_url),
+        source_rate=source_rate,
     )
 
 
@@ -285,6 +310,7 @@ def prepare_upload(
             "title": title or "Uploaded file",
             "duration": duration,
         },
+        source_rate=source_sample_rate(upload_path, upload=True),
     )
 
 

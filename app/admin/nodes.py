@@ -178,7 +178,8 @@ def hardware_lines(device: dict) -> list[str]:
     if not hardware:
         return []
     places = hardware.get("places") or 0
-    shared = "transcriptions and arrangements share them" if hardware.get("arrangements") else "transcriptions only"
+    # "arrangements": whether it takes ensemble jobs (app.worker.launcher).
+    shared = "piano and ensemble jobs share them" if hardware.get("arrangements") else "piano jobs only"
     limit = f" (fewer than fit in VRAM: {hardware['limited_by']})" if hardware.get("limited_by") else ""
     lines = [f"{places} place(s) at once{limit}; {shared}"]
     if hardware.get("kind") == "gpu":
@@ -186,7 +187,7 @@ def hardware_lines(device: dict) -> list[str]:
             name = gpu.get("name") or "name unknown"
             lines.append(f"GPU {gpu.get('index')}: {name}, {gib(gpu.get('vram_mib'))} VRAM, "
                          f"{gib(gpu.get('free_mib'))} free at start, up to {gpu.get('jobs')} job(s)"
-                         + (", arrangements" if gpu.get("arrangements") else ""))
+                         + (", ensemble jobs" if gpu.get("arrangements") else ""))
     else:
         cpu = hardware.get("name") or "name unknown"
         ram = f", {gib(hardware.get('ram_mib'))} RAM" if hardware.get("ram_mib") else ""

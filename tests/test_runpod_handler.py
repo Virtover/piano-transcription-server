@@ -25,13 +25,13 @@ def handler():
     # Loaded from its file: the directory name `runpod` is also the SDK's package name.
     spec = importlib.util.spec_from_file_location("runpod_handler", HANDLER_PATH)
     module = importlib.util.module_from_spec(spec)
-    # These tests are about transcriptions; the arrangement weights are not in every test image.
-    arrangement = settings.worker.arrangement
-    settings.worker.arrangement = False
+    # These tests are about transcriptions; the ensemble weights are not in every test image.
+    ensemble = settings.worker.ensemble
+    settings.worker.ensemble = False
     try:
         spec.loader.exec_module(module)
     finally:
-        settings.worker.arrangement = arrangement
+        settings.worker.ensemble = ensemble
     return module
 
 
@@ -101,3 +101,29 @@ def test_invalid_requests_fail_without_affecting_others(handler, requests_in):
     assert results[1] == {"error": "The audio URL is not on the configured storage host"}
     assert results[2] == {"error": "The audio file cannot be decoded"}
     assert requests_in == [1]
+
+
+def test_an_ensemble_request_is_refused_where_ensemble_jobs_are_off(handler, requests_in):
+    # The fixture loads the handler with WORKER_ENSEMBLE off, as it has no ensemble weights.
+    assert handler.ENSEMBLE_DEVICE is None
+    ensemble = job(job_id="ensemble")
+    ensemble["input"].update(mode="ensemble", source_rate=48000)
+    old_word = job(job_id="old")
+    old_word["input"].update(mode="arrangement", style="level1")
+
+    results = asyncio.run(run_all(handler, [ensemble, old_word]))
+
+    assert results == [{"error": "Ensemble jobs are off on this endpoint: set WORKER_ENSEMBLE=true"}] * 2
+    assert requests_in == []
+
+
+@pytest.mark.parametrize("fields", [{"mode": "remix"}, {"mode": "ensemble", "source_rate": 0},
+                                    {"mode": "ensemble", "source_rate": True}])
+def test_a_request_with_a_wrong_mode_or_rate_is_refused(handler, requests_in, fields):
+    wrong = job()
+    wrong["input"].update(fields)
+
+    [result] = asyncio.run(run_all(handler, [wrong]))
+
+    assert set(result) == {"error"} and ("mode must be" in result["error"] or "source_rate" in result["error"]
+                                         or "Ensemble jobs are off" in result["error"])

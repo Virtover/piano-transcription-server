@@ -135,7 +135,7 @@ class Billing:
                     CREATE INDEX IF NOT EXISTS minute_ledger_at_index ON minute_ledger (at);
                     CREATE INDEX IF NOT EXISTS job_diagnostics_user_index ON job_diagnostics (user_id);
                     CREATE INDEX IF NOT EXISTS job_diagnostics_created_index ON job_diagnostics (created_at);
-                    -- Added with piano arrangements; NULL in older rows means a transcription.
+                    -- Added with piano arrangements, now ensemble jobs (stored as 'arrangement'); NULL in older rows means a piano job.
                     ALTER TABLE job_diagnostics ADD COLUMN IF NOT EXISTS mode TEXT;
                     -- Added with monthly minutes. A reservation holds monthly_minutes of
                     -- its cost from the monthly balance; monthly_ended is 1 once their

@@ -92,13 +92,13 @@ def test_the_job_stays_when_no_other_device_is_better(placing, monkeypatch, opti
     assert not tasks.pass_job("job", "local")
 
 
-def test_an_arrangement_goes_only_to_a_device_that_arranges(placing, monkeypatch):
+def test_an_ensemble_job_goes_only_to_a_device_that_takes_ensembles(placing, monkeypatch):
     here(monkeypatch, utilization=100.0)
-    tasks.redis.hset(tasks.job_key("job"), "mode", tasks.ARRANGEMENT)
-    other(arrangement=False)
+    tasks.redis.hset(tasks.job_key("job"), "mode", tasks.ENSEMBLE)
+    other(ensemble=False)
     assert not tasks.pass_job("job", "local")
 
-    other(node="laptop", arrangement=True)
+    other(node="laptop", ensemble=True)
     assert tasks.pass_job("job", "local")
 
 

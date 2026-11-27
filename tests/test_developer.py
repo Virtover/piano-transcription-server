@@ -180,3 +180,24 @@ def test_an_old_database_gets_the_developer_column(tmp_path):
     billing = Billing(str(path))
 
     assert billing.read("SELECT developer FROM users WHERE user_id = 'old'")[0]["developer"] == 0
+
+
+def test_the_server_state_says_how_many_workers_take_ensemble_jobs(billed):
+    from app.outsource import routing
+    from app.worker import tasks
+
+    client, settings, _ = billed
+    settings.worker.ensemble = True
+    routing.publish_heartbeat(tasks.redis, 2, 30.0, "a", ensemble=True)
+    routing.publish_heartbeat(tasks.redis, 2, 30.0, "b")
+
+    state = client.get("/api/developer/server", headers=bearer("dev")).json()
+
+    assert state["ensemble"] is True
+    assert state["workers"]["ensemble"] == 1 and state["workers"]["count"] == 2
+    # The names of the apps from before ensemble jobs, kept beside the new ones.
+    assert state["arrangement"] is True and state["workers"]["arranging"] == 1
+
+    settings.worker.ensemble = False
+    state = client.get("/api/developer/server", headers=bearer("dev")).json()
+    assert state["ensemble"] is False and state["arrangement"] is False

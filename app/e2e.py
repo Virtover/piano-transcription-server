@@ -4,7 +4,7 @@ container, through the admin commands:
 
     python scripts/admin.py e2e                          # every case, placed as the server places jobs
     python scripts/admin.py e2e --backend remote         # on RunPod
-    python scripts/admin.py e2e --case clip --mode arrangement
+    python scripts/admin.py e2e --case clip --mode ensemble
     python scripts/kube.py admin e2e                     # the same on Kubernetes
 
 Each case uploads a generated test file, as an upload would be stored, and
@@ -42,9 +42,9 @@ CASES = {
     "clip": (10.0, 20.0),
     "clip-to-end": (20.0, None),
 }
-MODES = ("transcription", "arrangement")
-# The model may miss notes at the very start of the audio, and arrangements
-# rewrite the music, so the checks leave room for both.
+MODES = ("piano", "ensemble")
+# The model may miss notes at the very start of the audio, so the checks
+# leave room for it.
 FOUND_SHARE = 0.5
 ONSET_SLACK = 0.25
 
@@ -90,8 +90,9 @@ def _varlen(data: bytes, index: int) -> tuple[int, int]:
 
 
 def midi_notes(data: bytes) -> list[tuple[float, int]]:
-    """(onset in seconds, pitch) of every note of a standard MIDI file,
-    with the tempo changes of any track."""
+    """(onset in seconds, pitch) of every pitched note of a standard MIDI
+    file, with the tempo changes of any track. Notes on channel 10, drums,
+    are left out: their keys are drums, not pitches."""
     if data[:4] != b"MThd":
         raise ValueError("not a MIDI file")
     division = struct.unpack(">H", data[12:14])[0]
@@ -125,7 +126,7 @@ def midi_notes(data: bytes) -> list[tuple[float, int]]:
                 continue
             pitch, velocity = track[position], track[position + 1]
             position += 2
-            if status & 0xF0 == 0x90 and velocity:
+            if status & 0xF0 == 0x90 and velocity and status & 0x0F != 9:
                 events.append((tick, 1, pitch))
     tempo, last, seconds, notes = 500000, 0, 0.0, []
     for tick, kind, value in sorted(events):
@@ -160,26 +161,19 @@ def check(result: Result, part, length: float, notes: list[tuple[float, int]]) -
     counts = Counter(pitch for _, pitch in notes if pitch in PITCHES)
     result.notes = dict(sorted(counts.items()))
     inside, outside = expected_pitches(part)
-    if result.mode == "transcription":
-        for pitch in inside:
-            # The notes of the section's part of the clip, two a second
-            start, end = part if part else (0.0, None)
-            number = PITCHES.index(pitch)
-            covered = min((number + 1) * SECTION, end or SECONDS) - max(number * SECTION, start)
-            wanted = covered * NOTES_PER_SECOND * FOUND_SHARE
-            if counts[pitch] < wanted:
-                result.problems.append(f"only {counts[pitch]} notes of pitch {pitch}, expected at least {wanted:g}")
-        for pitch in outside:
-            if counts[pitch] > 1:
-                result.problems.append(f"{counts[pitch]} notes of pitch {pitch}, which is outside the part")
-    else:
-        # An arrangement rewrites the music: the part's pitches lead, others stay few
-        total = sum(counts.values())
-        if not total or counts.most_common(1)[0][0] not in inside:
-            result.problems.append(f"the leading pitch is not one of the part's {sorted(inside)}")
-        stray = sum(counts[pitch] for pitch in outside)
-        if total and stray > 0.2 * total:
-            result.problems.append(f"{stray} of {total} notes are of pitches outside the part")
+    # Both modes transcribe: piano jobs the piano, ensemble jobs every
+    # instrument, here the one plucked part.
+    for pitch in inside:
+        # The notes of the section's part of the clip, two a second
+        start, end = part if part else (0.0, None)
+        number = PITCHES.index(pitch)
+        covered = min((number + 1) * SECTION, end or SECONDS) - max(number * SECTION, start)
+        wanted = covered * NOTES_PER_SECOND * FOUND_SHARE
+        if counts[pitch] < wanted:
+            result.problems.append(f"only {counts[pitch]} notes of pitch {pitch}, expected at least {wanted:g}")
+    for pitch in outside:
+        if counts[pitch] > 1:
+            result.problems.append(f"{counts[pitch]} notes of pitch {pitch}, which is outside the part")
 
 
 def queue(case: str, mode: str, backend: str) -> tuple[Result, tuple | None, float]:
@@ -202,12 +196,14 @@ def queue(case: str, mode: str, backend: str) -> tuple[Result, tuple | None, flo
         "full_cost": "0", "source": "upload", "title": TITLE, "upload_title": TITLE,
         **(clip.fields() if clip else {}),
     }
-    if mode == "arrangement":
-        fields.update(mode=tasks.ARRANGEMENT, style="level2")
+    if mode == "ensemble":
+        fields.update(mode=tasks.ENSEMBLE, mode_name="ensemble")
+    else:
+        fields.update(mode_name="piano")
     tasks.redis.hset(tasks.job_key(job_id), mapping=fields)
-    arrangement = mode == "arrangement"
+    ensemble = mode == "ensemble"
     if backend == "auto":
-        chosen = routing.choose_backend(tasks.redis, job_id, arrangement)
+        chosen = routing.choose_backend(tasks.redis, job_id, ensemble)
     else:
         chosen = backend
         if chosen == "local":
@@ -266,7 +262,7 @@ def run(args) -> None:
 
     cases = [args.case] if args.case else list(CASES)
     modes = [args.mode] if args.mode else [mode for mode in MODES
-                                         if mode == "transcription" or settings.worker.arrangement]
+                                         if mode == "piano" or settings.worker.ensemble]
     if args.backend == "remote" and not routing.outsourcing_enabled():
         raise AdminError("outsourcing is off on this server (OUTSOURCE_PROVIDER); there is no remote backend")
     deadline = time.time() + args.timeout

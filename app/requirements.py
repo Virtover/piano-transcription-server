@@ -353,12 +353,12 @@ def outsourcing_sections(config) -> list[Section]:
             *(
                 [Requirement(
                     "Environment variable",
-                    "WORKER_ARRANGEMENT unset or true",
-                    "Piano arrangements are on here, and the endpoint only arranges with it (the default); "
-                    "arrangement jobs sent to it fail if it is false.",
+                    "WORKER_ENSEMBLE unset or true",
+                    "Ensemble jobs are on here, and the endpoint only takes them with it (the default); "
+                    "ensemble jobs sent to it fail if it is false.",
                     True,
                 )]
-                if config.worker.arrangement else []
+                if config.worker.ensemble else []
             ),
             Requirement(
                 "Host CUDA version",

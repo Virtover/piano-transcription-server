@@ -39,7 +39,7 @@ from app.worker.tasks import (
     resend_stale_queued,
     settle_node_jobs,
 )
-from app import backups, cluster, job_storage
+from app import backups, cluster, disk, job_storage
 from app.backups import run_backup
 from app.billing import Billing
 from app.leader import Leadership
@@ -355,6 +355,8 @@ def sync_billing_catalog() -> None:
     threading.Thread(target=backup_billing_database, args=(leadership,), daemon=True).start()
     threading.Thread(target=monitor_backup_health, args=(leadership,), daemon=True).start()
     threading.Thread(target=watch_abandoned_jobs, args=(leadership,), daemon=True).start()
+    # On every replica: each may have a data disk of its own.
+    threading.Thread(target=disk.watch, daemon=True).start()
     threading.Thread(target=serve_cluster_nodes, args=(leadership,), daemon=True).start()
     if job_storage.uses_bucket():
         threading.Thread(target=clean_stored_jobs, args=(leadership,), daemon=True).start()

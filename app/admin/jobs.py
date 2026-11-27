@@ -34,7 +34,12 @@ from app.outsource import routing
 from app.worker import tasks
 
 STATUSES = ("queued", "processing", "completed", "failed", "cancelled")
-MODES = ("transcription", "arrangement")
+# The modes as the API names them. Records store a piano job's mode as
+# transcription (or NULL, from before modes) and an ensemble job's as
+# arrangement, their names from when ensemble jobs were piano arrangements;
+# those names are accepted too.
+MODES = ("piano", "ensemble")
+MODE_ALIASES = {"transcription": "piano", "arrangement": "ensemble"}
 # Fields shown by `show` only as a summary: they are long.
 SUMMARISED_FIELDS = {"metadata"}
 
@@ -42,12 +47,13 @@ SUMMARISED_FIELDS = {"metadata"}
 # --- Data ---------------------------------------------------------------------
 
 def with_mode(row: dict) -> dict:
-    """The record with its mode named: rows from before arrangements existed
-    have none, and were transcriptions. An arrangement's style is added while
-    its Redis job still has it, since the record does not keep it."""
-    mode = row.get("mode") or "transcription"
-    row["mode"] = mode
-    row["style"] = tasks.redis.hget(tasks.job_key(row["job_id"]), "style") if mode == "arrangement" else None
+    """The record with its mode named piano or ensemble: rows from before
+    modes existed have none, and were piano jobs. A style, which only piano
+    covers had (the jobs ensemble jobs replaced), is added while the Redis
+    job still has it, since the record does not keep it."""
+    ensemble = row.get("mode") == tasks.ENSEMBLE
+    row["mode"] = "ensemble" if ensemble else "piano"
+    row["style"] = tasks.redis.hget(tasks.job_key(row["job_id"]), "style") if ensemble else None
     return row
 
 
@@ -60,15 +66,16 @@ def list_jobs(
     mode: str | None = None,
 ) -> list[dict]:
     """Diagnostics records, newest first. user is an email address or user
-    ID; since is in seconds; mode is transcription or arrangement."""
+    ID; since is in seconds; mode is piano or ensemble (MODES)."""
     conditions, parameters = [], []
-    if mode == "arrangement":
+    mode = MODE_ALIASES.get(mode, mode) if mode else mode
+    if mode == "ensemble":
         conditions.append("j.mode = ?")
-        parameters.append("arrangement")
+        parameters.append(tasks.ENSEMBLE)
     elif mode:
-        # NULL is a record from before arrangements.
+        # NULL is a record from before modes.
         conditions.append("(j.mode IS NULL OR j.mode <> ?)")
-        parameters.append("arrangement")
+        parameters.append(tasks.ENSEMBLE)
     if status:
         conditions.append("j.status = ?")
         parameters.append(status)
@@ -166,7 +173,7 @@ def requeue_plan(job: str, backend: routing.Backend | None = None) -> dict:
         raise AdminError("The uploaded file was deleted when the job failed; ask the user to upload it again")
     if backend == "remote" and not routing.outsourcing_enabled():
         raise AdminError("Outsourcing is off (OUTSOURCE_PROVIDER=none), so the job cannot run remotely")
-    if fields.get("mode") == tasks.ARRANGEMENT:
+    if fields.get("mode") == tasks.ENSEMBLE:
         # The same check as a new arrangement: otherwise it could wait in a
         # queue no worker consumes, holding its place and reservation.
         from fastapi import HTTPException
@@ -174,7 +181,7 @@ def requeue_plan(job: str, backend: routing.Backend | None = None) -> dict:
         from app.api.routes import transcriptions as transcription_routes
 
         try:
-            transcription_routes.mode_fields("arrangement", tasks.arrangement_style(fields))
+            transcription_routes.mode_fields("arrangement")
         except HTTPException as error:
             raise AdminError(f"The job cannot run again: {refusal_text(error)}") from error
     user_id = fields.get("user_id") or "anonymous"
@@ -251,7 +258,7 @@ def refusal_text(error: Exception) -> str:
 # --- Command line -------------------------------------------------------------
 
 def mode_label(row: dict) -> str:
-    return f"arrangement {row['style']}" if row["style"] else row["mode"]
+    return f"piano cover {row['style']}" if row["style"] else row["mode"]
 
 
 def run_list(args) -> None:

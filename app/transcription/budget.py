@@ -1,9 +1,9 @@
 """The memory one device lends to model steps, shared by every model on it.
 
-Transkun and the arrangement model run in their own batcher threads but on
+Transkun and the ensemble models (dettato) run in their own threads but on
 the same GPU, and each step takes its working memory for a moment: a
-Transkun step jobs x WORKER_MEMORY_PER_JOB_GIB, an arrangement step
-WORKER_ARRANGEMENT_MEMORY_GIB. A step waits until its memory is free instead
+Transkun step jobs x WORKER_MEMORY_PER_JOB_GIB, an ensemble job's step
+WORKER_ENSEMBLE_MEMORY_GIB. A step waits until its memory is free instead
 of running out of it beside the other model's step. Steps are served in
 order of arrival, so a stream of small steps cannot starve a large one.
 

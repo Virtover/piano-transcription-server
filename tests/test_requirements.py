@@ -39,7 +39,7 @@ def test_max_workers_follow_max_concurrency(default_settings):
 
 
 def test_configured_values_replace_placeholders(default_settings):
-    default_settings.worker.arrangement = False
+    default_settings.worker.ensemble = False
     assert requirement(default_settings, "Storage", "Bucket").value == "<set STORAGE_BUCKET>"
 
     default_settings.storage.bucket = "audio"

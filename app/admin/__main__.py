@@ -64,7 +64,7 @@ def parser() -> argparse.ArgumentParser:
     job_commands.add_argument("--failed", action="store_true", help="only failed jobs")
     job_commands.add_argument("--status", choices=jobs.STATUSES)
     job_commands.add_argument("--backend", choices=["local", "remote"])
-    job_commands.add_argument("--mode", choices=jobs.MODES, help="transcriptions or piano arrangements")
+    job_commands.add_argument("--mode", choices=(*jobs.MODES, *jobs.MODE_ALIASES), help="piano or ensemble jobs")
     job_commands.add_argument("--user", help="email address or user ID")
     job_commands.add_argument("--since", help="only jobs created within this time, for example 1d")
     job_commands.add_argument("--limit", type=int, default=30, help="most jobs to list (default: 30)")
@@ -204,7 +204,7 @@ def parser() -> argparse.ArgumentParser:
         "e2e", parents=[reads], help="run real test jobs end to end and check their MIDI; unbilled (docs/testing.md)"
     )
     command.add_argument("--case", choices=sorted(e2e.CASES), help="one case only (default: all)")
-    command.add_argument("--mode", choices=e2e.MODES, help="one mode only (default: both, arrangement when it is on)")
+    command.add_argument("--mode", choices=e2e.MODES, help="one mode only (default: both, ensemble when it is on)")
     command.add_argument("--backend", choices=("auto", "local", "remote"), default="auto",
                          help="where the jobs run: as the server places them (default), its own workers, or RunPod")
     command.add_argument("--timeout", type=float, default=900, help="seconds to wait for all jobs (default: 900)")

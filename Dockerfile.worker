@@ -3,6 +3,49 @@
 # PyTorch's default CUDA 13 build no longer includes them. The base image only
 # sets the driver the container requires; torch brings its own CUDA libraries.
 ARG GPU_BUILD=current
+
+# dettato.cpp for ensemble jobs on the CPU (app/transcription/ensemble/cpu.py):
+# dettato_cpu/server.cpp, built twice, for CPUs with AVX2 and FMA and for any
+# x86-64 CPU, each linked statically, so it runs on the older glibc below.
+# Its source and ggml's are release tarballs checked against their checksums
+# (a tarball GitHub changed would fail here, not build something else), and
+# its weights a GGUF file at a fixed revision.
+FROM ubuntu:24.04 AS dettato-cpp
+COPY build /build
+RUN sh /build/apt-mirrors.sh \
+    && apt-get update \
+    && sh /build/apt_install.sh cmake g++ make python3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+ARG DETTATO_CPP_COMMIT=19d5dc209e66809ca6059f952864db3e775cef2d
+ARG DETTATO_CPP_SHA256=da52338946ce58a1912314e7948abd919d48f66626c524e706b2e7e7dba08634
+ARG GGML_COMMIT=417a024b4fb6bc3116d41af7c067166a039bdf12
+ARG GGML_SHA256=eb2fb2d60331e78de996f4fd3f9cee955cfcab2546b7ad64100444730f39ede7
+ARG DETTATO_GGUF_REVISION=73f622a5173c8c9112d7cf2081a0402d73746fc7
+ARG DETTATO_GGUF_SHA256=73f08bfcad22c401c1e584229f2b49cb8097a9b539cc81fd29dca573d7585480
+RUN mkdir -p /src/dettato.cpp /src/ggml /opt/dettato-cpp/bin \
+    && python3 /build/fetch.py --sha256 "$DETTATO_CPP_SHA256" --out /tmp/dettato-cpp.tar.gz \
+        "https://github.com/hidude562/dettato.cpp/archive/${DETTATO_CPP_COMMIT}.tar.gz" \
+    && python3 /build/fetch.py --sha256 "$GGML_SHA256" --out /tmp/ggml.tar.gz \
+        "https://github.com/ggml-org/ggml/archive/${GGML_COMMIT}.tar.gz" \
+    && tar -xzf /tmp/dettato-cpp.tar.gz -C /src/dettato.cpp --strip-components=1 \
+    && tar -xzf /tmp/ggml.tar.gz -C /src/ggml --strip-components=1 \
+    && rm /tmp/*.tar.gz \
+    && python3 /build/fetch.py --sha256 "$DETTATO_GGUF_SHA256" --out /opt/dettato-cpp/dettato-f16.gguf \
+        "https://huggingface.co/kobimusic/dettato-gguf/resolve/${DETTATO_GGUF_REVISION}/dettato-f16.gguf"
+COPY dettato_cpu /src/dettato_cpu
+RUN set -e; for variant in avx2 generic; do \
+        if [ "$variant" = avx2 ]; then isa=ON; else isa=OFF; fi; \
+        cmake -S /src/dettato_cpu -B /tmp/build-$variant -DCMAKE_BUILD_TYPE=Release \
+            -DDETTATO_CPP_DIR=/src/dettato.cpp -DFETCHCONTENT_SOURCE_DIR_GGML=/src/ggml \
+            -DGGML_NATIVE=OFF -DGGML_AVX=$isa -DGGML_AVX2=$isa -DGGML_FMA=$isa -DGGML_F16C=$isa \
+            -DGGML_AVX512=OFF -DGGML_BMI2=$isa > /tmp/cmake-$variant.log; \
+        cmake --build /tmp/build-$variant --parallel "$(nproc)" --target dettato_server > /tmp/make-$variant.log \
+            || { tail -50 /tmp/make-$variant.log; exit 1; }; \
+        cp /tmp/build-$variant/dettato_server /opt/dettato-cpp/bin/dettato_server-$variant; \
+        rm -rf /tmp/build-$variant; \
+    done \
+    && /opt/dettato-cpp/bin/dettato_server-generic 2>&1 | grep -q usage
+
 FROM nvidia/cuda:12.8.1-base-ubuntu22.04 AS base-current
 FROM nvidia/cuda:12.6.3-base-ubuntu22.04 AS base-legacy
 FROM base-${GPU_BUILD}
@@ -20,7 +63,7 @@ COPY build /build
 
 RUN sh /build/apt-mirrors.sh \
     && apt-get update \
-    && apt-get install -y --no-install-recommends \
+    && sh /build/apt_install.sh \
         python3 \
         python3-dev \
         python3-pip \
@@ -70,14 +113,15 @@ RUN mkdir -p /opt/beat-this \
         "$BEAT_THIS_CHECKPOINT_URL" "$BEAT_THIS_CHECKPOINT_MIRROR" "$BEAT_THIS_CHECKPOINT_ARCHIVE" \
     && python3 -c "from beat_this.inference import load_model; load_model('/opt/beat-this/final0.ckpt')"
 
-# AMT-APC weights for piano arrangements (app/transcription/arrangement.py),
-# checked against their checksum, and loaded as plain tensors, never as code.
-ARG AMT_APC_WEIGHTS_URL=https://github.com/310hz/amt-apc/releases/download/beta/apc.pth
-ARG AMT_APC_WEIGHTS_SHA256=78ebe9a28d65ec3849132adef6c38de599692abed0ae00191753a5032554fe7b
-RUN mkdir -p /opt/amt-apc \
-    && python3 /build/fetch.py --sha256 "$AMT_APC_WEIGHTS_SHA256" --out /opt/amt-apc/apc.pth \
-        "$AMT_APC_WEIGHTS_URL" \
-    && python3 -c "import torch; torch.load('/opt/amt-apc/apc.pth', map_location='cpu', weights_only=True)"
+# dettato's weights for ensemble jobs (app/transcription/arrangement.py), each
+# file checked against its checksum (build/dettato-weights.txt); safetensors
+# hold tensors only, never code. dettato.cpp and its weights for the CPU.
+RUN sh /build/fetch_dettato.sh /opt/dettato
+COPY --from=dettato-cpp /opt/dettato-cpp /opt/dettato-cpp
+# Lets PyTorch's GPU memory pool grow and shrink in place: the models' steps
+# need blocks of many sizes, and without it about 0.2-0.6 GiB more VRAM is
+# reserved than used (measured on an ensemble job).
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # The worker runs untrusted media through yt-dlp and ffmpeg, so not as root.
 # New volumes mounted at /data and /billing take the ownership below; see

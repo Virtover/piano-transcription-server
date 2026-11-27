@@ -64,8 +64,8 @@ def cpu_batch_size() -> int:
 
     available_memory = psutil.virtual_memory().available
     worker = settings.worker
-    # Any thread may run an arrangement when they are on.
-    per_job = max(worker.cpu_memory_per_job_gib, worker.cpu_arrangement_memory_gib) if worker.arrangement \
+    # Any thread may run an ensemble job when they are on.
+    per_job = max(worker.cpu_memory_per_job_gib, worker.cpu_ensemble_memory_gib) if worker.ensemble \
         else worker.cpu_memory_per_job_gib
     memory_limit = int(
         max(0, available_memory - worker.cpu_reserve_gib * 1024**3)
@@ -185,7 +185,7 @@ def device_free_memory(
 def gpu_budget_gib(free_memory: float, config=None) -> float:
     """GiB of free_memory bytes of VRAM left for model steps, after what is
     loaded once (WORKER_GPU_RESERVE_GIB) and the beat tracker of the tempo
-    map when it is on. Transcription jobs and arrangement steps share it."""
+    map when it is on. Piano jobs and ensemble steps share it."""
     worker = (config or settings).worker
     reserved = gpu_reserve_gib(worker) + (TEMPO_MAP_MEMORY_GIB if worker.tempo_map else 0)
     return max(0.0, free_memory / 1024**3 - reserved)
@@ -210,11 +210,43 @@ def most_jobs(total_memory: float, config=None) -> int:
     return job_capacity(usable_memory(total_memory), config)
 
 
-def arrangement_fits(free_memory: float, config=None) -> bool:
-    """Whether a GPU with free_memory bytes free takes arrangement jobs: the
-    feature is on and one arrangement step fits in its budget."""
+# An ensemble job on a GPU without bfloat16 (compute
+# capability below 8.0, such as the GTX 10 series) runs in float32: measured
+# 1.22 times the VRAM of bfloat16 (app/transcription/dettato/precision.py).
+FP32_ENSEMBLE_FACTOR = 1.25
+_fp32_gpus: bool | None = None
+
+
+def fp32_gpus() -> bool:
+    """Whether a GPU of this process runs the ensemble models in float32.
+    False without torch or CUDA (the API, the CPU)."""
+    global _fp32_gpus
+    if _fp32_gpus is None:
+        try:
+            import torch
+
+            _fp32_gpus = bool(
+                not settings.worker.enforce_cpu
+                and torch.cuda.is_available()
+                and any(torch.cuda.get_device_capability(i) < (8, 0) for i in range(torch.cuda.device_count()))
+            )
+        except (ImportError, RuntimeError):
+            _fp32_gpus = False
+    return _fp32_gpus
+
+
+def ensemble_memory_gib(config=None) -> float:
+    """The VRAM one ensemble job holds on this process's GPUs:
+    WORKER_ENSEMBLE_MEMORY_GIB, more where they run in float32."""
     worker = (config or settings).worker
-    return worker.arrangement and gpu_budget_gib(free_memory, config) + 1e-9 >= worker.arrangement_memory_gib
+    return worker.ensemble_memory_gib * (FP32_ENSEMBLE_FACTOR if fp32_gpus() else 1.0)
+
+
+def ensemble_fits(free_memory: float, config=None) -> bool:
+    """Whether a GPU with free_memory bytes free takes ensemble jobs: the
+    feature is on and one ensemble job fits in its budget."""
+    worker = (config or settings).worker
+    return worker.ensemble and gpu_budget_gib(free_memory, config) + 1e-9 >= ensemble_memory_gib(config)
 
 
 def cpu_budget_gib() -> float:

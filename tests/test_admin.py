@@ -1014,132 +1014,155 @@ def test_an_unreachable_service_is_reported_without_a_traceback(billed, capsys, 
         main(["--debug", "limits"])
 
 
-# --- piano arrangements ---------------------------------------------------------
+# --- ensemble jobs --------------------------------------------------------------
 
 @pytest.fixture
-def arranging(billed, monkeypatch):
+def ensembling(billed, monkeypatch):
     client, settings, billing = billed
-    settings.worker.arrangement = True
-    monkeypatch.setattr(tasks.arrange_job, "send", lambda *args, **kwargs: None)
+    settings.worker.ensemble = True
+    monkeypatch.setattr(tasks.ensemble_job, "send", lambda *args, **kwargs: None)
     return client, settings, billing
 
 
-def submit_arrangement(client, style="level3", token="user"):
+def submit_ensemble(client, mode="ensemble", token="user"):
     response = client.post(
         "/api/transcriptions", headers=auth(token),
-        json={"source_url": "https://example.com/video", "mode": "arrangement", "style": style},
+        json={"source_url": "https://example.com/video", "mode": mode},
     )
     assert response.status_code == 202
     return response.json()["job_id"]
 
 
-def test_jobs_show_their_mode_and_filter_by_it(arranging, capsys):
-    client, _, billing = arranging
+def test_jobs_show_their_mode_and_filter_by_it(ensembling, capsys):
+    client, _, billing = ensembling
     plain = submit(client)
-    arranged = submit_arrangement(client)
-    # A record from before arrangements existed has no mode.
+    ensemble = submit_ensemble(client)
+    # A record from before modes existed has no mode.
     with billing._connect() as connection:
         connection.execute("UPDATE job_diagnostics SET mode = NULL WHERE job_id = ?", (plain,))
 
     _, output = admin(capsys, "jobs")
-    assert "arrangement level3" in output and "transcription" in output
+    assert "ensemble" in output and "piano" in output and "piano cover" not in output
 
-    _, output = admin(capsys, "jobs", "--mode", "arrangement")
-    assert arranged[:8] in output and plain[:8] not in output
+    for word in ("ensemble", "arrangement"):
+        _, output = admin(capsys, "jobs", "--mode", word)
+        assert ensemble[:8] in output and plain[:8] not in output
 
-    _, output = admin(capsys, "jobs", "--mode", "transcription")
-    assert plain[:8] in output and arranged[:8] not in output
+    for word in ("piano", "transcription"):
+        _, output = admin(capsys, "jobs", "--mode", word)
+        assert plain[:8] in output and ensemble[:8] not in output
 
 
-def test_old_records_without_a_mode_are_transcriptions(arranging):
+def test_old_records_without_a_mode_are_piano_jobs(ensembling):
     from app.admin import jobs
 
-    client, _, billing = arranging
+    client, _, billing = ensembling
     plain = submit(client)
-    arranged = submit_arrangement(client)
+    ensemble = submit_ensemble(client)
     with billing._connect() as connection:
         connection.execute("UPDATE job_diagnostics SET mode = NULL")
 
-    assert [row["mode"] for row in jobs.list_jobs(mode="transcription")] == ["transcription", "transcription"]
+    assert [row["mode"] for row in jobs.list_jobs(mode="piano")] == ["piano", "piano"]
+    assert jobs.list_jobs(mode="ensemble") == []
     assert jobs.list_jobs(mode="arrangement") == []
     rows = {row["job_id"]: row for row in jobs.list_jobs()}
-    assert (rows[plain]["mode"], rows[plain]["style"]) == ("transcription", None)
-    assert rows[arranged]["mode"] == "transcription"
-    assert jobs.job_details(plain)["record"]["mode"] == "transcription"
+    assert (rows[plain]["mode"], rows[plain]["style"]) == ("piano", None)
+    assert rows[ensemble]["mode"] == "piano"
+    assert jobs.job_details(plain)["record"]["mode"] == "piano"
 
 
-def test_the_style_is_shown_while_redis_has_the_job(arranging):
+def test_an_ensemble_job_has_no_style(ensembling):
     from app.admin import jobs
 
-    client, _, _ = arranging
-    job_id = submit_arrangement(client, "level1")
+    client, _, _ = ensembling
+    job_id = submit_ensemble(client, "arrangement")
 
-    [row] = jobs.list_jobs(mode="arrangement")
-    assert (row["mode"], row["style"]) == ("arrangement", "level1")
+    [row] = jobs.list_jobs(mode="ensemble")
+    assert (row["mode"], row["style"]) == ("ensemble", None)
     tasks.redis.delete(tasks.job_key(job_id))
-    [row] = jobs.list_jobs(mode="arrangement")
-    assert (row["mode"], row["style"]) == ("arrangement", None)
-    assert jobs.job_details(job_id)["record"]["mode"] == "arrangement"
+    [row] = jobs.list_jobs(mode="ensemble")
+    assert (row["mode"], row["style"]) == ("ensemble", None)
+    assert jobs.job_details(job_id)["record"]["mode"] == "ensemble"
 
 
-def test_job_show_and_user_show_the_mode(arranging, capsys):
-    client, _, _ = arranging
-    job_id = submit_arrangement(client, "level1")
+def test_an_old_job_with_a_style_in_redis_shows_as_a_piano_cover(ensembling, capsys):
+    from app.admin import jobs
+
+    client, _, _ = ensembling
+    job_id = submit_ensemble(client)
+    # What a job queued before ensemble jobs replaced piano covers has.
+    tasks.redis.hset(tasks.job_key(job_id), mapping={"mode": "arrangement", "style": "level1"})
+
+    [row] = jobs.list_jobs(mode="ensemble")
+    assert (row["mode"], row["style"]) == ("ensemble", "level1")
+    assert jobs.mode_label(row) == "piano cover level1"
+    _, output = admin(capsys, "jobs")
+    assert "piano cover level1" in output
+    # Once Redis forgot the job, the record keeps no style.
+    tasks.redis.delete(tasks.job_key(job_id))
+    [row] = jobs.list_jobs(mode="ensemble")
+    assert jobs.mode_label(row) == "ensemble"
+
+
+def test_job_show_and_user_show_the_mode(ensembling, capsys):
+    client, _, _ = ensembling
+    job_id = submit_ensemble(client)
 
     _, output = admin(capsys, "jobs", "show", job_id[:8])
-    assert "mode: arrangement" in output and "style: level1" in output
+    assert "mode: ensemble" in output and "style" not in output
 
     _, output = admin(capsys, "user", "user@example.com")
-    assert "arrangement level1" in output
+    assert "ensemble" in output
 
 
-def test_jobs_mode_must_be_known(arranging, capsys):
+def test_jobs_mode_must_be_known(ensembling, capsys):
     with pytest.raises(SystemExit):
         main(["jobs", "--mode", "remix"])
     capsys.readouterr()
 
 
-def test_the_mode_filter_does_not_take_sql(arranging):
+def test_the_mode_filter_does_not_take_sql(ensembling):
     from app.admin import jobs
 
-    client, _, _ = arranging
-    submit_arrangement(client)
+    client, _, _ = ensembling
+    submit_ensemble(client)
 
-    # Anything but arrangement is a parameter for the transcription condition.
+    # Anything but ensemble is a parameter for the piano condition.
     assert jobs.list_jobs(mode="x' OR '1'='1") == []
 
 
-def test_status_tells_how_many_workers_arrange(arranging, capsys):
-    routing.publish_heartbeat(tasks.redis, 2, 30.0, worker="gpu-a:7", arrangement=True)
+def test_status_tells_how_many_workers_take_ensembles(ensembling, capsys):
+    # The heartbeat field is still called "arrangement" in Redis.
+    routing.publish_heartbeat(tasks.redis, 2, 30.0, worker="gpu-a:7", ensemble=True)
     routing.publish_heartbeat(tasks.redis, 1, 60.0, worker="gpu-b:9")
 
     _, output = admin(capsys, "status")
 
-    assert "1 of 2 arrange (piano arrangements are on)" in output
-    assert "gpu-a:7: 2 at once, average 30 s, heartbeat" in output and ", arranges" in output
-    assert "arrangement " in output  # the arrangement queue
+    assert "1 of 2 take ensemble jobs (they are on)" in output
+    assert "gpu-a:7: 2 at once, average 30 s, heartbeat" in output and ", ensemble jobs" in output
+    assert "arrangement " in output  # the ensemble queue, still named so
     _, output = admin(capsys, "status", "--json")
     state = json.loads(output)
-    assert state["arrangement"] is True
-    assert state["local_worker"]["arranging"] == 1
-    assert [worker["arrangement"] for worker in state["local_workers"]] == [True, False]
+    assert state["ensemble"] is True
+    assert state["local_worker"]["ensemble"] == 1
+    assert [worker["ensemble"] for worker in state["local_workers"]] == [True, False]
     assert state["queues"]["arrangement"] == {"messages": 0, "dead": 0}
 
 
-def test_status_says_when_arrangements_are_off(billed, capsys):
-    billed[1].worker.arrangement = False
+def test_status_says_when_ensembles_are_off(billed, capsys):
+    billed[1].worker.ensemble = False
     routing.publish_heartbeat(tasks.redis, 2, 30.0, worker="gpu-a:7")
 
     _, output = admin(capsys, "status")
-    assert "Arrangements  off (WORKER_ARRANGEMENT=false)" in output
+    assert "Ensemble      off (WORKER_ENSEMBLE=false)" in output
     state = json.loads(admin(capsys, "status", "--json")[1])
-    assert state["arrangement"] is False and "arrangement" not in state["queues"]
+    assert state["ensemble"] is False and "arrangement" not in state["queues"]
 
 
-def test_status_says_when_arrangements_are_on_without_a_worker(arranging, capsys):
+def test_status_says_when_ensembles_are_on_without_a_worker(ensembling, capsys):
     _, output = admin(capsys, "status")
 
-    assert "Arrangements  on, but no worker is running to arrange" in output
+    assert "Ensemble      on, but no worker is running to take ensemble jobs" in output
 
 
 # --- job time on PostgreSQL ---------------------------------------------------------

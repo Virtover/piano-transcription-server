@@ -27,6 +27,15 @@ def default_settings(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def fp32_gpus_off(monkeypatch):
+    """Whether the GPUs run float32 is read once per process and cached; a
+    test starts from the CPU/bfloat16 answer, whatever machine it runs on."""
+    from app.transcription import device
+
+    monkeypatch.setattr(device, "_fp32_gpus", False)
+
+
+@pytest.fixture(autouse=True)
 def video_sites(default_settings, monkeypatch):
     """The video site breaker on a Redis of its own, without pacing, which
     would make tests wait. api_context shares its Redis instead."""

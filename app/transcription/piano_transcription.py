@@ -38,7 +38,7 @@ from app.config import settings
 from app.transcription.budget import DeviceBudget, StepCancelled, device_budget
 from app.transcription.tempo import add_tempo_map, preload_tracker
 from app.transcription.device import (
-    arrangement_fits,
+    ensemble_fits,
     cpu_batch_size,
     cpu_budget_gib,
     cpu_thread_count,
@@ -223,16 +223,16 @@ def budget_for_device(device: str) -> DeviceBudget:
     return device_budget(device, total)
 
 
-def arrangement_offered(device: str) -> bool:
-    """Whether arrangement jobs run on device: the feature is on, and on a
-    GPU, one arrangement step fits in its budget when no other program uses
+def ensemble_offered(device: str) -> bool:
+    """Whether ensemble jobs run on device: the feature is on, and on a
+    GPU, one ensemble job fits in its budget when no other program uses
     it. The launcher decides the same, from the same measurement, to consume
-    the arrangement queue."""
-    if not settings.worker.arrangement:
+    the ensemble queue."""
+    if not settings.worker.ensemble:
         return False
     if not device.startswith("cuda:"):
         return True
-    return arrangement_fits(usable_memory(_cuda_total_memory.get(int(device.split(":", 1)[1]), 0)))
+    return ensemble_fits(usable_memory(_cuda_total_memory.get(int(device.split(":", 1)[1]), 0)))
 
 
 def is_cuda_out_of_memory(error: BaseException) -> bool:
@@ -255,9 +255,22 @@ def write_midi(
 ) -> None:
     """Write the MIDI file atomically, with the tempo map of audio when it
     is given."""
+    write_midi_file(lambda path: writeMidi(events).write(str(path)), output_path, audio, sample_rate, device)
+
+
+def write_midi_file(
+    write: Callable[[Path], None],
+    output_path: Path,
+    audio: np.ndarray | None = None,
+    sample_rate: int | None = None,
+    device: str = "cpu",
+) -> None:
+    """Write a MIDI file atomically with write(path), then give it the
+    tempo map of audio when it is given: a crash or a full disk leaves no
+    partial file at output_path."""
     partial_path = output_path.with_name(f".{output_path.name}.partial")
     try:
-        writeMidi(events).write(str(partial_path))
+        write(partial_path)
         if audio is not None:
             add_tempo_map(partial_path, audio, sample_rate, device)
         with partial_path.open("rb") as file:

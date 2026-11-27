@@ -78,8 +78,12 @@ def check_address(address: str) -> str:
                            "from `tailscale ip -4` on the hub") from None
 
 
+# piano and ensemble name the tasks transcribe and arrange (app/cluster.py).
+TASK_ALIASES = {"piano": "transcribe", "ensemble": "arrange"}
+
+
 def check_tasks(text: str) -> list[str]:
-    names = {item.strip().lower() for item in (text or "").split(",") if item.strip()}
+    names = {TASK_ALIASES.get(name, name) for name in (item.strip().lower() for item in (text or "").split(",")) if name}
     if "all" in names:
         return list(TASKS)
     unknown = sorted(names - set(TASKS))

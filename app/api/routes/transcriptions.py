@@ -3,15 +3,15 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, RedirectResponse, Response
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, StringConstraints
 from redis import Redis
 
-from app import clips, job_limits, job_storage, maintenance, video_check, video_info
+from app import clips, disk, job_limits, job_storage, maintenance, video_check, video_info
 from app.job_storage import StorageUnavailable, delete_job_files
 from app.maintenance import NoticeResponse
 from app.config import settings
@@ -20,11 +20,9 @@ from app.api.routes.billing import check_client, check_video, checked_clip, ensu
 from app.auth import AuthenticatedUser, current_user
 from app.media import UnsupportedMedia, probe_audio
 from app.outsource import routing
-from app.transcription.styles import DEFAULT_STYLE, STYLES
 from app.worker.tasks import (
-    ARRANGEMENT,
+    ENSEMBLE,
     UPLOAD_FILE_NAME,
-    arrangement_style,
     cancel_job,
     job_key,
     record_job,
@@ -61,15 +59,21 @@ def enable_transcription_submissions() -> None:
     transcription_submissions_enabled = True
 
 
-Mode = Literal["transcription", "arrangement"]
-Style = Literal[STYLES]
+# piano: Transkun, for recordings of a piano; ensemble: dettato, every
+# instrument as its own track, plus drums. transcription and arrangement are
+# their names from before ensemble jobs replaced piano arrangements, which
+# older apps still send; a job's status answers in the words it was asked in.
+Mode = Literal["piano", "ensemble", "transcription", "arrangement"]
+ENSEMBLE_MODES = ("ensemble", "arrangement")
+# Arrangements once had styles; older apps still send one. Accepted and ignored.
+Style = Annotated[str, StringConstraints(max_length=32)]
 
 
 class CreateTranscriptionRequest(BaseModel):
     source_url: HttpUrl
-    # arrangement: a piano cover of the song instead of a transcription of
-    # its piano; style from sparse (level1) to dense (level3).
+    # piano (the default) or ensemble; see Mode.
     mode: Mode = "transcription"
+    # Ignored: arrangements once had styles.
     style: Style | None = None
     # Only this part of the video, in seconds from its start; see app.clips.
     # Either may be left out: from the start, or to the end.
@@ -123,8 +127,9 @@ class TranscriptionStatusResponse(BaseModel):
     # Where the model runs: local or remote. Absent for jobs queued before
     # outsourcing existed.
     backend: str | None = None
+    # The mode as the submission named it (see Mode).
     mode: Mode = "transcription"
-    # Set for an arrangement.
+    # Always None: arrangements once had styles.
     style: str | None = None
     # The part transcribed, when the request asked for one; end_seconds is
     # None for "to the end".
@@ -177,6 +182,18 @@ def ensure_submissions_enabled() -> None:
             status_code=503,
             detail="The transcription server is still starting",
             headers={"Retry-After": "10"},
+        )
+
+
+def ensure_storage_room(need: int = 0) -> None:
+    """Refuse a submission while the data disk has less than
+    MIN_FREE_DISK_GIB free beside need more bytes (app/disk.py): it fills up
+    less, and the jobs it holds can finish. Nothing is reserved or charged."""
+    if not disk.room_for(need):
+        raise HTTPException(
+            status_code=503,
+            detail={"message": str(disk.StorageFull()), "error_code": disk.STORAGE_FULL},
+            headers={"Retry-After": "300"},
         )
 
 
@@ -322,34 +339,35 @@ def ensure_minimum_balance(user: AuthenticatedUser | None) -> None:
         )
 
 
-ARRANGEMENT_UNAVAILABLE = "arrangement_unavailable"
+# Its value from before ensemble jobs replaced piano arrangements: apps act on it.
+ENSEMBLE_UNAVAILABLE = "arrangement_unavailable"
 
 
-def mode_fields(mode: str, style: str | None) -> dict[str, str]:
+def mode_fields(mode: str, style: str | None = None) -> dict[str, str]:
     """The job fields of a submission's mode, after checking that it can
-    run. An arrangement needs WORKER_ARRANGEMENT, and somewhere to run: a
-    live worker that arranges, or RunPod. Without any live worker it is
-    queued, as a transcription is, for when one starts."""
-    if mode != "arrangement":
-        if style is not None:
-            raise HTTPException(status_code=422, detail="style is only used with mode arrangement")
-        return {}
-    if not settings.worker.arrangement:
+    run. An ensemble job (stored as an arrangement) needs WORKER_ENSEMBLE,
+    and somewhere to run: a live worker that takes them, or RunPod. Without
+    any live worker it is queued, as a transcription is, for when one
+    starts. style is ignored. mode_name keeps the submission's own word for
+    the mode, which its status answers with."""
+    if mode not in ENSEMBLE_MODES:
+        return {"mode_name": mode} if mode == "piano" else {}
+    if not settings.worker.ensemble:
         raise HTTPException(
             status_code=409,
-            detail={"message": "Piano arrangements are off on this server", "error_code": ARRANGEMENT_UNAVAILABLE},
+            detail={"message": "Ensemble transcriptions are off on this server", "error_code": ENSEMBLE_UNAVAILABLE},
         )
     if not routing.outsourcing_enabled():
-        live, arranging = routing.arrangement_workers(redis)
-        if live and not arranging:
+        live, taking = routing.ensemble_workers(redis)
+        if live and not taking:
             raise HTTPException(
                 status_code=503,
                 detail={
-                    "message": "No worker of this server has room for piano arrangements",
-                    "error_code": ARRANGEMENT_UNAVAILABLE,
+                    "message": "No worker of this server has room for ensemble transcriptions",
+                    "error_code": ENSEMBLE_UNAVAILABLE,
                 },
             )
-    return {"mode": ARRANGEMENT, "style": style or DEFAULT_STYLE}
+    return {"mode": ENSEMBLE, "mode_name": mode}
 
 
 def clip_job(duration: float, clip: clips.Clip | None, fields: dict[str, str]) -> tuple[float, dict[str, str]]:
@@ -377,6 +395,7 @@ def queue_job(
     """Reserve the job's cost, store it as queued, choose the local or
     remote backend unless one is given, and hand it to that backend's queue."""
     ensure_no_maintenance_pending()
+    ensure_storage_room()
     current_user = user.user_id if user else "anonymous"
     email = user.email if user else None
     cost = transcription_cost(duration)
@@ -412,10 +431,10 @@ def queue_job(
     redis.persist(job_key(job_id))
     if backend is None:
         # From the stored job, which an administrator's requeue keeps.
-        arrangement = redis.hget(job_key(job_id), "mode") == ARRANGEMENT
+        ensemble = redis.hget(job_key(job_id), "mode") == ENSEMBLE
         # Heavy use of an unlimited plan never runs up the provider's bill.
         backend = routing.choose_backend(
-            redis, job_id, arrangement, outsource=not billing.unlimited_heavy_use(current_user)
+            redis, job_id, ensemble, outsource=not billing.unlimited_heavy_use(current_user)
         )
     else:
         routing.mark_active(redis, backend, job_id)
@@ -542,8 +561,8 @@ async def upload_transcription(
         max_length=255,
         description="Original file name; used as the transcription title.",
     ),
-    mode: Mode = Query("transcription", description="arrangement: a piano cover instead of a transcription."),
-    style: Style | None = Query(None, description="Arrangement style, from sparse (level1) to dense (level3)."),
+    mode: Mode = Query("transcription", description="piano (the default), or ensemble: every instrument as its own track."),
+    style: str | None = Query(None, max_length=32, description="Ignored; arrangements once had styles."),
     start_seconds: float | None = Query(
         None, ge=0, allow_inf_nan=False, description="Transcribe only from here, in seconds from the start."
     ),
@@ -581,6 +600,8 @@ async def upload_transcription(
     content_length = request.headers.get("content-length", "")
     if size_limit is not None and content_length.isdigit() and int(content_length) > size_limit:
         raise too_large
+    # Before the body is read: an upload that would fill the disk is refused whole.
+    ensure_storage_room(int(content_length) if content_length.isdigit() else 0)
     await run_in_threadpool(ensure_minimum_balance, user)
 
     job_dir = job_storage.storage().workspace(job_id)
@@ -675,8 +696,8 @@ def get_transcription(
         error_code=job.get("error_code"),
         minutes=current_user_balance(job.get("user_id")),
         backend=job.get("backend"),
-        mode="arrangement" if job.get("mode") == ARRANGEMENT else "transcription",
-        style=arrangement_style(job),
+        mode=job_mode_name(job),
+        style=None,
         **clip_times(job),
         maintenance=current_notice(),
         developer=developer_details(job_id, job) if billing.is_developer(job.get("user_id")) else None,
@@ -802,5 +823,15 @@ def clip_times(job: dict[str, str]) -> dict[str, float | None]:
     return {} if clip is None else {"start_seconds": clip.start, "end_seconds": clip.end}
 
 
+def job_mode_name(job: dict[str, str]) -> str:
+    """The job's mode in the submission's words: piano or ensemble, or, for
+    jobs submitted with the older names or before mode_name was stored,
+    transcription or arrangement."""
+    name = job.get("mode_name")
+    if job.get("mode") == ENSEMBLE:
+        return name if name in ENSEMBLE_MODES else "arrangement"
+    return name if name == "piano" else "transcription"
+
+
 def result_filename(job: dict[str, str]) -> str:
-    return "arrangement.mid" if job.get("mode") == ARRANGEMENT else "transcription.mid"
+    return f"{job_mode_name(job)}.mid"

@@ -218,7 +218,7 @@ def create_app(config=None, verifier: AccessVerifier | None = None, clock=time.t
             raise AdminError(f"status must be one of {', '.join(jobs.STATUSES)}")
         if backend not in (None, "local", "remote"):
             raise AdminError("backend must be local or remote")
-        if mode not in (None, *jobs.MODES):
+        if mode not in (None, *jobs.MODES, *jobs.MODE_ALIASES):
             raise AdminError(f"mode must be one of {', '.join(jobs.MODES)}")
         return jobs.list_jobs(job_status, backend, user, parse_duration(since, "since"), limit, mode)
 

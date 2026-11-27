@@ -362,6 +362,9 @@ def test_env_values_skips_comments_and_unquotes(tmp_path):
 def test_check_tasks():
     assert nodes.check_tasks("all") == list(nodes.TASKS)
     assert nodes.check_tasks("arrange, transcribe") == ["transcribe", "arrange"]
+    # The names an administrator sees: piano and ensemble.
+    assert nodes.check_tasks("ensemble, piano") == ["transcribe", "arrange"]
+    assert nodes.check_tasks("piano") == ["transcribe"]
     for bad in ("", "fly", "transcribe,fly"):
         with pytest.raises(ClusterError):
             nodes.check_tasks(bad)

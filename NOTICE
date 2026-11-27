@@ -27,10 +27,17 @@ MIT License. Code from those versions is still covered by its notice:
     TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
     SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-This product includes AMT-APC (https://github.com/310hz/amt-apc), vendored
-in app/transcription/amt_apc under the MIT License; see the LICENSE file
-there. Its model weights are not covered by either license: see "Licence"
-in docs/architecture.md.
+This product includes Dettato by KobiMusic
+(https://github.com/kobimusic/dettato), vendored in app/transcription/dettato
+under the Apache License, Version 2.0; see the LICENSE and NOTICE files there.
+Its model weights (https://huggingface.co/kobimusic) are under the same
+license.
+
+The worker image also builds dettato.cpp
+(https://github.com/hidude562/dettato.cpp, Apache License, Version 2.0), a
+C++ port of Dettato, with ggml (https://github.com/ggml-org/ggml, MIT
+License) and pocketfft (BSD-3-Clause), for ensemble jobs on the CPU
+(dettato_cpu/).
 
 "Piano Transcription Server" names this project. The Apache License does
 not grant permission to use it for other products (section 6).

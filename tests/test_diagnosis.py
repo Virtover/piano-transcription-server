@@ -270,9 +270,9 @@ def test_a_feature_is_checked_with_what_it_needs_and_nothing_else(default_settin
 
 
 def test_a_feature_with_nothing_outside_the_server_says_so(default_settings):
-    results = online_check.run_checks(default_settings, ["arrangement"])
+    results = online_check.run_checks(default_settings, ["ensemble"])
 
-    assert [(result.status, result.feature) for result in results] == [("skip", "arrangement")]
+    assert [(result.status, result.feature) for result in results] == [("skip", "ensemble")]
     assert "nothing outside the server" in results[0].detail
 
 

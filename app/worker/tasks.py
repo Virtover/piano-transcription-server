@@ -23,7 +23,6 @@ from app.outsource import routing
 from app.transcription.audio import check_midi
 from app.errors import UserFacingError
 from app.transcription.cancellation import TranscriptionCancelled
-from app.transcription.styles import DEFAULT_STYLE, STYLES
 from app.worker.places import Place, Places, configured as configured_places
 
 
@@ -31,9 +30,12 @@ from app.worker.places import Place, Places, configured as configured_places
 UPLOAD_FILE_NAME = "upload.input"
 LOCAL_QUEUE = "default"
 REMOTE_QUEUE = "remote"
-# Local arrangement jobs: only workers that can arrange consume it.
-ARRANGEMENT_QUEUE = "arrangement"
-ARRANGEMENT = "arrangement"
+# Local ensemble jobs: only workers that take them consume this queue. Its
+# name, and the mode stored in an ensemble job, are "arrangement", from when
+# these jobs were piano arrangements: queued messages and stored jobs keep
+# working across an update.
+ENSEMBLE_QUEUE = "arrangement"
+ENSEMBLE = "arrangement"
 # A worker renews its job's lease while it runs. A processing job whose lease
 # has expired lost its worker, and is failed and refunded.
 LEASE_TTL = 60
@@ -426,12 +428,12 @@ def job_backend(job: dict[str, str]) -> routing.Backend:
     return "remote" if job.get("backend") == "remote" else "local"
 
 
-def arrangement_style(job: dict[str, str]) -> str | None:
-    """The style of an arrangement job, or None for a transcription, also
-    for jobs stored before arrangements existed."""
-    if job.get("mode") != ARRANGEMENT:
-        return None
-    return job.get("style") if job.get("style") in STYLES else DEFAULT_STYLE
+def is_ensemble(job: dict[str, str]) -> bool:
+    """Whether a job is an ensemble job, not a piano transcription; jobs
+    stored before either mode existed are piano transcriptions. A stored
+    style, from when ensemble jobs were piano arrangements with styles, is
+    ignored."""
+    return job.get("mode") == ENSEMBLE
 
 
 def attempts_made(job: dict[str, str]) -> int:
@@ -608,7 +610,7 @@ def check_completed_result(job_id: str, job: dict[str, str]) -> bool:
     return True
 
 
-ARRANGEMENT_OFF = "Piano arrangements were turned off on this server"
+ENSEMBLE_OFF = "Ensemble transcriptions were turned off on this server"
 
 
 def move_files_to_the_bucket(job_id: str) -> None:
@@ -638,10 +640,10 @@ def requeue_after_restart(job_id: str, job: dict[str, str], reason: str) -> None
         backend = "local"
         update_job(job_id, backend=backend)
     routing.mark_active(redis, backend, job_id)
-    if job.get("mode") == ARRANGEMENT and not settings.worker.arrangement:
-        # No worker would take it: nothing consumes the arrangement queue.
-        logger.warning("Job %s failed after the restart: %s", job_id, ARRANGEMENT_OFF)
-        fail_unqueued_job(job_id, job, backend, ARRANGEMENT_OFF)
+    if job.get("mode") == ENSEMBLE and not settings.worker.ensemble:
+        # No worker would take it: nothing consumes the ensemble queue.
+        logger.warning("Job %s failed after the restart: %s", job_id, ENSEMBLE_OFF)
+        fail_unqueued_job(job_id, job, backend, ENSEMBLE_OFF)
         return
     try:
         send_job(job_id, backend, *job_arguments(job))
@@ -650,10 +652,11 @@ def requeue_after_restart(job_id: str, job: dict[str, str], reason: str) -> None
         fail_unqueued_job(job_id, job, backend, reason)
 
 
-def fail_unqueued_job(job_id: str, job: dict[str, str], backend: routing.Backend, reason: str) -> None:
+def fail_unqueued_job(job_id: str, job: dict[str, str], backend: routing.Backend, reason: str,
+                      code: str = INTERRUPTED) -> None:
     """Fail and refund a queued job that could not be put in a queue."""
     routing.mark_finished(redis, backend, job_id)
-    update_job(job_id, status="failed", error=reason, error_code=INTERRUPTED)
+    update_job(job_id, status="failed", error=reason, error_code=code)
     redis.expire(job_key(job_id), job_ttl())
     record_job(job_id)
     if job.get("user_id"):
@@ -673,7 +676,7 @@ class JobContext:
         output_dir: Path,
         progress_floor: float = 0.0,
         max_seconds: float | None = None,
-        arrangement_style: str | None = None,
+        ensemble: bool = False,
         token: str | None = None,
         model_done: Callable[[], None] | None = None,
         clip: clips.Clip | None = None,
@@ -683,8 +686,9 @@ class JobContext:
         self.progress_floor = progress_floor
         # The duration the job was charged for; audio past it is not transcribed.
         self.max_seconds = max_seconds
-        # Set for an arrangement job, which runs AMT-APC instead of Transkun.
-        self.arrangement_style = arrangement_style
+        # Set for an ensemble job, which runs dettato instead
+        # of Transkun.
+        self.ensemble = ensemble
         # The part of the audio the job transcribes; max_seconds is its length.
         self.clip = clip
         # This attempt's token: it stops once another attempt owns the job.
@@ -747,7 +751,11 @@ models_loaded = threading.Event()
 def job_memory_gib(job: dict[str, str]) -> float:
     """VRAM one more job of this kind needs, as the worker plans it."""
     worker = settings.worker
-    return worker.arrangement_memory_gib if job.get("mode") == ARRANGEMENT else worker.memory_per_job_gib
+    if job.get("mode") == ENSEMBLE:
+        from app.transcription.device import ensemble_memory_gib
+
+        return ensemble_memory_gib()
+    return worker.memory_per_job_gib
 
 
 def place_memory_gib(job: dict[str, str]) -> float:
@@ -783,7 +791,7 @@ def roomier_device(job: dict[str, str], task: str) -> str | None:
     for worker in routing.local_workers(redis):
         if not worker["node"] or worker["node"] == node or (on_gpu and not worker["gpu"]):
             continue
-        if not worker["arrangement" if task == "arrange" else "transcription"]:
+        if not worker["ensemble" if task == "arrange" else "transcription"]:
             continue
         if worker["running"] >= worker["capacity"] or worker["utilization"] is None:
             continue
@@ -793,15 +801,32 @@ def roomier_device(job: dict[str, str], task: str) -> str | None:
     return None
 
 
-def restart_time_limit() -> None:
+# A local job's Dramatiq time limit: a base, for the download and the last
+# steps, and a share of its audio's length, generous for the slowest device a
+# job may run on (an ensemble job on a CPU runs at about 1.2 times its length).
+# Only a stuck job reaches it; a job of any allowed length never does.
+LOCAL_TIME_LIMIT_BASE = 10 * 60
+LOCAL_TIME_LIMIT_PER_SECOND = 4.0
+
+
+def local_time_limit_ms(job: dict[str, str]) -> int:
+    try:
+        seconds = max(0.0, float(job.get("duration") or 0))
+    except ValueError:
+        seconds = 0.0
+    return int((LOCAL_TIME_LIMIT_BASE + LOCAL_TIME_LIMIT_PER_SECOND * seconds) * 1000)
+
+
+def restart_time_limit(job: dict[str, str] | None = None) -> None:
     """Start Dramatiq's time limit of this thread's message again: the wait
-    for a place is not the job's time. The local actors use the default limit."""
+    for a place is not the job's time. The limit is the job's
+    (local_time_limit_ms), or Dramatiq's default without a job."""
     from dramatiq.middleware import TimeLimit
 
     for middleware in broker.middleware:
         manager = getattr(middleware, "manager", None) if isinstance(middleware, TimeLimit) else None
         if manager is not None:
-            manager.add_timeout(threading.get_ident(), middleware.time_limit)
+            manager.add_timeout(threading.get_ident(), local_time_limit_ms(job) if job is not None else middleware.time_limit)
 
 
 def wait_for_place(job_id: str) -> tuple[Place | None, bool]:
@@ -810,8 +835,10 @@ def wait_for_place(job_id: str) -> tuple[Place | None, bool]:
     device as soon as that one has a free place; it is queued again if this
     worker stops. (the place, None) or (None, whether the job was sent on)."""
     reasons: list[str] = []
+    stored: dict[str, str] = {}
     try:
-        memory_gib = place_memory_gib(redis.hgetall(job_key(job_id)))
+        stored = redis.hgetall(job_key(job_id))
+        memory_gib = place_memory_gib(stored)
     except Exception:
         logger.exception("Could not read job %s; planning a transcription's memory", job_id)
         memory_gib = place_memory_gib({})
@@ -838,7 +865,7 @@ def wait_for_place(job_id: str) -> tuple[Place | None, bool]:
 
     place = model_places.take(give_up, PLACE_CHECK_INTERVAL, memory_gib)
     if place is not None:
-        restart_time_limit()
+        restart_time_limit(stored)
         return place, False
     if not reasons:
         return None, False
@@ -858,6 +885,41 @@ def wait_for_place(job_id: str) -> tuple[Place | None, bool]:
     return None, True
 
 
+# A job that finds too little disk space here is offered again this long
+# later, here or on another device, at most this many times (half an hour).
+DISK_WAIT_DELAY = 60.0
+DISK_WAIT_LIMIT = 30
+
+
+def waits_for_disk(job_id: str, backend: routing.Backend) -> bool:
+    """Whether a queued job must wait for disk space instead of starting here:
+    its files (app.disk.job_disk_bytes) would leave less than
+    MIN_FREE_DISK_GIB free on this device's data disk. It is then sent again
+    after DISK_WAIT_DELAY, still queued, so this or another device takes it
+    once there is room; after DISK_WAIT_LIMIT waits it fails, refunded."""
+    from app import disk
+
+    try:
+        job = redis.hgetall(job_key(job_id))
+        if job.get("status") != "queued" or disk.room_for(disk.job_disk_bytes(job)):
+            return False
+        waits = redis.hincrby(job_key(job_id), "disk_waits", 1)
+        free = disk.free_bytes()
+        if waits > DISK_WAIT_LIMIT:
+            logger.error("Job %s failed: no disk space for it after %d waits", job_id, waits - 1)
+            fail_unqueued_job(job_id, job, backend, str(disk.StorageFull()), disk.STORAGE_FULL)
+            return True
+        logger.warning("Job %s waits for disk space: %.1f GiB free, it needs %.1f GiB beside MIN_FREE_DISK_GIB=%g",
+                       job_id, (free or 0) / disk.GIB, disk.job_disk_bytes(job) / disk.GIB,
+                       settings.limits.min_free_disk_gib)
+        send_job(job_id, backend, *job_arguments(job), delay=int(DISK_WAIT_DELAY * 1000))
+        return True
+    except Exception:
+        # The check must never lose a job: it runs here as before.
+        logger.exception("Could not check the disk space for job %s", job_id)
+        return False
+
+
 def run_job(
     job_id: str,
     backend: routing.Backend,
@@ -870,6 +932,8 @@ def run_job(
     once whichever path it takes.
     """
     if pass_job(job_id, backend):
+        return
+    if waits_for_disk(job_id, backend):
         return
     output_dir = storage().workspace(job_id)
     requeued = False
@@ -884,6 +948,10 @@ def run_job(
         if not claim_job(job_id, lease.token):
             return
         claimed = True
+        if backend == "local":
+            # Its own time limit, from its length, instead of Dramatiq's
+            # default for the actor (local_time_limit_ms).
+            restart_time_limit(redis.hgetall(job_key(job_id)))
         lease.start()
         record_job(job_id)
         started = time.monotonic()
@@ -898,7 +966,7 @@ def run_job(
             max_seconds = float(stored["duration"]) if stored.get("duration") else None
         except ValueError:
             max_seconds = None
-        context = JobContext(job_id, output_dir, floor, max_seconds, arrangement_style(stored), lease.token,
+        context = JobContext(job_id, output_dir, floor, max_seconds, is_ensemble(stored), lease.token,
                              place.release if place is not None else None, clips.stored_clip(stored))
 
         midi_path = transcribe(context)
@@ -940,10 +1008,14 @@ def run_job(
             # Cancelled while failing: keep it cancelled.
             finish_cancelled(job_id, output_dir)
             return
+        from app import disk
+
+        # Out of disk space: its own message and code, not a bug's.
+        shown = disk.StorageFull() if disk.is_disk_full(e) else e
         failed = {
             "status": "failed",
-            "error": public_message(e),
-            "error_code": error_code(e),
+            "error": public_message(shown),
+            "error_code": error_code(shown),
             "error_detail": detail(e),
         }
         if not fail_attempt(job_id, lease.token if claimed else None, failed):
@@ -953,7 +1025,7 @@ def run_job(
                 finish_cancelled(job_id, output_dir)
             return
         logger.warning("Job %s failed", job_id, exc_info=e)
-        if public_message(e) == GENERIC_MESSAGE:
+        if public_message(shown) == GENERIC_MESSAGE:
             # No known cause such as a private video: probably a bug or a broken setup.
             error_report.report_exception(e, {"Job": job_id, "Backend": backend})
         # After the job is marked failed: a crash between the two leaves a
@@ -1024,16 +1096,22 @@ def retry_backend(job_id: str, backend: routing.Backend, error: Exception) -> ro
     from app.outsource.provider import RemoteFailed
     from app.transcription.batching import GpuOutOfMemory
 
+    from app import disk
+
+    if disk.is_disk_full(error) and redis.hincrby(job_key(job_id), "disk_retries", 1) <= 1:
+        # This device's disk filled up during the job: once more, here once
+        # there is room, or on another device (waits_for_disk).
+        return backend
     if isinstance(error, SourceTemporarilyUnavailable) and another_address_can_run(job_id, backend):
         # A video site refused this device's address: the same backend on a
         # device that reaches the site from another one.
         return backend
     if backend == "remote":
         if isinstance(error, RemoteFailed) and settings.outsource.fallback_local:
-            if redis.hget(job_key(job_id), "mode") == ARRANGEMENT:
-                # Only to a worker that arranges, or it would wait in vain.
-                _, arranging = routing.arrangement_workers(redis)
-                return "local" if arranging else None
+            if redis.hget(job_key(job_id), "mode") == ENSEMBLE:
+                # Only to a worker that takes them, or it would wait in vain.
+                _, ensemble_workers = routing.ensemble_workers(redis)
+                return "local" if ensemble_workers else None
             return "local"
         return None
     if (
@@ -1099,7 +1177,7 @@ def job_task(job: dict[str, str], backend: routing.Backend) -> str:
     """The cluster task a job needs from a device (app.cluster.TASKS)."""
     if backend == "remote":
         return "dispatch"
-    return "arrange" if job.get("mode") == ARRANGEMENT else "transcribe"
+    return "arrange" if job.get("mode") == ENSEMBLE else "transcribe"
 
 
 def job_site(job: dict[str, str]) -> str | None:
@@ -1191,13 +1269,13 @@ def job_arguments(job: dict[str, str]) -> tuple:
 
 
 def send_job(job_id: str, backend: routing.Backend, *arguments, **options) -> None:
-    """Hand a stored job to its backend's queue. A local arrangement goes to
-    the queue only workers that can arrange consume; the mode is read from
+    """Hand a stored job to its backend's queue. A local ensemble job goes to
+    the queue only workers that take them consume; the mode is read from
     the job, so every requeue keeps it."""
     if backend == "remote":
         actor = transcribe_remote_job
-    elif redis.hget(job_key(job_id), "mode") == ARRANGEMENT:
-        actor = arrange_job
+    elif redis.hget(job_key(job_id), "mode") == ENSEMBLE:
+        actor = ensemble_job
     else:
         actor = transcribe_job
     # delay is Dramatiq's; send() would hand it to the actor as an argument.
@@ -1223,7 +1301,7 @@ def run_local_job(job_id: str, source_url: str | None, upload_title: str | None)
             cancellation_callback=context.is_cancelled,
             max_seconds=context.max_seconds,
             clip=context.clip,
-            arrangement_style=context.arrangement_style,
+            ensemble=context.ensemble,
             model_done_callback=context.model_done,
         )
 
@@ -1241,14 +1319,17 @@ def transcribe_job(
     run_local_job(job_id, source_url, upload_title)
 
 
-@dramatiq.actor(queue_name=ARRANGEMENT_QUEUE, max_retries=0)
-def arrange_job(
+# Named arrange_job in Dramatiq, as before ensemble jobs replaced piano
+# arrangements: messages queued before an update still find it.
+@dramatiq.actor(actor_name="arrange_job", queue_name=ENSEMBLE_QUEUE, max_retries=0)
+def ensemble_job(
     job_id: str,
     source_url: str | None = None,
     upload_title: str | None = None,
 ):
-    """Arrange a video URL, or the uploaded file, for piano, on this
-    machine's GPU or CPU. Only workers that can arrange consume its queue."""
+    """Transcribe every instrument of a video URL, or the uploaded file (an
+    ensemble job), on this machine's GPU or CPU. Only workers that take
+    ensemble jobs consume its queue."""
     run_local_job(job_id, source_url, upload_title)
 
 
@@ -1278,7 +1359,7 @@ def transcribe_remote_job(
                 upload_title=upload_title,
                 max_seconds=context.max_seconds,
                 clip=context.clip,
-                arrangement_style=context.arrangement_style,
+                ensemble=context.ensemble,
             )
         finally:
             routing.release_remote_slot(redis, job_id)
@@ -1316,7 +1397,7 @@ def consumes(worker, queue: str) -> bool:
 class LocalWorkerHeartbeat(dramatiq.Middleware):
     """Publishes the worker's capacity and average job duration while it
     consumes a local queue, so the API can estimate the local wait. A worker
-    a cluster switch keeps to arrangements says it takes no transcriptions.
+    a cluster switch keeps to ensemble jobs says it takes no piano jobs.
 
     On a GPU, the capacity is the places that can be held now, in the VRAM
     other programs leave: the API and other devices then see a GPU that
@@ -1331,8 +1412,8 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
 
     def after_worker_boot(self, broker, worker):
         transcribes = consumes(worker, LOCAL_QUEUE)
-        arranges = consumes(worker, ARRANGEMENT_QUEUE) and settings.worker.arrangement
-        if not (transcribes or arranges):
+        ensembles = consumes(worker, ENSEMBLE_QUEUE) and settings.worker.ensemble
+        if not (transcribes or ensembles):
             return
         stop = self._stop = threading.Event()
         # Set when a place is taken or given back: other devices then see
@@ -1365,7 +1446,7 @@ class LocalWorkerHeartbeat(dramatiq.Middleware):
                     running = places.in_use
                     if (capacity, running) != published or time.monotonic() - published_at >= self.interval:
                         current = monitor.current()
-                        routing.publish_heartbeat(redis, capacity, local_job_duration.value, arrangement=arranges,
+                        routing.publish_heartbeat(redis, capacity, local_job_duration.value, ensemble=ensembles,
                                                   transcription=transcribes, node=cluster.node_name(),
                                                   running=running, utilization=current.utilization,
                                                   free_mib=current.free_mib, gpu=current.gpu)
@@ -1398,8 +1479,8 @@ class LocalModelPreload(dramatiq.Middleware):
 
     def after_worker_boot(self, broker, worker):
         transcribes = consumes(worker, LOCAL_QUEUE)
-        arranges = consumes(worker, ARRANGEMENT_QUEUE) and settings.worker.arrangement
-        if not (transcribes or arranges):
+        ensembles = consumes(worker, ENSEMBLE_QUEUE) and settings.worker.ensemble
+        if not (transcribes or ensembles):
             return
 
         def preload():
@@ -1409,10 +1490,10 @@ class LocalModelPreload(dramatiq.Middleware):
 
                 if transcribes:
                     preload()
-                if arranges:
-                    from app.transcription.arrangement import preload as preload_arrangement
+                if ensembles:
+                    from app.transcription.ensemble_transcription import preload as preload_ensemble
 
-                    preload_arrangement()
+                    preload_ensemble()
             except Exception:
                 # The first job loads them again, and fails if they still cannot.
                 logger.exception("Could not load the models before the first job")

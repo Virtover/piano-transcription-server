@@ -39,10 +39,10 @@ python -m pytest -q -k cancellation
 
 ## 🐳 Tests that need the worker's packages
 
-Tests that import `torch` or `transkun` (`tests/test_arrangement*.py`, `tests/test_budget.py`, `tests/test_amt_apc.py`, and the batching and device tests) are skipped in the test environment above, which does not install them. Run them in a worker image, which has the packages and `apc.pth`. The image has no pytest and no tests, so mount the tests and install pytest in the container:
+Tests that import `torch` or `transkun` (`tests/test_ensemble.py`, `tests/test_ensemble_models.py`, `tests/test_budget.py`, and the batching and device tests) are skipped in the test environment above, which does not install them. Run them in a worker image, which has the packages and dettato's weights, which `tests/test_ensemble_models.py` needs. The image has no pytest and no tests, so mount the tests and install pytest in the container:
 
 ```shell
-docker compose run --rm --no-deps -v ./tests:/app/tests:ro -v ./pytest.ini:/app/pytest.ini:ro worker sh -c "python3 -m pip install -q pytest && python3 -m pytest -q tests/test_amt_apc.py tests/test_budget.py tests/test_arrangement.py"
+docker compose run --rm --no-deps -v ./tests:/app/tests:ro -v ./pytest.ini:/app/pytest.ini:ro worker sh -c "python3 -m pip install -q pytest && python3 -m pytest -q tests/test_budget.py tests/test_ensemble.py tests/test_ensemble_models.py"
 ```
 
 ## 🧱 Tests on a real Redis
@@ -134,14 +134,14 @@ The tests above use fakes. To check a running server end to end, with its real w
 python scripts/admin.py e2e                       # every case, placed as the server places jobs
 python scripts/admin.py e2e --backend local       # only this server's workers, and its nodes
 python scripts/admin.py e2e --backend remote      # only RunPod; needs outsourcing on
-python scripts/admin.py e2e --case clip --mode arrangement
+python scripts/admin.py e2e --case clip --mode ensemble
 python scripts/kube.py admin e2e                  # the same on Kubernetes
 ```
 
-Each case uploads a generated 40-second test file and queues it as an unbilled job: no user, nothing charged. The file has four 10-second sections of plucked notes, C4, E4, G4, then A4, so a part cut in the wrong place shows in the notes. The cases are the whole file, `clip` (10 to 20 seconds), and `clip-to-end` (from 20 seconds), each as a transcription and, when arrangements are on, as an arrangement. A case passes when the job completes, is charged for the part's length, and its MIDI has notes only within that length, of the part's sections, and none of the others. An arrangement only needs the part's pitches to lead. Each line says which backend and device ran the job. The command exits with code 1 when a check fails. The jobs and their files are removed afterwards (`--keep` keeps them), and the job list keeps them, titled "e2e check".
+Each case uploads a generated 40-second test file and queues it as an unbilled job: no user, nothing charged. The file has four 10-second sections of plucked notes, C4, E4, G4, then A4, so a part cut in the wrong place shows in the notes. The cases are the whole file, `clip` (10 to 20 seconds), and `clip-to-end` (from 20 seconds), each as a piano job and, when ensemble transcriptions are on, as an ensemble job (`--mode piano` or `ensemble` picks one). A case passes when the job completes, is charged for the part's length, and its MIDI has notes only within that length, of the part's sections, and none of the others. Both modes are checked by the same note check; drum notes are left out. Each line says which backend and device ran the job. The command exits with code 1 when a check fails. The jobs and their files are removed afterwards (`--keep` keeps them), and the job list keeps them, titled "e2e check".
 
 * **One device of a home cluster:** stop the others taking work, for example `python scripts/admin.py nodes deny hub transcribe arrange`, run `e2e --backend local`, then `nodes allow hub transcribe arrange`.
-* **A crash or power cut:** run `e2e --backend local --case clip --mode transcription --timeout 1800` in one terminal. While it runs, make the device's worker exit without warning. On a node, `docker kill -s KILL piano-node-worker-1` and then `docker start piano-node-worker-1`. With Compose, `docker compose kill -s KILL worker` and then `docker compose up -d worker`. The check must still pass: the job runs again, the same part, charged once.
+* **A crash or power cut:** run `e2e --backend local --case clip --mode piano --timeout 1800` in one terminal. While it runs, make the device's worker exit without warning. On a node, `docker kill -s KILL piano-node-worker-1` and then `docker start piano-node-worker-1`. With Compose, `docker compose kill -s KILL worker` and then `docker compose up -d worker`. The check must still pass: the job runs again, the same part, charged once.
 * The first notes of a part, at 0 seconds, may be missing: the model can miss notes at the very start of any audio. The checks allow for it.
 
 ## 🤖 Continuous integration
@@ -156,10 +156,15 @@ CI runs as an ordinary user, not root, so code must not write to the container p
 
 | File | Covers |
 | --- | --- |
-| `test_arrangement.py`, `test_arrangement_api.py`, `test_arrangement_tasks.py` | Piano arrangements: the arrangement batcher and styles, the `mode` and `style` request fields and their refusals, and the arrangement job lifecycle and routing. The first needs the worker's packages. |
+| `test_ensemble.py`, `test_ensemble_midi.py`, `test_ensemble_cpu.py`, `test_ensemble_models.py` | Ensemble transcriptions: the batcher and the memory holds of an ensemble job (needs the worker's packages), the MIDI of tracks, names, and channels, the dettato.cpp process and its limits, and the models themselves (only in a worker image with torch and the weights). |
+| `test_ensemble_api.py`, `test_ensemble_tasks.py` | Ensemble transcriptions through the API and the job lifecycle: the `mode` request field and its old names, the ignored `style`, routing, the status and file name, the server info flags, which actor takes a job, restarts, retries on another backend, and the worker's heartbeat. |
+| `test_grouper_decode.py` | The grouper's clustering against dettato's own algorithm: the same merges, ties included, and the path for recordings of several hours. Needs torch. |
+| `test_source_sample_rate.py` | The source's sample rate read before the conversion, and handed to the ensemble drums. |
+| `test_disk.py` | Running out of disk space: jobs wait for room and fail clearly after half an hour, a job whose disk filled up is tried once more, submissions get `503 storage_full`, and the watcher warns. |
+| `test_apt_install.py` | `build/apt_install.sh`: a hung `apt-get install` is ended and tried again. Needs a POSIX shell; skipped on Windows. |
 | `test_e2e.py` | The end-to-end checks of `admin e2e`: reading MIDI, what passes and fails, and a run against fake workers. |
 | `test_clips.py` | Transcribing a part of a video or file: the checks of `start_seconds` and `end_seconds` and hostile values, the job's stored part, billing only its length, the cost, the cut ffmpeg makes, the RunPod dispatcher, a job run again after its worker stopped, and an administrator's requeue. |
-| `test_budget.py`, `test_amt_apc.py` | The shared per-device memory budget, and the vendored AMT-APC inference. Both need the worker's packages. |
+| `test_budget.py` | The shared per-device memory budget. It needs the worker's packages. |
 | `test_cluster.py` | A [home cluster](cluster.md): attempt tokens, so a device that lost its job writes nothing; jobs queued again after an interruption, and once only refunded; billing the hub settles from the job's state; jobs handed to another device; rate limits per public address; link checks by a node; the settings nodes take from the hub; switches and status; the supervisor; the shape of a node's Redis rules. |
 | `test_load_placement.py` | Placing jobs by load: a busy GPU, or one without VRAM, leaves a job to a less busy device with room; GPU and CPU sampling. |
 | `test_cluster_scripts.py` | The cluster's host scripts: `nodes hub`, `invite`, `revoke`, and `join`, what an invite holds and never holds, node mode of `scripts/server.py`, and the registry's images. |

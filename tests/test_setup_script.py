@@ -894,7 +894,7 @@ def test_a_feature_that_is_on_can_be_left_from_the_menu(server):
     setup, script = make(server, answers=["10", "", ""])
 
     assert setup.menu() == 0
-    assert "Piano arrangements is on." in script.text
+    assert "Ensemble transcriptions is on." in script.text
     assert "Press Enter to go back" not in script.text
 
 

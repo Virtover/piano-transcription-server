@@ -933,9 +933,9 @@ def test_heavy_use_of_unlimited_runs_one_job_at_a_time_and_never_outsourced(goog
     chosen = []
     original = routing.choose_backend
 
-    def choose(redis, job_id, arrangement=False, outsource=True):
+    def choose(redis, job_id, ensemble=False, outsource=True):
         chosen.append(outsource)
-        return original(redis, job_id, arrangement, outsource=outsource)
+        return original(redis, job_id, ensemble, outsource=outsource)
 
     monkeypatch.setattr(routing, "choose_backend", choose)
     # The test video costs 2 minutes: two jobs reach the threshold of 3.

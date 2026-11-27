@@ -7,8 +7,6 @@ from urllib.parse import urlsplit
 
 import requests
 
-from app.transcription.styles import DEFAULT_STYLE, STYLES
-
 
 DOWNLOAD_TIMEOUT = 60
 CHUNK_SIZE = 1024 * 1024
@@ -53,18 +51,26 @@ def validate_input(job_input: Any, storage_endpoint: str | None) -> tuple[str, s
     return audio_url, job_id
 
 
-def requested_style(job_input: dict) -> str | None:
-    """The arrangement style of the request, or None for a transcription.
-    Only known values pass: the server sends nothing else."""
+MODES = ("transcription", "ensemble", "arrangement")
+MAX_SOURCE_RATE = 1_000_000
+
+
+def requested_ensemble(job_input: dict) -> tuple[bool, int | None]:
+    """(whether the request is an ensemble job, the source's sample rate or
+    None). Servers send mode "ensemble" with source_rate; "arrangement",
+    which servers sent before ensemble jobs replaced piano arrangements, is
+    an ensemble job too, and its style is ignored. Only known values pass."""
     mode = job_input.get("mode", "transcription")
+    if mode not in MODES:
+        raise InvalidInput("mode must be transcription or ensemble")
     if mode == "transcription":
-        return None
-    if mode != "arrangement":
-        raise InvalidInput("mode must be transcription or arrangement")
-    style = job_input.get("style", DEFAULT_STYLE)
-    if style not in STYLES:
-        raise InvalidInput(f"style must be one of {', '.join(STYLES)}")
-    return style
+        return False, None
+    rate = job_input.get("source_rate")
+    if rate is None:
+        return True, None
+    if isinstance(rate, bool) or not isinstance(rate, int) or not 0 < rate <= MAX_SOURCE_RATE:
+        raise InvalidInput("source_rate must be a sample rate in Hz")
+    return True, rate
 
 
 def download(url: str, destination: Path, max_bytes: int, session: Any = None) -> int:

@@ -34,7 +34,7 @@ A basic server needs no setting: `python scripts/server.py start` runs it with e
 | Object storage | `STORAGE_BUCKET` | | `storage_access_key`, `storage_secret_key` | [Object storage](#object-storage) |
 | Job files in object storage | `JOB_STORAGE=s3` | object storage, for this server alone | | [Job storage](architecture.md#job-storage) |
 | Outsourcing to RunPod | `OUTSOURCE_PROVIDER=runpod` | object storage | `runpod_api_key`, optionally `runpod_read_api_key` | [Outsourcing to RunPod](runpod.md) |
-| Piano arrangements | `WORKER_ARRANGEMENT=true`, the default; `false` turns them off | | | [Piano arrangements](architecture.md#-piano-arrangements) |
+| Ensemble transcriptions | `WORKER_ENSEMBLE=true`, the default; `false` turns them off | | | [Ensemble transcriptions](architecture.md#-ensemble-transcriptions) |
 | Error reports | `ERROR_REPORT_URL` | | `error_report_token` | [Error reports](#error-reports) |
 | Metrics for scaling | the secret file `metrics_token` | | `metrics_token` | [Metrics for scaling](architecture.md#-metrics-for-scaling) |
 
@@ -96,6 +96,7 @@ Prints what a setting or secret is without reading the code and this page: the f
 | `MAX_VIDEO_LENGTH_MINUTES` | `120` | Maximum video or uploaded file length in minutes. Set to `unlimited` to remove this limit. |
 | `MAX_UPLOAD_SIZE_MB` | `200` | Maximum size of an uploaded file in MB. Set to `unlimited` to remove this limit; this can use substantial disk space. |
 | `MAX_ACTIVE_JOBS` | `50` | Transcriptions being uploaded, checked, queued, or run at once, from all users. Further requests get `429`. Set to `unlimited` to remove this limit; this also removes the total upload/job-count guard. |
+| `MIN_FREE_DISK_GIB` | `2` | Disk space in GiB always left free on the data disk (`/data`). A job whose files, estimated from its length and mode (about 0.2 MB a second for piano, 0.45 MB for ensemble), would leave less waits and is offered again every minute, here or to another device, and fails with `storage_full` after half an hour; a job whose disk fills up during it is tried once more. New submissions get `503` with `storage_full` while less is free. The API logs a warning under twice this, and an error and an error report under it. `0` turns the guard off. |
 | `MAX_ACTIVE_JOBS_PER_USER` | `5` | The same for one signed-in user. Set to `unlimited` to remove this per-user limit. Only applies with billing; without it, all clients are one anonymous user and only `MAX_ACTIVE_JOBS` applies. |
 | `SOURCE_URL_ALLOWED_HOSTS` | see below | JSON list of hosts accepted as transcription sources. Subdomains match too. |
 | `VIDEO_SITE_COOLDOWN` | `30m` | How long links to a video site are refused after it rate-limits this server or asks it to prove it is not a bot. Each further incident in a row doubles it. Other sites and uploads are not affected. See [When a video site refuses the server](api.md#-when-a-video-site-refuses-the-server). |
@@ -116,13 +117,13 @@ Prints what a setting or secret is without reading the code and this page: the f
 | --- | --- | --- |
 | `WORKER_THREADS` | `auto` | CPU threads for PyTorch and ffmpeg. `auto` uses physical cores minus two; a number is capped at the physical core count. |
 | `WORKER_ENFORCE_CPU` | `false` | Ignore available CUDA GPUs and run the local worker on CPU. Useful for testing or when the GPU should be reserved for another workload. |
-| `WORKER_ARRANGEMENT` | `true` | Turn off [piano arrangements](architecture.md#-piano-arrangements), a piano cover of a song made by AMT-APC beside transcriptions: `false`. On RunPod the endpoint reads the same default, so set `false` there too when you turn it off here. |
-| `WORKER_GPU_RESERVE_GIB` | `auto` | VRAM reserved on each GPU for what is loaded once: all models, GPU kernels, and library handles. `auto` is `1.25`, or `1.0` with `WORKER_ARRANGEMENT=false`; a number overrides it. Was `WORKER_MODEL_MEMORY_GIB`. See [GPU memory and batching](#-gpu-memory-and-batching). |
+| `WORKER_ENSEMBLE` | `true` | Turn off [ensemble transcriptions](architecture.md#-ensemble-transcriptions), every instrument of a recording in its own MIDI track, made by dettato beside piano jobs: `false`. On RunPod the endpoint reads the same default, so set `false` there too when you turn it off here. Was `WORKER_ARRANGEMENT`. |
+| `WORKER_GPU_RESERVE_GIB` | `auto` | VRAM reserved on each GPU for what is loaded once: all models, GPU kernels, and library handles. `auto` is `1.25`, or `1.0` with `WORKER_ENSEMBLE=false`; a number overrides it. Was `WORKER_MODEL_MEMORY_GIB`. See [GPU memory and batching](#-gpu-memory-and-batching). |
 | `WORKER_MEMORY_PER_JOB_GIB` | `1.1` | VRAM budget for each concurrent GPU transcription job. |
-| `WORKER_ARRANGEMENT_MEMORY_GIB` | `0.8` | VRAM of one arrangement step, one window of about 8.2 s of audio, whatever the song's length. Only while `WORKER_ARRANGEMENT` is on, which is the default. |
+| `WORKER_ENSEMBLE_MEMORY_GIB` | `2.25` | VRAM that one ensemble job holds at its peak, for a song of any length. It is both the memory of a job's place and what each of its phases takes from the GPU budget. On GPUs without native bfloat16 (compute capability below 8.0, such as the GTX 10 series and Turing), which run the models in float32, 1.25 times this is used. Only while `WORKER_ENSEMBLE` is on, which is the default. Was `WORKER_ARRANGEMENT_MEMORY_GIB`. |
 | `WORKER_CPU_RESERVE_GIB` | `2.0` | RAM reserved for the loaded models when CPU `WORKER_BATCH_SIZE=auto` estimates how many jobs fit. This is a planning reserve, not a hard memory limit. It does not affect GPU batching. Was `WORKER_CPU_MODEL_MEMORY_GIB`. |
 | `WORKER_CPU_MEMORY_PER_JOB_GIB` | `2.0` | RAM estimated for each additional concurrent CPU transcription job when CPU `WORKER_BATCH_SIZE=auto` estimates capacity. Increase it if CPU jobs cause memory pressure; decrease it only when measurements show more jobs fit. It does not affect GPU batching. |
-| `WORKER_CPU_ARRANGEMENT_MEMORY_GIB` | `2.5` | RAM estimated for each concurrent CPU arrangement job. With `WORKER_ARRANGEMENT` on, the CPU estimate uses the larger of this and `WORKER_CPU_MEMORY_PER_JOB_GIB`, because any thread may run an arrangement. It does not affect GPU batching. |
+| `WORKER_CPU_ENSEMBLE_MEMORY_GIB` | `3.0` | RAM estimated for each concurrent CPU ensemble job. With `WORKER_ENSEMBLE` on, the CPU estimate uses the larger of this and `WORKER_CPU_MEMORY_PER_JOB_GIB`, because any thread may run an ensemble job. It does not affect GPU batching. Was `WORKER_CPU_ARRANGEMENT_MEMORY_GIB`. |
 | `WORKER_BATCH_SIZE` | `auto` | Maximum jobs combined into one model batch. `auto` uses each GPU's job capacity, or the lower of CPU thread capacity and the available-RAM estimate on CPU. A number is lowered to a GPU's capacity. In CPU mode, it is also the number of worker threads. See [below](#choosing-other-values). |
 | `WORKER_BATCH_TIMEOUT` | `2s` | Maximum wait for more jobs before running a partial batch. |
 | `WORKER_MAX_CONCURRENCY` | `auto` | Optional cap on concurrent GPU jobs. It can only lower the capacity calculated from VRAM. |
@@ -382,6 +383,9 @@ Old names keep working. Each logs one deprecation warning when a service starts.
 | `GOOGLE_PLAY_SERVICE_ACCOUNT_FILE` | the secret file `google_play_service_account.json` | Still read if set: a file name in `secrets`, or an absolute path. It takes priority over the secret file. |
 | `WORKER_MODEL_MEMORY_GIB` | `WORKER_GPU_RESERVE_GIB` | The reserve covers every loaded model now, not one. |
 | `WORKER_CPU_MODEL_MEMORY_GIB` | `WORKER_CPU_RESERVE_GIB` | The same, for RAM on CPU. |
+| `WORKER_ARRANGEMENT` | `WORKER_ENSEMBLE` | Ensemble transcriptions replaced piano arrangements. |
+| `WORKER_ARRANGEMENT_MEMORY_GIB` | `WORKER_ENSEMBLE_MEMORY_GIB` | The new default is `2.25`, not `0.8`. |
+| `WORKER_CPU_ARRANGEMENT_MEMORY_GIB` | `WORKER_CPU_ENSEMBLE_MEMORY_GIB` | The new default is `3.0`, not `2.5`. |
 | `OUTSOURCE_STORAGE_ENDPOINT` | `STORAGE_ENDPOINT` | The bucket also keeps job files now. The RunPod handler reads the old name too, so an endpoint that has it keeps working; `check --online` refuses an endpoint with both. |
 | `OUTSOURCE_STORAGE_BUCKET` | `STORAGE_BUCKET` | |
 | `OUTSOURCE_STORAGE_REGION` | `STORAGE_REGION` | |
@@ -439,13 +443,13 @@ budget now = free VRAM + the worker's own memory - WORKER_GPU_RESERVE_GIB - 0.25
 a job starts when: memory of the jobs holding places + this job's memory <= budget now
 ```
 
-A job's memory is `WORKER_MEMORY_PER_JOB_GIB`, or `WORKER_ARRANGEMENT_MEMORY_GIB` for an arrangement. The worker's own memory is what PyTorch holds, and its CUDA context and kernels, measured once its models are loaded (the worker log shows `GPU 0: the worker's memory beside PyTorch's is 0.28 GiB`): running jobs and the memory PyTorch keeps after a step are the worker's, so they never shut out its next job. A job counts from the moment it takes its place, while it still downloads, because it needs its memory soon after.
+A job's memory is `WORKER_MEMORY_PER_JOB_GIB`, or `WORKER_ENSEMBLE_MEMORY_GIB` for an ensemble job. The worker's own memory is what PyTorch holds, and its CUDA context and kernels, measured once its models are loaded (the worker log shows `GPU 0: the worker's memory beside PyTorch's is 0.28 GiB`): running jobs and the memory PyTorch keeps after a step are the worker's, so they never shut out its next job. A job counts from the moment it takes its place, while it still downloads, because it needs its memory soon after.
 
-`WORKER_GPU_RESERVE_GIB` is what is loaded once: all models, GPU kernels, and library handles. Its `auto` value is 1.25 GiB, or 1.0 GiB with `WORKER_ARRANGEMENT=false`, because AMT-APC's weights and kernels measured 0.17 to 0.23 GiB more. The 0.25 GiB is the beat tracker of the [tempo map](architecture.md#-tempo-map), which runs on the job's GPU, one job at a time; it peaked at 170 MiB allocated on an RTX 3060 Ti. With `WORKER_TEMPO_MAP=false` nothing is reserved for it. If another program takes that memory, beat tracking falls back to the CPU for that job.
+`WORKER_GPU_RESERVE_GIB` is what is loaded once: all models, GPU kernels, and library handles. Its `auto` value is 1.25 GiB, or 1.0 GiB with `WORKER_ENSEMBLE=false`, because dettato's weights and kernels measured 0.16 GiB more. The 0.25 GiB is the beat tracker of the [tempo map](architecture.md#-tempo-map), which runs on the job's GPU, one job at a time; it peaked at 170 MiB allocated on an RTX 3060 Ti. With `WORKER_TEMPO_MAP=false` nothing is reserved for it. If another program takes that memory, beat tracking falls back to the CPU for that job.
 
-The most transcription jobs, optionally capped by `WORKER_MAX_CONCURRENCY`, becomes the number of places on the models: jobs that may be before or in their model step at the same time. A job takes a place before it starts and gives it back as soon as its model step ends; its tempo map, MIDI file, and upload then run beside the next job's model step. So the worker starts twice as many threads as places. A job that finds no free place, or no room for its memory, stays queued: in a [home cluster](cluster.md) it goes to a device with a free place and room as soon as there is one, and otherwise starts here once there is. The worker's heartbeat reports the places that fit now, every 5 seconds and whenever they change, so the API outsources (with `local_first`) and other devices pass jobs on when another program uses this GPU. With `WORKER_ARRANGEMENT` on, the worker also takes [piano arrangements](architecture.md#-piano-arrangements) when the GPU's budget, as above, is at least `WORKER_ARRANGEMENT_MEMORY_GIB`; they run in the same threads. Only if a GPU is too small for one job does the worker run on the CPU. The worker log prints the result, for example `up to 5 job(s) by total VRAM, as other programs leave room (GPU 0: up to 5 job(s), batch 5, arrangements, 8.00 GiB, 5.68 GiB free now)`; `arrangements,` appears when that GPU takes them.
+The most transcription jobs, optionally capped by `WORKER_MAX_CONCURRENCY`, becomes the number of places on the models: jobs that may be before or in their model step at the same time. A job takes a place before it starts and gives it back as soon as its model step ends; its tempo map, MIDI file, and upload then run beside the next job's model step. So the worker starts twice as many threads as places. A job that finds no free place, or no room for its memory, stays queued: in a [home cluster](cluster.md) it goes to a device with a free place and room as soon as there is one, and otherwise starts here once there is. The worker's heartbeat reports the places that fit now, every 5 seconds and whenever they change, so the API outsources (with `local_first`) and other devices pass jobs on when another program uses this GPU. With `WORKER_ENSEMBLE` on, the worker also takes [ensemble transcriptions](architecture.md#-ensemble-transcriptions) when the GPU's budget, as above, is at least `WORKER_ENSEMBLE_MEMORY_GIB`; they run in the same threads. Only if a GPU is too small for one job does the worker run on the CPU. The worker log prints the result, for example `up to 5 job(s) by total VRAM, as other programs leave room (GPU 0: up to 5 job(s), batch 5, ensemble jobs, 8.00 GiB, 5.68 GiB free now)`; `ensemble jobs,` appears when that GPU takes them.
 
-At run time, every model step on a device runs in one shared memory budget, so transcriptions and arrangements share a GPU without running out of memory. A Transkun step takes its jobs times `WORKER_MEMORY_PER_JOB_GIB`; an arrangement step takes `WORKER_ARRANGEMENT_MEMORY_GIB`. A step waits for memory instead of running out of it, steps are served in the order they arrived so none starves, and a step larger than the whole budget runs alone. AMT-APC runs one window at a time, taking each job's next window in turn, so all arrangements progress together.
+At run time, every model step on a device runs in one shared memory budget, so piano and ensemble jobs share a GPU without running out of memory. A Transkun step takes its jobs times `WORKER_MEMORY_PER_JOB_GIB`; each of an ensemble job's three phases takes `WORKER_ENSEMBLE_MEMORY_GIB`. A step waits for memory instead of running out of it, steps are served in the order they arrived so none starves, and a step larger than the whole budget runs alone. Each ensemble job runs in a worker thread of its own, so several progress together.
 
 Free VRAM is the lower of two readings: CUDA's (`cudaMemGetInfo`) and `nvidia-smi`'s. They normally agree. Under Windows with Docker Desktop or WSL, CUDA does not count memory used by Windows programs, such as the desktop, browsers, or games, and reported 1.3 GiB too much free memory on an 8 GB card. `nvidia-smi` sees that usage. If `nvidia-smi` is unavailable, CUDA's reading is used.
 
@@ -455,25 +459,25 @@ The CUDA context, about 0.13 GiB, is created before free memory is read, so it i
 
 ### Measured usage
 
-Measured on an RTX 3060 Ti (8 GB) with the worker image, Transkun 2.0, AMT-APC, and 44.1 kHz audio. Allocated memory is what PyTorch tensors use; reserved memory is what PyTorch holds from the driver, which is what counts toward running out of memory.
+Measured on an RTX 3060 Ti (8 GB) with the worker image, Transkun 2.0, dettato, and 44.1 kHz audio. Allocated memory is what PyTorch tensors use; reserved memory is what PyTorch holds from the driver, which is what counts toward running out of memory.
 
 | What | VRAM |
 | --- | --- |
 | Transkun 2.0 model: 13.6 M parameters, fp32 | 0.06 GiB |
 | CUDA context (0.2 GiB is taken from total VRAM for it; what the driver keeps is not in the total) | ~0.13 GiB |
 | Transkun, GPU kernels, and library handles after the context | ~0.14 GiB |
-| AMT-APC weights and kernels, in addition | ~0.17 to 0.23 GiB |
+| dettato weights and kernels, in addition | ~0.16 GiB |
 | One transcription job, allocated | ~0.75 GiB |
 | One transcription job, reserved | ~1.0 GiB |
-| One arrangement step (one window), allocated | ~0.35 GiB |
-| One arrangement step, reserved | ~0.52 GiB |
-| One arrangement step, as `nvidia-smi` sees it | ~0.70 GiB |
+| One ensemble job of 4 minutes, allocated | ~1.64 GiB |
+| One ensemble job of 4 minutes, reserved | ~1.82 GiB |
+| One ensemble job of 59 minutes, reserved | ~2.09 GiB |
 
-The models themselves are small. For Transkun, most of the memory is the per-segment work for each job, mostly the interval scores computed for every pitch. AMT-APC's original code needed about 3.1 GiB for a window; the vendored model computes the same results in chunks of 64 frames and 22 notes, which was verified to give the same notes.
+The models themselves are small. For Transkun, most of the memory is the per-segment work for each job, mostly the interval scores computed for every pitch. An ensemble job's memory does not grow with the song: its transcriber works on a sliding buffer, and only per-note data outlives a segment. With float32, on GPUs without native bfloat16, it is about 1.2 times as much.
 
-GPU kernels are loaded on first use (CUDA lazy loading, the default since CUDA 12.3). With `CUDA_MODULE_LOADING=EAGER`, all kernels are loaded at startup. The context then grows to ~0.74 GiB and the memory after the context to ~0.63 GiB. The default reserve covers both modes without arrangements.
+GPU kernels are loaded on first use (CUDA lazy loading, the default since CUDA 12.3). With `CUDA_MODULE_LOADING=EAGER`, all kernels are loaded at startup. The context then grows to ~0.74 GiB and the memory after the context to ~0.63 GiB. The default reserve covers both modes without ensemble jobs.
 
-Per-job usage does not depend on video length or content. A job keeps its audio in system RAM and moves only the current 16-second segment (for an arrangement, the current 8.2-second window) to the GPU. Dense piano chords and white noise use the same memory.
+Per-job usage does not depend on video length or content. A job keeps its audio in system RAM and moves only the current 16-second segment (for an ensemble job, the current 32-second segment and its context) to the GPU. Dense piano chords and white noise use the same memory.
 
 | Video length | Jobs in batch | Reserved VRAM (incl. model) | Per job | Time per job |
 | --- | --- | --- | --- | --- |
@@ -485,23 +489,23 @@ Per-job usage does not depend on video length or content. A job keeps its audio 
 
 Times were measured without download and conversion, which usually take longer than the model. Other GPUs give different times, but memory use should be similar.
 
-An arrangement of a 4-minute song took about 9.5 s alone on that GPU, 27 times real time, the same for every style. A transcription running at the same time in the same process took about 50% longer.
+An ensemble job of a 3.7-minute song took 10.6 s on that GPU and one of 59 minutes 170 s, about 21 times real time.
 
 The worker also uses system RAM for audio: about 20 MiB per minute of video for each running job, so about 1.2 GiB for a 60-minute video.
 
-Example capacities with the default values (arrangements on), and with `WORKER_ARRANGEMENT=false`:
+Example capacities with the default values (ensemble jobs on), and with `WORKER_ENSEMBLE=false`:
 
-| GPU memory that other programs leave | Transcription jobs at the same time, by default | With `WORKER_ARRANGEMENT=false` |
+| GPU memory that other programs leave | Piano jobs at the same time, by default | With `WORKER_ENSEMBLE=false` |
 | --- | --- | --- |
-| 4 GiB | 2, and arrangements | 2 |
-| 6 GiB | 4, and arrangements | 4 |
-| 8 GiB | 5, and arrangements | 6 |
-| 12 GiB | 9, and arrangements | 10 |
-| 24 GiB | 20, and arrangements | 20 |
+| 4 GiB | 2, and ensemble jobs | 2 |
+| 6 GiB | 4, and ensemble jobs | 4 |
+| 8 GiB | 5, and ensemble jobs | 6 |
+| 12 GiB | 9, and ensemble jobs | 10 |
+| 24 GiB | 20, and ensemble jobs | 20 |
 
 ### On the CPU
 
-Without a usable GPU, or with `WORKER_ENFORCE_CPU=true`, the batch size is the number of worker threads, as [below](#choosing-other-values). It is estimated from available RAM, `WORKER_CPU_RESERVE_GIB` for the loaded models (measured about 0.33 GiB for both), and `WORKER_CPU_MEMORY_PER_JOB_GIB` for each job. With `WORKER_ARRANGEMENT` on, any thread may run an arrangement, so each job counts as the larger of that and `WORKER_CPU_ARRANGEMENT_MEMORY_GIB`. An arrangement job measured 1.3 to 2.4 GiB on an i7-10700K, growing with the song's length because of the audio and its features. On the CPU, steps of both models run one at a time, so the RAM of one step is not limited separately. An arrangement of a 4-minute song took about 173 s on 8 threads, 1.4 times real time; CPU times are approximate and depend on the processor.
+Without a usable GPU, or with `WORKER_ENFORCE_CPU=true`, the batch size is the number of worker threads, as [below](#choosing-other-values). It is estimated from available RAM, `WORKER_CPU_RESERVE_GIB` for the loaded models (measured about 0.33 GiB for both), and `WORKER_CPU_MEMORY_PER_JOB_GIB` for each job. With `WORKER_ENSEMBLE` on, any thread may run an ensemble job, so each job counts as the larger of that and `WORKER_CPU_ENSEMBLE_MEMORY_GIB`. An ensemble job runs dettato.cpp in a process of its own, with an address-space limit that grows with the song's length; one that needs more memory fails alone. It measured 1.4 GB of RAM for 223 s of audio, and took 267 s on 8 cores, about 0.8 times real time. CPU times are approximate and depend on the processor.
 
 ### Choosing other values
 
@@ -510,22 +514,22 @@ Without a usable GPU, or with `WORKER_ENFORCE_CPU=true`, the batch size is the n
 * Lower, for example `0.8`: more jobs run at once. The capacity is then larger than the GPU can hold. When the GPU runs out of memory, every job in the batch fails, not just one. On Windows and WSL the driver may instead move memory to system RAM, which avoids the error but makes transcription much slower.
 * Higher, for example `1.5`: more headroom for other programs on the GPU and for different driver or PyTorch versions, but fewer jobs at once, so more jobs wait in the queue. Free VRAM is wasted.
 
-**`WORKER_GPU_RESERVE_GIB`** (default `auto`: 1.0, or 1.25 with arrangements; measured ~0.14 with lazy loading, ~0.63 with eager loading, plus 0.17 to 0.23 for AMT-APC)
+**`WORKER_GPU_RESERVE_GIB`** (default `auto`: 1.0, or 1.25 with ensemble jobs; measured ~0.14 with lazy loading, ~0.63 with eager loading, plus 0.16 for dettato)
 
-* Lower, down to about `0.3` without arrangements: room for one more job on small GPUs. Only safe with lazy loading. Eager loading, or a different CUDA, cuDNN, or driver version that loads more, can then cause out-of-memory errors.
+* Lower, down to about `0.3` without ensemble jobs: room for one more job on small GPUs. Only safe with lazy loading. Eager loading, or a different CUDA, cuDNN, or driver version that loads more, can then cause out-of-memory errors.
 * Higher: headroom for programs that start using the GPU after the worker, such as a browser or game on a desktop machine. Each extra 1.1 GiB removes one job.
 
-**`WORKER_ARRANGEMENT_MEMORY_GIB`** (default `0.8`, measured ~0.52 reserved and ~0.70 as `nvidia-smi` sees it)
+**`WORKER_ENSEMBLE_MEMORY_GIB`** (default `2.25`, measured 1.82 GiB reserved for 4 minutes, 2.09 GiB for 59 minutes and 2.25 GiB for 3 hours, the weights' 0.16 GiB included)
 
-* Higher: more headroom while arranging next to transcriptions, but a GPU needs more free VRAM before its worker takes arrangements.
-* Lower: arrangements fit on smaller GPUs, but a step then claims less than it uses and can run out of memory with transcriptions beside it.
+* Higher: more headroom while an ensemble job runs next to piano jobs, but a GPU needs more free VRAM before its worker takes ensemble jobs.
+* Lower: ensemble jobs fit on smaller GPUs, but a job then claims less than it uses and can run out of memory with piano jobs beside it.
 
 **`WORKER_BATCH_SIZE`** (default `auto`)
 
 * `auto` on GPU: each GPU's batch size is the most jobs it holds, from its total VRAM, capped by `WORKER_MAX_CONCURRENCY` if set, and at least 1. A GPU that holds 4 jobs batches up to 4; a GPU that holds 20 batches up to 20. While other programs use the GPU, fewer jobs hold places, so batches are smaller.
 * A number on GPU is used as given, but never above that GPU's capacity. When it is lowered, the worker logs a warning at startup, for example `GPU 0: WORKER_BATCH_SIZE=6 is more than this GPU's capacity of 4 job(s); using 4`.
-* On CPU, `auto` is the lower of the resolved CPU thread count and the RAM capacity estimate, and the batch size is also the number of worker threads. The estimate uses `WORKER_CPU_RESERVE_GIB` as the model reserve and `WORKER_CPU_MEMORY_PER_JOB_GIB` (with arrangements on, at least `WORKER_CPU_ARRANGEMENT_MEMORY_GIB`) for each additional request, using currently available system memory. It is recalculated when the worker starts. A large value means many simultaneous downloads and much more RAM.
-* `WORKER_CPU_RESERVE_GIB`, `WORKER_CPU_MEMORY_PER_JOB_GIB`, and `WORKER_CPU_ARRANGEMENT_MEMORY_GIB` control only that CPU RAM estimate. They are separate from `WORKER_GPU_RESERVE_GIB` and `WORKER_MEMORY_PER_JOB_GIB`, which describe GPU VRAM. For example, with 14 GiB available RAM, a 2 GiB model reserve, and 2 GiB per job, the RAM estimate is 6 jobs; the CPU thread limit may lower it further.
+* On CPU, `auto` is the lower of the resolved CPU thread count and the RAM capacity estimate, and the batch size is also the number of worker threads. The estimate uses `WORKER_CPU_RESERVE_GIB` as the model reserve and `WORKER_CPU_MEMORY_PER_JOB_GIB` (with ensemble jobs on, at least `WORKER_CPU_ENSEMBLE_MEMORY_GIB`) for each additional request, using currently available system memory. It is recalculated when the worker starts. A large value means many simultaneous downloads and much more RAM.
+* `WORKER_CPU_RESERVE_GIB`, `WORKER_CPU_MEMORY_PER_JOB_GIB`, and `WORKER_CPU_ENSEMBLE_MEMORY_GIB` control only that CPU RAM estimate. They are separate from `WORKER_GPU_RESERVE_GIB` and `WORKER_MEMORY_PER_JOB_GIB`, which describe GPU VRAM. For example, with 14 GiB available RAM, a 2 GiB model reserve, and 2 GiB per job, the RAM estimate is 6 jobs; the CPU thread limit may lower it further.
 * The worker log shows the result at startup, for example `GPU 0: up to 5 job(s), batch 5, 8.00 GiB, 5.84 GiB free now`. `python -m app.config check` shows `auto` because the capacity is only known on the worker.
 * Values below the capacity leave capacity unused: jobs that arrive while a batch runs wait until the whole batch finishes.
 * Larger batches give more total throughput, with diminishing returns. In the table above, going from 4 to 6 jobs saves only about 5% time per job. Each job also progresses more slowly, because every step processes one segment for every job in the batch.

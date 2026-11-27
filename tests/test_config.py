@@ -59,19 +59,19 @@ def test_errors_are_collected_across_groups(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("text", "arrangement", "reserve"),
+    ("text", "ensemble", "reserve"),
     [
         ("", True, 1.25),
-        ("WORKER_ARRANGEMENT=false\n", False, 1.0),
-        ("WORKER_ARRANGEMENT=true\n", True, 1.25),
-        ("WORKER_ARRANGEMENT=true\nWORKER_GPU_RESERVE_GIB=auto\n", True, 1.25),
-        ("WORKER_ARRANGEMENT=true\nWORKER_GPU_RESERVE_GIB=0.6\n", True, 0.6),
+        ("WORKER_ENSEMBLE=false\n", False, 1.0),
+        ("WORKER_ENSEMBLE=true\n", True, 1.25),
+        ("WORKER_ENSEMBLE=true\nWORKER_GPU_RESERVE_GIB=auto\n", True, 1.25),
+        ("WORKER_ENSEMBLE=true\nWORKER_GPU_RESERVE_GIB=0.6\n", True, 0.6),
     ],
 )
-def test_gpu_reserve_auto_covers_the_models_loaded(tmp_path, text, arrangement, reserve):
+def test_gpu_reserve_auto_covers_the_models_loaded(tmp_path, text, ensemble, reserve):
     worker = load(tmp_path, text).worker
 
-    assert worker.arrangement is arrangement
+    assert worker.ensemble is ensemble
     assert config.gpu_reserve_gib(worker) == reserve
 
 
@@ -79,6 +79,35 @@ def test_gpu_reserve_auto_covers_the_models_loaded(tmp_path, text, arrangement, 
 def test_gpu_reserve_must_be_auto_or_positive(tmp_path, value):
     with pytest.raises(ConfigError, match=r"WORKER_GPU_RESERVE_GIB: must be 'auto' or a positive number"):
         load(tmp_path, f"WORKER_GPU_RESERVE_GIB={value}\n")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "field", "value"),
+    [
+        ("WORKER_ARRANGEMENT", "WORKER_ENSEMBLE", "ensemble", False),
+        ("WORKER_ARRANGEMENT_MEMORY_GIB", "WORKER_ENSEMBLE_MEMORY_GIB", "ensemble_memory_gib", 1.5),
+        ("WORKER_CPU_ARRANGEMENT_MEMORY_GIB", "WORKER_CPU_ENSEMBLE_MEMORY_GIB", "cpu_ensemble_memory_gib", 4.0),
+    ],
+)
+def test_the_arrangement_names_are_old_names_of_the_ensemble_settings(tmp_path, caplog, old, new, field, value):
+    text = str(value).lower()
+    with caplog.at_level(logging.WARNING, logger="app.config"):
+        worker = load(tmp_path, f"{old}={text}\n").worker
+
+    assert getattr(worker, field) == value
+    assert f"{old} is deprecated; use {new} instead" in caplog.text
+    assert getattr(load(tmp_path, f"{new}={text}\n").worker, field) == value
+    with pytest.raises(ConfigError, match=f"{old} and {new} are both set; remove {old}"):
+        load(tmp_path, f"{old}={text}\n{new}={text}\n")
+
+
+def test_the_ensemble_defaults(tmp_path):
+    worker = load(tmp_path).worker
+
+    assert worker.ensemble is True
+    assert (worker.ensemble_memory_gib, worker.cpu_ensemble_memory_gib) == (2.25, 3.0)
+    assert config.ENSEMBLE_RESERVE_GIB == 0.25
+    assert not hasattr(worker, "arrangement")
 
 
 @pytest.mark.parametrize(

@@ -154,7 +154,7 @@ docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
 
 The worker automatically uses CUDA when PyTorch detects a usable NVIDIA GPU. Otherwise it falls back to CPU. CPU execution is significantly slower; on machines without GPU support, remove `gpus: all` from the worker service in `docker-compose.yml`.
 
-By default, one worker process shares one model and batches requests. GPU capacity is estimated from total VRAM, and each job starts only while the VRAM other programs leave holds it, using `WORKER_GPU_RESERVE_GIB` (`auto`: `1.0` GiB reserved for the models and GPU libraries, `1.25` with [piano arrangements](architecture.md#-piano-arrangements)) and `WORKER_MEMORY_PER_JOB_GIB` (`1.1` GiB for each transcription job). See [GPU memory and batching](configuration.md#-gpu-memory-and-batching) for measurements and tuning. To measure this machine's actual CPU/GPU performance, see [Benchmarking CPU versus GPU](testing.md#-benchmarking-cpu-versus-gpu).
+By default, one worker process shares one model and batches requests. GPU capacity is estimated from total VRAM, and each job starts only while the VRAM other programs leave holds it, using `WORKER_GPU_RESERVE_GIB` (`auto`: `1.0` GiB reserved for the models and GPU libraries, `1.25` with [ensemble transcriptions](architecture.md#-ensemble-transcriptions)) and `WORKER_MEMORY_PER_JOB_GIB` (`1.1` GiB for each piano job). See [GPU memory and batching](configuration.md#-gpu-memory-and-batching) for measurements and tuning. To measure this machine's actual CPU/GPU performance, see [Benchmarking CPU versus GPU](testing.md#-benchmarking-cpu-versus-gpu).
 
 ## 📈 Worker scaling
 

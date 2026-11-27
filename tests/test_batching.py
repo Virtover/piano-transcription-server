@@ -242,8 +242,8 @@ def test_fixed_batch_size_is_clamped_with_warning_at_startup(default_settings, m
 
 
 def test_cpu_batch_size_uses_cpu_and_ram(default_settings, monkeypatch):
-    # Transcriptions only: arrangements, on by default, ask for more RAM per job.
-    default_settings.worker.arrangement = False
+    # Transcriptions only: ensemble jobs, on by default, ask for more RAM per job.
+    default_settings.worker.ensemble = False
     monkeypatch.setattr(device, "physical_cpu_count", lambda: 8)
     memory = type("Memory", (), {"available": 16 * 1024**3, "total": 32 * 1024**3})()
     monkeypatch.setattr(
@@ -265,7 +265,7 @@ def test_cpu_batch_size_uses_cpu_and_ram(default_settings, monkeypatch):
     assert launcher.plan_worker(None).threads == 3
 
 
-def test_cpu_batch_size_makes_room_for_arrangements_when_they_are_on(default_settings, monkeypatch):
+def test_cpu_batch_size_makes_room_for_ensembles_when_they_are_on(default_settings, monkeypatch):
     monkeypatch.setattr(device, "physical_cpu_count", lambda: 8)
     memory = type("Memory", (), {"available": 16 * 1024**3, "total": 32 * 1024**3})()
     monkeypatch.setattr(
@@ -274,13 +274,13 @@ def test_cpu_batch_size_makes_room_for_arrangements_when_they_are_on(default_set
         type("Psutil", (), {"cpu_count": lambda logical=False: 8, "virtual_memory": lambda: memory}),
     )
 
-    default_settings.worker.arrangement = False
+    default_settings.worker.ensemble = False
     # (16 - 2 GiB reserve) / 2 GiB per transcription = 7, capped by the 6 threads.
     assert device.cpu_batch_size() == 6
-    default_settings.worker.arrangement = True
-    # Any thread may arrange: (16 - 2) / 2.5 GiB = 5.
-    assert device.cpu_batch_size() == 5
-    default_settings.worker.cpu_arrangement_memory_gib = 1.0
+    default_settings.worker.ensemble = True
+    # Any thread may run an ensemble job: (16 - 2) / 3 GiB = 4.
+    assert device.cpu_batch_size() == 4
+    default_settings.worker.cpu_ensemble_memory_gib = 1.0
     # The larger of the two per-job figures counts.
     assert device.cpu_batch_size() == 6
     default_settings.worker.cpu_memory_per_job_gib = 4.0

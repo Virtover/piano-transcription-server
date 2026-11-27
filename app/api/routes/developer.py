@@ -23,6 +23,10 @@ billing = Billing()
 class Workers(BaseModel):
     count: int
     capacity: int
+    # Workers that take ensemble jobs.
+    ensemble: int
+    # The same, by its name from when ensemble jobs were piano arrangements,
+    # which older apps read.
     arranging: int
     average_job_seconds: float | None = None
 
@@ -41,6 +45,9 @@ class ServerStateResponse(BaseModel):
     backends: dict[str, Backend]
     outsourcing: bool
     workers: Workers | None = None
+    # Whether ensemble jobs are on (WORKER_ENSEMBLE).
+    ensemble: bool
+    # The same, for older apps.
     arrangement: bool
     paused: bool
     links_off: bool
@@ -71,10 +78,12 @@ def server_state(user: AuthenticatedUser = Depends(require_developer)) -> Server
         workers=Workers(
             count=len(workers),
             capacity=capacity,
-            arranging=sum(1 for worker in workers if worker["arrangement"]),
+            ensemble=sum(1 for worker in workers if worker["ensemble"]),
+            arranging=sum(1 for worker in workers if worker["ensemble"]),
             average_job_seconds=average if any(worker["average_job_seconds"] for worker in workers) else None,
         ) if workers else None,
-        arrangement=settings.worker.arrangement,
+        ensemble=settings.worker.ensemble,
+        arrangement=settings.worker.ensemble,
         paused=controls.paused(redis) is not None,
         links_off=controls.links_off(redis) is not None,
         maintenance=notice.as_response() if notice else None,

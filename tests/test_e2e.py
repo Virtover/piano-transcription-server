@@ -59,7 +59,7 @@ def test_expected_pitches(part, inside):
     assert e2e.expected_pitches(part) == (inside, set(e2e.PITCHES) - inside)
 
 
-def result(mode="transcription"):
+def result(mode="piano"):
     return e2e.Result("clip", mode, "job")
 
 
@@ -84,13 +84,39 @@ def test_a_part_not_cut_at_its_end_fails():
     assert any("past the part" in problem for problem in checked.problems)
 
 
-def test_an_arrangement_needs_only_the_parts_pitches_to_lead():
-    checked = result("arrangement")
-    e2e.check(checked, (10.0, 20.0), 10.0, [(0.0, 64), (0.5, 64), (1.0, 52), (2.0, 64)])
+@pytest.mark.parametrize("mode", e2e.MODES)
+def test_both_modes_are_held_to_the_strict_check(mode):
+    # Ensemble jobs once had a lenient check, as piano covers rewrote the
+    # notes; every instrument is transcribed now, so the plucked part must
+    # come back as the piano job gets it.
+    checked = result(mode)
+    e2e.check(checked, (10.0, 20.0), 10.0, plucks(10, 20, offset=10))
     assert checked.problems == []
-    wrong = result("arrangement")
+    sparse = result(mode)
+    e2e.check(sparse, (10.0, 20.0), 10.0, [(0.0, 64), (0.5, 64), (1.0, 52), (2.0, 64)])
+    assert any("notes of pitch 64, expected at least" in problem for problem in sparse.problems)
+    wrong = result(mode)
     e2e.check(wrong, (10.0, 20.0), 10.0, [(0.0, 60), (0.5, 60), (1.0, 64)])
     assert wrong.problems
+
+
+def test_the_modes_are_piano_and_ensemble():
+    assert e2e.MODES == ("piano", "ensemble")
+
+
+def test_midi_notes_ignore_the_drum_channel():
+    delta = varlen(0)
+    track = b"".join([
+        delta + bytes([0x90, 60, 80]),       # channel 1, pitched
+        delta + bytes([0x99, 36, 90]),       # channel 10, a drum
+        varlen(480) + bytes([0x80, 60, 0]),
+        delta + bytes([0x89, 36, 0]),
+        delta + bytes([0x91, 64, 80]),       # channel 2, pitched
+        delta + b"\xff\x2f\x00",
+    ])
+    data = b"MThd" + struct.pack(">IHHH", 6, 1, 1, 480) + b"MTrk" + struct.pack(">I", len(track)) + track
+
+    assert [(round(onset, 3), pitch) for onset, pitch in e2e.midi_notes(data)] == [(0.0, 60), (0.5, 64)]
 
 
 @pytest.fixture
@@ -118,7 +144,7 @@ def fake_server(api_context, monkeypatch):
 
 
 def args(**values):
-    return SimpleNamespace(**{"case": None, "mode": "transcription", "backend": "local", "timeout": 30,
+    return SimpleNamespace(**{"case": None, "mode": "piano", "backend": "local", "timeout": 30,
                               "keep": False, "json": False, **values})
 
 
@@ -133,6 +159,19 @@ def test_a_run_checks_every_case_and_cleans_up(fake_server, capsys):
     assert [backend for _, backend in sent] == ["local"] * 3
     # Nothing stays behind, and nobody was charged
     assert list(tasks.redis.scan_iter("transcription:*")) == []
+
+
+def test_a_run_of_both_modes_stores_each_as_the_server_does(fake_server, capsys):
+    _, sent, _ = fake_server
+
+    e2e.run(args(case="clip", mode=None, keep=True))
+
+    assert "All 2 end-to-end checks passed" in capsys.readouterr().out
+    stored = [tasks.redis.hgetall(tasks.job_key(job_id)) for job_id, _ in sent]
+    by_name = {fields["mode_name"]: fields for fields in stored}
+    assert set(by_name) == {"piano", "ensemble"}
+    # Ensemble jobs are stored as "arrangement", as the API stores them.
+    assert by_name["ensemble"]["mode"] == "arrangement" and "mode" not in by_name["piano"]
 
 
 def test_a_wrong_cut_makes_the_run_fail(fake_server, capsys):

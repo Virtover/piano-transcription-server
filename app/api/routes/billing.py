@@ -135,7 +135,13 @@ class ServerInfoResponse(BaseModel):
     result_retention_seconds: int
     max_video_length_minutes: int | None = None
     max_upload_size_mb: float | None
-    # Whether piano arrangements are on (WORKER_ARRANGEMENT), so an app can offer them.
+    # Whether ensemble jobs (mode ensemble) are on (WORKER_ARRANGEMENT), so
+    # an app can offer them.
+    ensemble: bool = False
+    # Always false: piano arrangements (AMT-APC piano covers) are no longer
+    # offered. Older apps read it to offer them; ensemble jobs replaced them,
+    # and a result with drums and many tracks is not what those apps show.
+    # A submission with mode arrangement is still taken, as an ensemble job.
     arrangement: bool = False
     # Whether a submission may ask for only a part of its video or file
     # (start_seconds, end_seconds); older servers would transcribe it all.
@@ -431,7 +437,8 @@ def server_info() -> ServerInfoResponse:
         result_retention_seconds=int(settings.limits.result_retention),
         max_video_length_minutes=settings.limits.max_video_length_minutes,
         max_upload_size_mb=settings.limits.max_upload_size_mb,
-        arrangement=settings.worker.arrangement,
+        ensemble=settings.worker.ensemble,
+        arrangement=False,
         trimming=True,
     )
     # Always present, null when nothing is planned.

@@ -18,6 +18,11 @@ beat-this==1.1.0
 einops==0.8.2
 rotary-embedding-torch==0.9.1
 mido==1.3.3
+# Ensemble jobs (app/transcription/dettato): its weights, its resampler, and
+# its grouper's clustering.
+safetensors==0.6.2
+soxr==1.1.0
+scipy==1.15.3
 # Not pinned: video sites change often, and an old yt-dlp stops working.
 # Every image build installs the newest release.
 yt-dlp

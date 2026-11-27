@@ -15,7 +15,7 @@ A home cluster's hub (docs/cluster.md) has three commands of its own, run
 here on the host, because they write files in secrets/:
 
     python scripts/admin.py nodes hub [--registry hub.example.ts.net]
-    python scripts/admin.py nodes invite laptop [--tasks transcribe,arrange] [--again]
+    python scripts/admin.py nodes invite laptop [--tasks transcribe,arrange] [--again]   # also piano,ensemble
     python scripts/admin.py nodes revoke laptop
 
 Runs on the host with only the Python standard library.
@@ -79,8 +79,9 @@ def node_command(arguments: list[str], stack) -> int:
     # Not dispatch by default: it copies the RunPod key to the device, and the
     # hub already sends jobs to RunPod.
     invite.add_argument("--tasks", default="transcribe,arrange,check",
-                        help="what it may run, from transcribe, arrange, dispatch (sending jobs to RunPod, with the "
-                             "RunPod key), and check; or all. Default: transcribe,arrange,check")
+                        help="what it may run, from transcribe (piano jobs, also: piano), arrange (ensemble jobs, also: "
+                             "ensemble), dispatch (sending jobs to RunPod, with the RunPod key), and check; or all. "
+                             "Default: transcribe,arrange,check")
     invite.add_argument("--again", action="store_true", help="a new invite for a node: new password and keys")
     revoke = commands.add_parser("revoke", help="cut a node off: its password and keys stop working at once")
     revoke.add_argument("node")

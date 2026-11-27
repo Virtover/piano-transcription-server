@@ -252,6 +252,9 @@ class LimitsSettings(BaseSettings):
     max_upload_size_mb: UnlimitedNumber = Field(default=200, gt=0)
     # Jobs being uploaded, checked, queued, or transcribed at once.
     max_active_jobs: UnlimitedInt = Field(default=50, ge=1)
+    # Disk space always left free on the data disk (app/disk.py): a job that
+    # would leave less waits, new submissions are refused below it.
+    min_free_disk_gib: float = Field(default=2.0, ge=0, allow_inf_nan=False)
     # The same per signed-in user; only applies with billing.
     max_active_jobs_per_user: UnlimitedInt = Field(default=5, ge=1)
     # How long a finished job's status and MIDI file can be retrieved.
@@ -295,17 +298,23 @@ class WorkerSettings(BaseSettings):
     threads: AutoInt = None
     # Ignore CUDA devices and run the local worker on CPU.
     enforce_cpu: bool = False
-    # Piano arrangements (AMT-APC) beside transcriptions.
-    arrangement: bool = True
+    # Ensemble jobs (dettato: every instrument as its own track, plus drums)
+    # beside piano transcriptions.
+    ensemble: bool = True
     # VRAM reserved on each GPU for what is loaded once; auto: gpu_reserve.
     gpu_reserve_gib: AutoNumber = None
     memory_per_job_gib: float = Field(default=1.1, gt=0, allow_inf_nan=False)
-    arrangement_memory_gib: float = Field(default=0.8, gt=0, allow_inf_nan=False)
-    # System RAM reserved for the models, and for each CPU transcription and
-    # arrangement job.
+    # VRAM of one ensemble job at its peak, for any length (measured 1.93 GiB
+    # above the weights for an hour, 2.09 for three, bfloat16); 1.25 times as
+    # much on GPUs without bfloat16 (app.transcription.device.ensemble_memory_gib).
+    ensemble_memory_gib: float = Field(default=2.25, gt=0, allow_inf_nan=False)
+    # System RAM reserved for the models, and for each CPU piano and ensemble
+    # job.
     cpu_reserve_gib: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     cpu_memory_per_job_gib: float = Field(default=2.0, gt=0, allow_inf_nan=False)
-    cpu_arrangement_memory_gib: float = Field(default=2.5, gt=0, allow_inf_nan=False)
+    # An ensemble job on the CPU (dettato.cpp): measured 1.4 GiB for 4 minutes,
+    # growing about 2.2 MB per second of audio.
+    cpu_ensemble_memory_gib: float = Field(default=3.0, gt=0, allow_inf_nan=False)
     # auto: each GPU's job capacity; CPU and RAM dependent in CPU mode.
     batch_size: AutoInt = None
     batch_timeout: Duration = 2.0
@@ -319,10 +328,10 @@ class WorkerSettings(BaseSettings):
 
 
 # WORKER_GPU_RESERVE_GIB=auto: Transkun and the GPU libraries, and the
-# arrangement model's weights and kernels when it is on (measured 0.17 to
-# 0.23 GiB on an RTX 3060 Ti); see docs/configuration.md.
+# ensemble models' weights and kernels when they are on (dettato: measured
+# 0.16 GiB on an RTX 3060 Ti); see docs/configuration.md.
 GPU_RESERVE_GIB = 1.0
-ARRANGEMENT_RESERVE_GIB = 0.25
+ENSEMBLE_RESERVE_GIB = 0.25
 
 
 def gpu_reserve_gib(worker: "WorkerSettings") -> float:
@@ -330,7 +339,7 @@ def gpu_reserve_gib(worker: "WorkerSettings") -> float:
     the models this worker loads."""
     if worker.gpu_reserve_gib is not None:
         return worker.gpu_reserve_gib
-    return GPU_RESERVE_GIB + (ARRANGEMENT_RESERVE_GIB if worker.arrangement else 0.0)
+    return GPU_RESERVE_GIB + (ENSEMBLE_RESERVE_GIB if worker.ensemble else 0.0)
 
 
 class JobSettings(BaseSettings):
@@ -789,6 +798,10 @@ ALIASES: dict[str, Alias] = {
     "OUTSOURCE_MAX_WAIT": Alias("OUTSOURCE_LOCAL_FIRST_MAX_WAIT", str),
     # The reserves cover every loaded model now, not one.
     "WORKER_MODEL_MEMORY_GIB": Alias("WORKER_GPU_RESERVE_GIB", str),
+    # Ensemble jobs replaced piano arrangements.
+    "WORKER_ARRANGEMENT": Alias("WORKER_ENSEMBLE", str),
+    "WORKER_ARRANGEMENT_MEMORY_GIB": Alias("WORKER_ENSEMBLE_MEMORY_GIB", str),
+    "WORKER_CPU_ARRANGEMENT_MEMORY_GIB": Alias("WORKER_CPU_ENSEMBLE_MEMORY_GIB", str),
     "WORKER_CPU_MODEL_MEMORY_GIB": Alias("WORKER_CPU_RESERVE_GIB", str),
     # The bucket also keeps job files now, not only outsourced audio.
     "OUTSOURCE_STORAGE_ENDPOINT": Alias("STORAGE_ENDPOINT", str),

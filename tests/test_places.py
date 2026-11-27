@@ -345,7 +345,7 @@ def test_a_place_needs_room_for_its_memory_beside_the_held_ones():
     # 2.2 GiB held: one more job of 1.1 does not fit in 2.5, though places are free.
     assert pool.take(lambda: True, interval=0.01, memory_gib=1.1) is None
     assert pool.in_use == 2 and pool.memory_gib == pytest.approx(2.2)
-    # A smaller job, as an arrangement, fits.
+    # A smaller job fits.
     assert pool.take(never, memory_gib=0.3) is not None
 
 
@@ -457,16 +457,21 @@ def test_places_without_a_room_are_only_a_count():
     assert pool.usable(1.1) == 2
 
 
-def test_a_job_on_a_gpu_takes_the_memory_of_its_kind(worker, monkeypatch):
+@pytest.mark.parametrize(("fp32", "gib"), [(False, 2.25), (True, 2.8125)])
+def test_an_ensemble_job_on_a_gpu_takes_the_memory_of_its_kind(worker, monkeypatch, fp32, gib):
+    from app.transcription import device
+
+    monkeypatch.setattr(device, "_fp32_gpus", fp32)
     _, billing, _ = worker
     pool = places.Places(3, room=Room(10.0))
     monkeypatch.setattr(tasks, "model_places", pool)
     queue_job(billing)
-    tasks.redis.hset(tasks.job_key("job"), "mode", tasks.ARRANGEMENT)
+    tasks.redis.hset(tasks.job_key("job"), "mode", tasks.ENSEMBLE)
 
     place, _ = tasks.wait_for_place("job")
 
-    assert place.memory_gib == tasks.settings.worker.arrangement_memory_gib
+    # WORKER_ENSEMBLE_MEMORY_GIB, 1.25 times that where the GPUs run float32.
+    assert place.memory_gib == pytest.approx(gib)
     place.release()
 
 

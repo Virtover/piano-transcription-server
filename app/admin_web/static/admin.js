@@ -636,8 +636,8 @@ async function overview() {
       stat("Processing", fmt(jobs.processing), `${fmt(state.backends.local)} local · ${fmt(state.backends.remote)} remote`),
       stat("Local worker", worker ? (worker.count > 1 ? `${fmt(worker.count)} online` : "Online") : "No heartbeat",
         worker ? `${worker.capacity} at once · avg ${span(worker.average_job_seconds)} · seen ${ago(worker.updated_at)}` : "Check the worker's log", worker ? "" : "alarm"),
-      stat("Arrangements", state.arrangement ? "On" : "Off",
-        state.arrangement ? (worker ? `${fmt(worker.arranging)} of ${fmt(worker.count)} workers arrange` : "No worker is running") : "WORKER_ARRANGEMENT=false"),
+      stat("Ensemble", state.ensemble ? "On" : "Off",
+        state.ensemble ? (worker ? `${fmt(worker.ensemble)} of ${fmt(worker.count)} workers take them` : "No worker is running") : "WORKER_ENSEMBLE=false"),
       stat("Remote", remote.enabled ? unit(fmt(remote.in_use), `/ ${fmt(remote.limit)}`) : "Off", remote.enabled ? "jobs on RunPod" : "OUTSOURCE_PROVIDER=none")),
     el("div", { class: "ov-grid" },
       section("jobs", "jobs", "blue", "Jobs", "Recent jobs with their full errors; cancel a stuck one.", `${fmt(jobs.queued)} queued · ${fmt(jobs.processing)} processing`),
@@ -675,9 +675,10 @@ async function overview() {
 
 // --- Jobs ------------------------------------------------------------------------------------
 
-// "transcription", or "arrangement level2" while the job still has its style.
+// "piano", "ensemble", or "piano cover level2" for a job of before ensemble jobs replaced piano covers, while it
+// still has its style.
 function modeLabel(row) {
-  return row.mode === "arrangement" ? (row.style ? `arrangement ${row.style}` : "arrangement") : "transcription";
+  return row.style ? `piano cover ${row.style}` : row.mode === "ensemble" || row.mode === "arrangement" ? "ensemble" : "piano";
 }
 
 function jobs() {
@@ -705,7 +706,7 @@ function jobs() {
   user.box.addEventListener("change", () => { filters.user = user.box.value.trim(); load(); });
   const backend = select([["", "Any backend"], ["local", "Local"], ["remote", "Remote"]], "");
   backend.addEventListener("change", () => { filters.backend = backend.value; load(); });
-  const mode = select([["", "Any mode"], ["transcription", "Transcriptions"], ["arrangement", "Arrangements"]], "");
+  const mode = select([["", "Any mode"], ["piano", "Piano"], ["ensemble", "Ensemble"]], "");
   mode.addEventListener("change", () => { filters.mode = mode.value; load(); });
   const since = select([["1h", "Last hour"], ["1d", "Last day"], ["7d", "Last 7 days"], ["30d", "Last 30 days"]], "1d");
   since.addEventListener("change", () => { filters.since = since.value; load(); });
@@ -1094,8 +1095,8 @@ async function limitsView() {
 // --- Devices of a home cluster (docs/cluster.md) -------------------------------------------------
 
 const NODE_TASKS = [
-  ["transcribe", "Transcriptions"],
-  ["arrange", "Arrangements"],
+  ["transcribe", "Piano jobs"],
+  ["arrange", "Ensemble jobs"],
   ["dispatch", "Sending to RunPod"],
   ["check", "Link checks for the hub"],
 ];
@@ -1136,7 +1137,7 @@ async function nodesView() {
     }));
     const problems = device.services.filter((service) => service.problem || (service.code && !service.same_code));
     const hardware = device.services.map((service) => service.hardware).find((item) => item && item.kind) || null;
-    // Places on the models, which transcriptions and arrangements share.
+    // Places on the models, which piano and ensemble jobs share (hardware.arrangements: it takes ensemble jobs).
     const places = (task) => !hardware || !["transcribe", "arrange"].includes(task) ? null
       : task === "arrange" && !hardware.arrangements ? null : hardware.places;
     const card = iconCard("limits", color, device.node, device.address ? `public address ${device.address}` + (device.shares_address_with.length
@@ -1163,7 +1164,7 @@ async function nodesView() {
       hardware ? el("dl", { class: "hardware" }, hardwareLines(hardware).flatMap(([label, text]) => [
         el("dt", { text: label }), el("dd", { text })])) : null,
       hardware && hardware.arrangements ? el("p", { class: "secondary hardware-note",
-        text: `Transcriptions and arrangements share the ${hardware.places} places`
+        text: `Piano and ensemble jobs share the ${hardware.places} places`
           + (hardware.limited_by ? `, fewer than fit in VRAM because of ${hardware.limited_by}` : "")
           + "; a place is free again once a job's model step ends." }) : null,
       problems.length ? alertBox("warn",

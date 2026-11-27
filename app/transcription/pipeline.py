@@ -31,14 +31,14 @@ def transcribe_source(
     upload_path: Path | None = None,
     upload_title: str | None = None,
     max_seconds: float | None = None,
-    arrangement_style: str | None = None,
+    ensemble: bool = False,
     model_done_callback: Callable[[], None] | None = None,
     clip: Clip | None = None,
 ) -> Path:
     """Transcribe source_url, or upload_path when it is given, at most about
     max_seconds of it: the duration the job was charged for. With clip,
-    only that part of it, max_seconds long. With
-    arrangement_style, arrange it for piano in that style instead.
+    only that part of it, max_seconds long. With ensemble, transcribe
+    every instrument (dettato) instead of the piano (Transkun).
     model_done_callback is called once the model step has ended."""
     from app.transcription.piano_transcription import transcribe_piano
 
@@ -57,13 +57,13 @@ def transcribe_source(
 
         midi_path = output_dir / "transcription.mid"
 
-        if arrangement_style is not None:
-            from app.transcription.arrangement import arrange_piano
+        if ensemble:
+            from app.transcription.ensemble_transcription import transcribe_ensemble_file
 
-            arrange_piano(
+            transcribe_ensemble_file(
                 audio_path=downloaded.path,
                 output_path=midi_path,
-                style=arrangement_style,
+                source_rate=downloaded.source_rate,
                 progress_callback=progress_callback,
                 cancellation_callback=cancellation_callback,
                 model_done_callback=model_done_callback,

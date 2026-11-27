@@ -62,8 +62,8 @@ def collect() -> dict:
 
     namespace = tasks.broker.namespace
     queue_names = [tasks.LOCAL_QUEUE, tasks.REMOTE_QUEUE]
-    if settings.worker.arrangement:
-        queue_names.append(tasks.ARRANGEMENT_QUEUE)
+    if settings.worker.ensemble:
+        queue_names.append(tasks.ENSEMBLE_QUEUE)
     queues = {
         queue: {
             # Messages not yet finished, including ones a worker has taken.
@@ -106,11 +106,11 @@ def collect() -> dict:
             "count": len(workers),
             "capacity": capacity,
             "average_job_seconds": average if any(worker["average_job_seconds"] for worker in workers) else None,
-            "arranging": sum(1 for worker in workers if worker["arrangement"]),
+            "ensemble": sum(1 for worker in workers if worker["ensemble"]),
             "updated_at": max(worker["updated_at"] for worker in workers),
         } if workers else None,
         "local_workers": workers,
-        "arrangement": settings.worker.arrangement,
+        "ensemble": settings.worker.ensemble,
         "api_leader": leader.current_leader(redis),
         "waiting": metrics.job_queues(redis),
         "video_checks": {"in_use": in_use(redis, VIDEO_CHECKS_KEY), "limit": settings.limits.max_video_checks},
@@ -149,21 +149,21 @@ def render(state: dict) -> str:
             f"Local worker  {count}{worker['capacity']} jobs at once, average job "
             f"{span(average) if average else 'unknown yet'}, heartbeat {ago(worker['updated_at'])}"
         )
-        if state["arrangement"]:
-            lines.append(f"              {worker['arranging']} of {worker['count']} arrange (piano arrangements are on)")
+        if state["ensemble"]:
+            lines.append(f"              {worker['ensemble']} of {worker['count']} take ensemble jobs (they are on)")
         if worker["count"] > 1:
             for each in state["local_workers"]:
                 each_average = each["average_job_seconds"]
                 lines.append(
                     f"              {each['id']}: {each['capacity']} at once, average "
                     f"{span(each_average) if each_average else 'unknown yet'}, heartbeat {ago(each['updated_at'])}"
-                    + (", arranges" if each["arrangement"] else "")
+                    + (", ensemble jobs" if each["ensemble"] else "")
                 )
 
-    if worker is None and state["arrangement"]:
-        lines.append("Arrangements  on, but no worker is running to arrange")
-    elif not state["arrangement"]:
-        lines.append("Arrangements  off (WORKER_ARRANGEMENT=false)")
+    if worker is None and state["ensemble"]:
+        lines.append("Ensemble      on, but no worker is running to take ensemble jobs")
+    elif not state["ensemble"]:
+        lines.append("Ensemble      off (WORKER_ENSEMBLE=false)")
     api_leader = state["api_leader"]
     lines.append(
         f"API leader    {api_leader}: runs backups and the abandoned job watcher"
@@ -206,6 +206,12 @@ def render(state: dict) -> str:
         )
         if disk["virtual_disk"]:
             lines.append("              Docker Desktop's virtual disk: its limit, not the host's drive, which may have less free")
+        minimum = settings.limits.min_free_disk_gib * 1024**3
+        if disk["free_bytes"] < minimum:
+            lines.append(f"              FULL: under MIN_FREE_DISK_GIB={settings.limits.min_free_disk_gib:g}; "
+                         "new jobs are refused and queued ones wait")
+        elif disk["free_bytes"] < 2 * minimum:
+            lines.append(f"              LOW: under twice MIN_FREE_DISK_GIB={settings.limits.min_free_disk_gib:g}")
 
     backup_state = state["backups"]
     if settings.database.backups == "provider":

@@ -181,6 +181,40 @@ def test_a_job_lost_on_every_attempt_fails_once_and_is_refunded_once(worker, mon
     assert billing.get_balance("user") == 10
 
 
+@pytest.mark.parametrize(
+    ("fields", "actor", "queue"),
+    [
+        ({}, "transcribe_job", tasks.LOCAL_QUEUE),
+        ({"mode": "arrangement", "mode_name": "ensemble"}, "arrange_job", "arrangement"),
+        # A job queued before ensemble jobs replaced piano covers kept its style.
+        ({"mode": "arrangement", "style": "level2"}, "arrange_job", "arrangement"),
+    ],
+)
+def test_a_job_whose_node_dropped_is_queued_again_locally_on_its_own_queue(worker, monkeypatch, fields, actor, queue):
+    # The real send_job and the actors' own messages: the lost job's message
+    # must reach the queue of its kind, with the stored mode kept.
+    _, billing = worker
+    messages = []
+    for actor_name in ("transcribe_job", "ensemble_job", "transcribe_remote_job"):
+        actor_object = getattr(tasks, actor_name)
+        # The message Dramatiq would enqueue, with its queue and actor names.
+        monkeypatch.setattr(actor_object, "send",
+                            lambda *args, _actor=actor_object, **kwargs: messages.append(_actor.message(*args, **kwargs)))
+    queue_job(billing, source_url="https://example.com/v", backend="local", node="laptop", **fields)
+    assert tasks.claim_job("job", "attempt-1")
+    # The node's worker stopped, or its network dropped: the lease lapses.
+    tasks.redis.delete(tasks.lease_key("job"))
+
+    assert tasks.fail_abandoned_jobs() == 1
+
+    assert job()["status"] == "queued" and job()["requeue_reason"] == tasks.WORKER_STOPPED
+    assert [(message.actor_name, message.queue_name, message.args) for message in messages] == [
+        (actor, queue, ("job", "https://example.com/v"))]
+    assert {name: job().get(name) for name in fields} == fields
+    assert tasks.redis.sismember(tasks.routing.ACTIVE_KEYS["local"], "job")
+    assert billing.reserved_job_ids() == ["job"]
+
+
 def test_one_attempt_fails_at_the_first_interruption(worker, monkeypatch):
     settings, billing = worker
     settings.jobs.max_attempts = 1
@@ -365,8 +399,8 @@ def test_a_job_interrupted_here_prefers_another_device(worker, monkeypatch, defa
     assert tasks.pass_job("job", "local")
     assert sent == ["job"]
 
-    # An arrangement needs a device that arranges.
-    tasks.redis.hset(tasks.job_key("job"), "mode", tasks.ARRANGEMENT)
+    # An ensemble job needs a device that takes ensemble jobs.
+    tasks.redis.hset(tasks.job_key("job"), "mode", tasks.ENSEMBLE)
     assert not tasks.pass_job("job", "local")
 
 
@@ -581,20 +615,20 @@ def test_a_link_checked_by_a_node_saves_no_info_for_the_download(api_context, mo
 # --- Settings the hub publishes -----------------------------------------------------------------
 
 def test_a_node_takes_the_hubs_settings_but_keeps_its_own(default_settings):
-    environment = {"WORKER_ARRANGEMENT": "false", "NODE_NAME": "laptop"}
-    hub = {"RESULT_RETENTION": "1d", "WORKER_ARRANGEMENT": "true", "MAX_ACTIVE_JOBS": "100"}
+    environment = {"WORKER_ENSEMBLE": "false", "NODE_NAME": "laptop"}
+    hub = {"RESULT_RETENTION": "1d", "WORKER_ENSEMBLE": "true", "MAX_ACTIVE_JOBS": "100"}
 
     applied = cluster.apply_hub_settings(environment, hub)
 
     assert applied["RESULT_RETENTION"] == "1d"
-    assert applied["WORKER_ARRANGEMENT"] == "false"
+    assert applied["WORKER_ENSEMBLE"] == "false"
     assert applied[cluster.SYNCED_NAMES_VARIABLE] == "MAX_ACTIVE_JOBS,RESULT_RETENTION"
 
     # A setting removed on the hub goes; the node's own stays.
     again = cluster.apply_hub_settings(applied, {"RESULT_RETENTION": "2d"})
     assert "MAX_ACTIVE_JOBS" not in again
     assert again["RESULT_RETENTION"] == "2d"
-    assert again["WORKER_ARRANGEMENT"] == "false"
+    assert again["WORKER_ENSEMBLE"] == "false"
 
 
 def test_wiring_the_database_and_device_settings_are_never_taken_from_the_hub():
@@ -609,7 +643,7 @@ def test_wiring_the_database_and_device_settings_are_never_taken_from_the_hub():
                  "GOOGLE_PLAY_PACKAGE_NAME", "OFFSITE_BACKUP_RECIPIENT", "CLOUDFLARE_TUNNEL_HOSTNAME"):
         assert name not in names, name
     # What a worker needs.
-    for name in ("WORKER_ARRANGEMENT", "JOB_STORAGE", "STORAGE_BUCKET", "OUTSOURCE_PROVIDER", "ERROR_REPORT_URL",
+    for name in ("WORKER_ENSEMBLE", "JOB_STORAGE", "STORAGE_BUCKET", "OUTSOURCE_PROVIDER", "ERROR_REPORT_URL",
                  "VIDEO_SITE_INTERVAL", "WORKER_BUSY_UTILIZATION", "JOB_MAX_ATTEMPTS"):
         assert name in names, name
     applied = cluster.apply_hub_settings({}, {"REDIS_URL": "redis://evil:6379/0", "DATA_DIR": "/"})
@@ -696,6 +730,17 @@ def test_switches_allow_what_a_device_offers():
     assert cluster.allowed_tasks(redis, "laptop", offered) == ["arrange"]
 
 
+def test_tasks_are_taken_by_their_stored_values_and_their_names_for_people():
+    assert cluster.parse_tasks("transcribe, arrange") == ["transcribe", "arrange"]
+    assert cluster.parse_tasks("piano,ensemble,check") == ["transcribe", "arrange", "check"]
+    assert cluster.parse_tasks("ensemble") == ["arrange"]
+    assert cluster.parse_tasks("all") == list(cluster.TASKS)
+    assert cluster.TASK_TITLES["transcribe"] == "piano transcriptions"
+    assert cluster.TASK_TITLES["arrange"] == "ensemble transcriptions"
+    with pytest.raises(ValueError, match="Unknown task"):
+        cluster.parse_tasks("remix")
+
+
 def test_a_stored_task_list_from_a_newer_hub_ignores_unknown_tasks():
     redis = fakeredis.FakeRedis(decode_responses=True)
     redis.hset(cluster.config_key("laptop"), "tasks", "transcribe,teleport")
@@ -733,13 +778,13 @@ def test_live_addresses_by_task():
     assert cluster.running_tasks(redis)["hub"] == {"dispatch"}
 
 
-def test_a_worker_kept_to_arrangements_does_not_count_for_transcriptions():
+def test_a_worker_kept_to_ensembles_does_not_count_for_transcriptions():
     redis = fakeredis.FakeRedis(decode_responses=True)
-    tasks.routing.publish_heartbeat(redis, 4, 30.0, worker="a", arrangement=True, transcription=False)
-    tasks.routing.publish_heartbeat(redis, 2, 30.0, worker="b", arrangement=False)
+    tasks.routing.publish_heartbeat(redis, 4, 30.0, worker="a", ensemble=True, transcription=False)
+    tasks.routing.publish_heartbeat(redis, 2, 30.0, worker="b", ensemble=False)
 
     assert tasks.routing.local_capacity(redis)[0] == 2
-    assert tasks.routing.local_capacity(redis, arrangement=True)[0] == 4
+    assert tasks.routing.local_capacity(redis, ensemble=True)[0] == 4
 
 
 # --- The supervisor ----------------------------------------------------------------------------------
@@ -775,7 +820,7 @@ def make_supervisor(monkeypatch, role="local", offered=("transcribe", "arrange")
         started.append(process)
         return process
 
-    plan = launcher.WorkerPlan(processes=1, threads=6, cpu_threads=None, summary="1 GPU(s)", arrangement=True,
+    plan = launcher.WorkerPlan(processes=1, threads=6, cpu_threads=None, summary="1 GPU(s)", ensemble=True,
                                places=3)
     monkeypatch.setattr(supervisor.Supervisor, "capabilities", lambda self: list(offered))
     monkeypatch.setattr(supervisor.shutil, "which", lambda name: "/usr/bin/dramatiq")
@@ -1167,16 +1212,16 @@ def test_each_device_shows_what_its_jobs_run_on_and_how_many_at_once(api_context
     text = capsys.readouterr().out
 
     assert devices["hub"]["services"][0]["hardware"] == gpu
-    assert "3 place(s) at once (fewer than fit in VRAM: CPU cores); transcriptions and arrangements share them" in text
-    assert "GPU 0: NVIDIA GeForce RTX 3060 Ti, 8.0 GiB VRAM, 5.7 GiB free at start, up to 3 job(s), arrangements" in text
-    assert "2 place(s) at once; transcriptions only" in text
+    assert "3 place(s) at once (fewer than fit in VRAM: CPU cores); piano and ensemble jobs share them" in text
+    assert "GPU 0: NVIDIA GeForce RTX 3060 Ti, 8.0 GiB VRAM, 5.7 GiB free at start, up to 3 job(s), ensemble jobs" in text
+    assert "2 place(s) at once; piano jobs only" in text
     assert "CPU: Intel(R) Core(TM) i5, 4 core(s), 2 thread(s) for the models, 16.0 GiB RAM" in text
 
 
 def test_the_supervisor_publishes_its_hardware(monkeypatch):
     instance, redis, _, _ = make_supervisor(monkeypatch)
     instance.local_plan = launcher.WorkerPlan(processes=1, threads=6, cpu_threads=None, summary="1 GPU(s)",
-                                              arrangement=True, places=3, hardware={"kind": "gpu", "places": 3})
+                                              ensemble=True, places=3, hardware={"kind": "gpu", "places": 3})
 
     instance.step()
 

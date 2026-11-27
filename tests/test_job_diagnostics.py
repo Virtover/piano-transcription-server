@@ -185,13 +185,13 @@ def test_diagnostics_retention_default(api_context):
     assert settings.jobs.diagnostics_retention == 30 * 24 * 60 * 60
 
 
-# --- piano arrangements -----------------------------------------------------------
+# --- ensemble jobs (stored as arrangements) -----------------------------------------------------------
 
 @pytest.mark.parametrize(("fields", "mode"), [({}, "transcription"), ({"mode": "arrangement", "style": "level1"}, "arrangement")])
-def test_the_job_record_stores_the_mode(worker, monkeypatch, fields, mode):
+def test_the_job_record_stores_the_mode_as_before(worker, monkeypatch, fields, mode):
     client, settings, _ = worker
-    settings.worker.arrangement = True
-    monkeypatch.setattr(tasks.arrange_job, "send", lambda *args, **kwargs: None)
+    settings.worker.ensemble = True
+    monkeypatch.setattr(tasks.ensemble_job, "send", lambda *args, **kwargs: None)
 
     response = client.post("/api/transcriptions", headers=auth("user"), json={"source_url": "https://example.com/video", **fields})
 

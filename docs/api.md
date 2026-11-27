@@ -28,24 +28,26 @@ curl -X POST http://localhost:8000/api/transcriptions \
 
 The endpoint returns `202 Accepted`, a `job_id`, and `queued` status. The job's title and metadata are available from the start, read when the link is checked. PowerShell keeps the response in `$job`, which the examples below use. With curl, keep the ID for them: `JOB_ID=<job_id from the response>`.
 
-### 🎹 Piano arrangements
+### 🎻 Ensemble transcriptions
 
-With [piano arrangements](architecture.md#-piano-arrangements) on (the default; `WORKER_ARRANGEMENT=false` turns them off), a job can make a piano cover of a song instead of transcribing a piano recording. Add `mode` and, if you like, `style` to the request:
+With [ensemble transcriptions](architecture.md#-ensemble-transcriptions) on (the default; `WORKER_ENSEMBLE=false` turns them off), a job can transcribe every instrument of any recording into its own MIDI track, named after the instrument, plus a drum track on channel 10, instead of transcribing a piano recording. Add `mode` to the request:
 
 ```shell
-curl -X POST http://localhost:8000/api/transcriptions   -H 'Content-Type: application/json'   -d '{"source_url":"https://example.com/video","mode":"arrangement","style":"level3"}'
+curl -X POST http://localhost:8000/api/transcriptions   -H 'Content-Type: application/json'   -d '{"source_url":"https://example.com/video","mode":"ensemble"}'
 ```
 
-* `mode` is `transcription` (the default) or `arrangement`.
-* `style` is only for arrangements: `level1` (sparse), `level2` (the default), or `level3` (dense). On five pop songs the levels gave about 5.7, 7.0, and 7.4 notes per second. Every level takes the same time and memory. `style` with `mode` `transcription` is refused with `422`.
-* An upload takes the same two as query parameters: `POST /api/transcriptions/upload?filename=Song.mp3&mode=arrangement&style=level1`.
-* The status response has `mode` and `style`; `style` is `null` for a transcription. The MIDI of an arrangement downloads as `arrangement.mid`.
-* An arrangement costs the same minutes as a transcription of that length, and its minutes are given back when it fails.
-* `GET /api/server-info` has `arrangement`: `true` when arrangements are on, so an app can offer the option. `409` with `error_code` `arrangement_unavailable` means they are off on this server. `503` with the same code means no live worker of this server has room for them and outsourcing is off; try again later. With no live worker at all the job is queued, as a transcription is.
+* `mode` is `piano` (the default, Transkun, for a recording of a piano) or `ensemble`. The older words still work: `transcription` is a piano job, and `arrangement` is now an ensemble job.
+* `style`, which piano arrangements once had, is accepted and ignored. The status response's `style` is always `null`.
+* An upload takes `mode` as a query parameter: `POST /api/transcriptions/upload?filename=Song.mp3&mode=ensemble`.
+* The status response's `mode` answers in the word the submission used. The MIDI downloads as `<mode>.mid`: `piano.mid`, `ensemble.mid`, or `transcription.mid` or `arrangement.mid` for the old words.
+* An ensemble job costs the same minutes as a piano job of that length, and its minutes are given back when it fails.
+* The MIDI has one track per instrument, the largest first. Drums come last, on channel 10, and only for sources recorded at 40 kHz or more. Track names are approximate, and which notes land in which track can change with small changes in the recording.
+* `GET /api/server-info` has `ensemble`: `true` when ensemble jobs are on, so an app can offer the option. `409` with `error_code` `arrangement_unavailable` means they are off on this server. `503` with the same code means live workers of this server exist, none takes ensemble jobs, and outsourcing is off; try again later. With no live worker at all the job is queued, as a piano job is.
+* Apps from before ensemble jobs read `arrangement` in the server info to offer piano covers. It is now always `false`, so they stop offering them: an ensemble result with drums is not what they display. They keep working for piano jobs. The error code keeps its old name for the same reason.
 
 ### 🎬 Only a part of a video or file
 
-Add `start_seconds`, `end_seconds`, or both, to transcribe or arrange only that part:
+Add `start_seconds`, `end_seconds`, or both, to transcribe only that part:
 
 ```shell
 curl -X POST http://localhost:8000/api/transcriptions   -H 'Content-Type: application/json'   -d '{"source_url":"https://example.com/video","start_seconds":30,"end_seconds":95.5}'
@@ -134,7 +136,7 @@ Invoke-RestMethod "http://localhost:8000/api/transcriptions/$($job.job_id)"
 curl "http://localhost:8000/api/transcriptions/$JOB_ID"
 ```
 
-Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. The `error` is written for users, for example `The video could not be downloaded: Video unavailable. This video is private`; the full technical error is only in the server's logs and [job diagnostics](architecture.md#-job-diagnostics). `mode` is `transcription` or `arrangement`, and `style` says which style an arrangement has. `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens. `maintenance` announces a planned restart or shutdown; see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns). A failed job also has an `error_code`, for the app to act on; see [Error codes](#-error-codes).
+Possible statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`. The response includes progress from `0` to `1`, source metadata when available, an error on failure, and the current `minutes` balance when billing is enabled. The `error` is written for users, for example `The video could not be downloaded: Video unavailable. This video is private`; the full technical error is only in the server's logs and [job diagnostics](architecture.md#-job-diagnostics). `mode` is `piano` or `ensemble`, in the word the submission used (`transcription` and `arrangement` are the older words), and `style` is always `null`. `backend` is `local` or `remote` and says where the model runs; it can change once if a remote job falls back to the local queue. Progress never goes backwards when that happens. `maintenance` announces a planned restart or shutdown; see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns). A failed job also has an `error_code`, for the app to act on; see [Error codes](#-error-codes).
 
 Cancel a queued or processing job:
 
@@ -319,18 +321,18 @@ A failed job has an `error_code` next to its `error`. Refusals of a link, and `4
 | `video_too_long` | `413` | The video is longer than this user may send: `max_video_length_minutes`, the general limit or a longer one of their plan. | Say the limit; plans with longer videos say so in `server-info`. |
 | `subscription_owned` | `409`, from verifying a subscription | Another account of the app has this subscription. | Tell the user to sign in with the account that bought it. Do not retry. |
 | `invalid_clip` | `422` | `start_seconds` or `end_seconds` lie outside the video or file, or the part is shorter than 1 second; see [Only a part](#-only-a-part-of-a-video-or-file). | Let the user choose the part again, within the length. |
-| `arrangement_unavailable` | `409`, or `503` | Piano arrangements are off on this server (`409`), or no live worker has room for them and outsourcing is off (`503`). | Hide or disable the arrangement option; on `503`, retry later. |
-| `transcription_failed` | a failed job | Converting, transcribing, or arranging the audio failed. | Show the message. |
+| `arrangement_unavailable` | `409`, or `503` | Ensemble transcriptions are off on this server (`409`), or live workers exist, none takes them, and outsourcing is off (`503`). | Hide or disable the ensemble option; on `503`, retry later. |
+| `transcription_failed` | a failed job | Converting or transcribing the audio failed. | Show the message. |
 | `transcription_interrupted` | a failed job | A restart or a stopped worker interrupted the job. | Submit it again. |
 
 A failed job's minutes are always given back. A request the API cannot parse gets FastAPI's own `422`, whose `detail` is a list, without a code.
 
 ## 💳 Billing endpoints
 
-* `GET /api/server-info` returns billing provider, available offers, how long finished jobs and their MIDI files can be retrieved (`result_retention_seconds`), the cleanup interval, free-minute policy, maximum video length, the upload size limit (`max_upload_size_mb`), whether piano arrangements are on (`arrangement`), whether a part of a video can be asked for (`trimming`), and a pending restart or shutdown (`maintenance`, see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns)).
+* `GET /api/server-info` returns billing provider, available offers, how long finished jobs and their MIDI files can be retrieved (`result_retention_seconds`), the cleanup interval, free-minute policy, maximum video length, the upload size limit (`max_upload_size_mb`), whether ensemble transcriptions are on (`ensemble`; `arrangement` is always `false`), whether a part of a video can be asked for (`trimming`), and a pending restart or shutdown (`maintenance`, see [Planned restarts and shutdowns](#-planned-restarts-and-shutdowns)).
 * `GET /api/billing/cost?source_url=...` reads video duration and returns the transcription cost before submission. For a file, use `?duration_seconds=...` instead. Pass exactly one of the two. With `start_seconds` or `end_seconds`, the cost is of only that part; see [Only a part](#-only-a-part-of-a-video-or-file). When billing is enabled, it needs the `Authorization` header like other requests.
 * `GET /api/billing/balance` returns the authenticated user's balance and free-minute timing. Each user has two balances: `monthly_minutes`, renewed to `FREE_MINUTES` every `free_minutes_period` (the unused ones expire) and spent first, and `paid_minutes`, bought or given by hand, which never expire. `minutes` is what is available in all, their sum; both leave out what running jobs hold. `free_minutes_next_grant_at` is when the monthly minutes are next renewed. `minutes` and `paid_minutes` are negative when a refunded purchase's minutes were already used; see [Refunds and chargebacks](google-play-billing.md#-refunds-and-chargebacks). Show the user that they owe minutes, and offer to buy more. `developer` is `true` for an account an administrator made a developer's: its jobs are never charged, so show its minutes as unlimited and offer no purchases.
-* `GET /api/developer/server`, only for a developer's account (`403` otherwise), returns the server's live state: jobs waiting or running against the limit (`active_jobs`, `max_active_jobs`), each backend's waiting and running jobs and oldest wait (`backends`), the local workers (`workers`), whether outsourcing and arrangements are on, whether submissions are paused or video links are off, and a pending restart or shutdown. For a developer's job, `GET /api/transcriptions/{job_id}` also returns `developer`: its length, what it would have cost, whether it was outsourced and why, and when it was queued, started, and finished.
+* `GET /api/developer/server`, only for a developer's account (`403` otherwise), returns the server's live state: jobs waiting or running against the limit (`active_jobs`, `max_active_jobs`), each backend's waiting and running jobs and oldest wait (`backends`), the local workers (`workers`, with how many take ensemble jobs as `ensemble`, and `arranging` with the same value), whether outsourcing and ensemble transcriptions are on (`ensemble`, and `arrangement` with the same value), whether submissions are paused or video links are off, and a pending restart or shutdown. For a developer's job, `GET /api/transcriptions/{job_id}` also returns `developer`: its length, what it would have cost, whether it was outsourced and why, and when it was queued, started, and finished.
 * `POST /api/billing/google-play/verify` verifies and credits a completed Google Play purchase.
 * `POST /api/billing/google-play/subscriptions/verify` checks a subscription with Google Play and records it for the user: a new one, a renewal, an upgrade, or one restored on another device. See [Subscriptions](google-play-billing.md#-subscriptions). `server-info` lists the plans in `subscriptions`, and the balance has the running plan in `subscription`, with `unlimited` and `unlimited_heavy_use`; while a plan's period runs, its minutes are `monthly_minutes`, in place of the free ones.
 * `DELETE /api/account` deletes the authenticated user's account and data (see below).

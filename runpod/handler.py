@@ -1,6 +1,8 @@
-"""RunPod Serverless handler: Transkun inference for the piano transcription server.
+"""RunPod Serverless handler: Transkun inference for the piano transcription server, and
+dettato for its ensemble jobs.
 
-Input:  {"audio_url": "<presigned GET URL on STORAGE_ENDPOINT>", "job_id": "..."}
+Input:  {"audio_url": "<presigned GET URL on STORAGE_ENDPOINT>", "job_id": "...",
+         "mode": "transcription" | "ensemble", "source_rate": <Hz, ensemble only>}
 Output: {"midi_base64": "...", "timing": {...}} or {"error": "..."}
 
 The audio is FLAC at 44.1 kHz mono, prepared by the server's remote worker.
@@ -30,7 +32,7 @@ import runpod  # noqa: E402
 import soundfile  # noqa: E402
 
 from app.config import settings  # noqa: E402
-from app.outsource.handler_input import InvalidInput, download, requested_style, validate_input  # noqa: E402
+from app.outsource.handler_input import InvalidInput, download, requested_ensemble, validate_input  # noqa: E402
 from app.transcription.batching import GpuOutOfMemory  # noqa: E402
 from app.transcription.piano_transcription import (  # noqa: E402
     audio_for_model,
@@ -56,21 +58,22 @@ try:
 except Exception:
     # Each request tries again, and keeps its MIDI at 120 BPM if it cannot.
     logger.warning("Could not load the beat tracker", exc_info=True)
-# Arrangements (WORKER_ARRANGEMENT on the endpoint), beside Transkun on the
+# Ensemble jobs (WORKER_ENSEMBLE on the endpoint), beside Transkun on the
 # same GPU and in the same memory budget.
-ARRANGEMENT_DEVICE = None
-if settings.worker.arrangement:
-    from app.transcription import arrangement  # noqa: E402
+ENSEMBLE_DEVICE = None
+if settings.worker.ensemble:
+    from app.transcription import ensemble_transcription  # noqa: E402
 
     try:
-        ARRANGEMENT_DEVICE = arrangement.select_arrangement_device()
-        arrangement.get_batcher(ARRANGEMENT_DEVICE)
-    except arrangement.ArrangementUnavailable:
-        logger.warning("WORKER_ARRANGEMENT is on, but this GPU has no room for arrangements")
+        ENSEMBLE_DEVICE = ensemble_transcription.select_ensemble_device()
+        ensemble_transcription.get_models(ENSEMBLE_DEVICE)
+    except ensemble_transcription.EnsembleUnavailable:
+        ENSEMBLE_DEVICE = None
+        logger.warning("WORKER_ENSEMBLE is on, but this GPU has no room for ensemble jobs")
     except Exception:
-        # Transcriptions still run; arrangement requests are refused.
-        ARRANGEMENT_DEVICE = None
-        logger.exception("Could not load the arrangement model; arrangements are off on this worker")
+        # Transcriptions still run; ensemble requests are refused.
+        ENSEMBLE_DEVICE = None
+        logger.exception("Could not load the ensemble models; ensemble jobs are off on this worker")
 # One thread per request in flight; most of them wait on the batcher.
 EXECUTOR = ThreadPoolExecutor(max_workers=max(4, BATCHER.batch_size * 2), thread_name_prefix="request")
 
@@ -97,9 +100,9 @@ def transcribe_job(job: dict) -> dict:
     started = time.monotonic()
     try:
         audio_url, job_id = validate_input(job.get("input"), settings.storage.endpoint)
-        style = requested_style(job["input"])
-        if style is not None and ARRANGEMENT_DEVICE is None:
-            raise InvalidInput("Arrangements are off on this endpoint: set WORKER_ARRANGEMENT=true")
+        ensemble, source_rate = requested_ensemble(job["input"])
+        if ensemble and ENSEMBLE_DEVICE is None:
+            raise InvalidInput("Ensemble jobs are off on this endpoint: set WORKER_ENSEMBLE=true")
         with tempfile.TemporaryDirectory() as directory:
             audio_path = Path(directory) / "audio.flac"
             size = download(audio_url, audio_path, int(settings.outsource.max_audio_mb * 1024 * 1024))
@@ -110,23 +113,27 @@ def transcribe_job(job: dict) -> dict:
                 raise InvalidInput("The audio file cannot be decoded") from error
 
             midi_path = Path(directory) / "transcription.mid"
-            if style is not None:
-                events = arrangement.arrange(audio, sample_rate, style, ARRANGEMENT_DEVICE, Progress(job), None)
+            if ensemble:
+                # Its resampled copies as files in the request's folder, not in memory.
+                tracks, _ = ensemble_transcription.transcribe_ensemble(
+                    audio, sample_rate, source_rate, ENSEMBLE_DEVICE, Progress(job), None, None, Path(directory))
                 transcribed = time.monotonic()
-                write_midi(events, midi_path, audio, sample_rate, ARRANGEMENT_DEVICE)
+                ensemble_transcription.write_result(tracks, midi_path, audio, sample_rate, ENSEMBLE_DEVICE)
+                note_count = sum(len(track.notes) for track in tracks)
             else:
                 model_audio = audio_for_model(MODEL, sample_rate, audio)
                 events = BATCHER.submit(model_audio, Progress(job), None)
                 transcribed = time.monotonic()
                 # Beat tracking on the GPU, in memory its job capacity reserves.
                 write_midi(events, midi_path, model_audio, MODEL.fs, DEVICE)
+                note_count = len(events)
             midi = midi_path.read_bytes()
 
         encoded = base64.b64encode(midi).decode("ascii")
         if len(encoded) > MAX_OUTPUT_BYTES:
             return {"error": "The MIDI result is too large to return"}
         audio_seconds = len(audio) / sample_rate
-        logger.info("Job %s: %d notes from %.0f s of audio", job_id, len(events), audio_seconds)
+        logger.info("Job %s: %d notes from %.0f s of audio", job_id, note_count, audio_seconds)
         return {
             "midi_base64": encoded,
             # Requests this worker takes at once, for OUTSOURCE_MAX_CONCURRENCY=auto.
@@ -137,8 +144,8 @@ def transcribe_job(job: dict) -> dict:
                 "inference_seconds": round(transcribed - downloaded, 2),
                 "total_seconds": round(time.monotonic() - started, 2),
                 "audio_bytes": size,
-                "device": ARRANGEMENT_DEVICE if style is not None else DEVICE,
-                "mode": "transcription" if style is None else "arrangement",
+                "device": ENSEMBLE_DEVICE if ensemble else DEVICE,
+                "mode": "ensemble" if ensemble else "transcription",
             },
         }
     except (InvalidInput, GpuOutOfMemory) as error:

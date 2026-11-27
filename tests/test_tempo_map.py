@@ -261,7 +261,7 @@ def test_the_tempo_map_is_written(tmp_path, monkeypatch):
     beats = rubato_beats()
     path = tmp_path / "transcription.mid"
     transkun_midi([(beat, beat + 0.2, 60) for beat in beats]).save(path)
-    monkeypatch.setattr(tempo, "detect_beats", lambda audio, rate, device: (beats, beats[::4]))
+    monkeypatch.setattr(tempo, "detect_beats", lambda audio, rate, device, work_dir=None: (beats, beats[::4]))
 
     assert tempo.add_tempo_map(path, None, 44100)
 
@@ -281,7 +281,7 @@ def test_failures_keep_the_midi_as_written(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tempo, "detect_beats", fail)
     assert not tempo.add_tempo_map(path, None, 44100)
-    monkeypatch.setattr(tempo, "detect_beats", lambda audio, rate, device: ([1.0, 2.0], []))
+    monkeypatch.setattr(tempo, "detect_beats", lambda audio, rate, device, work_dir=None: ([1.0, 2.0], []))
     assert not tempo.add_tempo_map(path, None, 44100)
     assert path.read_bytes() == written
 
@@ -317,7 +317,7 @@ def test_beat_tracking_moves_to_cpu_when_the_gpu_is_full(tmp_path, monkeypatch):
     transkun_midi([(beat, beat + 0.2, 60) for beat in beats]).save(path)
     devices = []
 
-    def detect(audio, rate, device):
+    def detect(audio, rate, device, work_dir=None):
         devices.append(device)
         if device != "cpu":
             raise RuntimeError("CUDA out of memory. Tried to allocate 64.00 MiB")
@@ -333,7 +333,7 @@ def test_gpu_job_capacity_reserves_the_beat_tracker(monkeypatch):
     from app.transcription import device
 
     free = 5.86 * 1024**3
-    monkeypatch.setattr(tempo.settings.worker, "arrangement", False)
+    monkeypatch.setattr(tempo.settings.worker, "ensemble", False)
     monkeypatch.setattr(tempo.settings.worker, "memory_per_job_gib", 0.5)
     with_map = device.job_capacity(free)
     monkeypatch.setattr(tempo.settings.worker, "tempo_map", False)
@@ -367,7 +367,7 @@ def test_a_failed_write_keeps_the_midi_as_written(tmp_path, monkeypatch):
     path = tmp_path / "transcription.mid"
     transkun_midi([(beat, beat + 0.2, 60) for beat in beats]).save(path)
     written = path.read_bytes()
-    monkeypatch.setattr(tempo, "detect_beats", lambda audio, rate, device: (beats, beats[::4]))
+    monkeypatch.setattr(tempo, "detect_beats", lambda audio, rate, device, work_dir=None: (beats, beats[::4]))
 
     def full_disk(self, filename):
         Path(filename).write_bytes(b"MThd")
@@ -385,7 +385,7 @@ def test_a_map_that_would_move_notes_is_not_written(tmp_path, monkeypatch):
     path = tmp_path / "transcription.mid"
     transkun_midi([(beat, beat + 0.2, 60) for beat in beats]).save(path)
     written = path.read_bytes()
-    monkeypatch.setattr(tempo, "detect_beats", lambda audio, rate, device: (beats, beats[::4]))
+    monkeypatch.setattr(tempo, "detect_beats", lambda audio, rate, device, work_dir=None: (beats, beats[::4]))
     shifted = tempo.TempoMap.tick
     monkeypatch.setattr(tempo.TempoMap, "tick", lambda self, seconds: shifted(self, seconds) + 100)
 
@@ -416,7 +416,7 @@ def test_two_hours_of_beats_take_moments():
 def test_preloading_loads_the_tracker_once(monkeypatch):
     loaded = []
     monkeypatch.setattr(tempo, "_trackers", {})
-    monkeypatch.setattr(tempo, "_Tracker", lambda device: loaded.append(device) or (lambda audio, rate: ([], [])))
+    monkeypatch.setattr(tempo, "_Tracker", lambda device: loaded.append(device) or (lambda audio, rate, work_dir=None: ([], [])))
 
     tempo.preload_tracker("cuda:0")
     tempo.detect_beats([0.0], 44100, "cuda:0")

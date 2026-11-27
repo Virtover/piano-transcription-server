@@ -52,13 +52,17 @@ CHECK_REPLY_PREFIX = "cluster:check:"
 # A node's name is part of its Redis user and of key patterns in its rules.
 NODE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
 
-# What a device can be allowed to do. transcribe and arrange consume the
-# local queues, dispatch sends jobs to RunPod, and check reads a video's
-# length for the API when the hub's own address is rate-limited.
+# What a device can be allowed to do. transcribe (piano jobs) and arrange
+# (ensemble jobs) consume the local queues, dispatch sends jobs to RunPod,
+# and check reads a video's length for the API when the hub's own address is
+# rate-limited. The names are stored in switches and invites, so they stay
+# as they were when ensemble jobs were piano arrangements; piano and
+# ensemble are accepted for them (TASK_ALIASES).
 TASKS = ("transcribe", "arrange", "dispatch", "check")
+TASK_ALIASES = {"piano": "transcribe", "ensemble": "arrange"}
 TASK_TITLES = {
-    "transcribe": "transcriptions",
-    "arrange": "piano arrangements",
+    "transcribe": "piano transcriptions",
+    "arrange": "ensemble transcriptions",
     "dispatch": "sending jobs to RunPod",
     "check": "checking video links for the hub",
 }
@@ -130,7 +134,7 @@ def parse_tasks(text: str | Iterable[str] | None) -> list[str]:
     if text is None:
         return []
     items = text.split(",") if isinstance(text, str) else list(text)
-    names = {item.strip().lower() for item in items if item.strip()}
+    names = {TASK_ALIASES.get(name, name) for name in (item.strip().lower() for item in items) if name}
     if "all" in names:
         return list(TASKS)
     unknown = sorted(names - set(TASKS))

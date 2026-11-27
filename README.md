@@ -3,9 +3,9 @@
 [![Tests](https://github.com/Virtover/piano-transcription-server/actions/workflows/tests.yml/badge.svg)](https://github.com/Virtover/piano-transcription-server/actions/workflows/tests.yml)
 [![Support on Ko-fi](https://img.shields.io/badge/Support%20on%20Ko--fi-29ABE0?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/krzysztofolszak)
 
-> Download a piano performance, transcribe it to MIDI, or arrange any song for piano, and retrieve the result through a simple asynchronous API.
+> Download a piano performance and transcribe it to MIDI, or transcribe every instrument of any song into its own MIDI track, and retrieve the result through a simple asynchronous API.
 
-Piano Transcription Server accepts a public video URL or an uploaded audio or video file, runs [Transkun](https://github.com/Yujia-Yan/Transkun) to transcribe a piano recording or [AMT-APC](https://github.com/310hz/amt-apc) to arrange any song as a piano cover, and exposes the resulting MIDI file through FastAPI. Redis stores job state and Docker Compose runs the API, worker, cleanup service, and Redis together. The worker uses NVIDIA CUDA when available and falls back to CPU.
+Piano Transcription Server accepts a public video URL or an uploaded audio or video file, runs [Transkun](https://github.com/Yujia-Yan/Transkun) to transcribe a piano recording or [dettato](https://github.com/kobimusic/dettato) to transcribe every instrument of any recording into its own track, and exposes the resulting MIDI file through FastAPI. Redis stores job state and Docker Compose runs the API, worker, cleanup service, and Redis together. The worker uses NVIDIA CUDA when available and falls back to CPU.
 
 ## 🚀 Start here
 
@@ -41,7 +41,7 @@ Optional features, such as HTTPS, Google Play billing, or outsourcing to RunPod,
 
 ### 🎵 Using the service
 
-* [API guide](docs/api.md) - submit, monitor, cancel, and download transcriptions and piano arrangements, plus billing and account deletion endpoints.
+* [API guide](docs/api.md) - submit, monitor, cancel, and download piano and ensemble transcriptions, plus billing and account deletion endpoints.
 * [Google sign-in](docs/google-sign-in.md) - step by step: Google Cloud project, consent screen, and OAuth clients with SHA-1 fingerprints.
 * [Google Play billing](docs/google-play-billing.md) - step by step: the Play service account, products, and test purchases.
 

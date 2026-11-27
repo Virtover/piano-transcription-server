@@ -14,9 +14,9 @@ MiB = 1024**2
 @pytest.fixture
 def gpus(monkeypatch, default_settings):
     """Fake torch with configurable GPUs: (uuid, CUDA free bytes, total bytes).
-    Arrangements, on by default, are off here: the capacities are those of
+    Ensemble jobs, on by default, are off here: the capacities are those of
     transcriptions alone."""
-    default_settings.worker.arrangement = False
+    default_settings.worker.ensemble = False
     state = {"devices": [], "smi": "", "smi_error": None}
 
     state["reserved"] = {}
@@ -125,31 +125,31 @@ def test_launcher_uses_cpu_when_the_gpu_is_too_small_for_one_job(gpus, monkeypat
     assert launcher.gpu_capacity(device.cuda_job_capacities()) is None
 
 
-# --- piano arrangements -----------------------------------------------------------
+# --- ensemble jobs -----------------------------------------------------------
 
-def test_arrangement_fits_at_its_threshold(default_settings):
+def test_ensemble_fits_at_its_threshold(default_settings):
     worker = default_settings.worker
-    worker.arrangement = True
-    # Reserves: 1.0 models + 0.25 arrangement models + 0.25 tempo map = 1.5 GiB.
+    worker.ensemble = True
+    # Reserves: 1.0 models + 0.25 ensemble models + 0.25 tempo map = 1.5 GiB.
     assert device.gpu_budget_gib(3 * GiB) == pytest.approx(1.5)
-    threshold = (1.5 + worker.arrangement_memory_gib) * GiB
+    threshold = (1.5 + worker.ensemble_memory_gib) * GiB
 
-    assert device.arrangement_fits(threshold)
-    assert device.arrangement_fits(threshold + 1)
-    assert not device.arrangement_fits(threshold - 0.01 * GiB)
-    assert not device.arrangement_fits(0)
-
-
-def test_arrangement_never_fits_when_it_is_off(default_settings):
-    default_settings.worker.arrangement = False
-    assert not device.arrangement_fits(80 * GiB)
+    assert device.ensemble_fits(threshold)
+    assert device.ensemble_fits(threshold + 1)
+    assert not device.ensemble_fits(threshold - 0.01 * GiB)
+    assert not device.ensemble_fits(0)
 
 
-def test_the_arrangement_models_and_the_tempo_map_shrink_the_budget(default_settings):
+def test_ensemble_never_fits_when_it_is_off(default_settings):
+    default_settings.worker.ensemble = False
+    assert not device.ensemble_fits(80 * GiB)
+
+
+def test_the_ensemble_models_and_the_tempo_map_shrink_the_budget(default_settings):
     worker = default_settings.worker
-    worker.arrangement = False
+    worker.ensemble = False
     assert device.gpu_budget_gib(4 * GiB) == pytest.approx(2.75)
-    worker.arrangement = True
+    worker.ensemble = True
     assert device.gpu_budget_gib(4 * GiB) == pytest.approx(2.5)
     worker.tempo_map = False
     assert device.gpu_budget_gib(4 * GiB) == pytest.approx(2.75)
@@ -158,9 +158,66 @@ def test_the_arrangement_models_and_the_tempo_map_shrink_the_budget(default_sett
     assert device.gpu_budget_gib(1 * GiB) == 0.0
 
 
+def test_the_ensemble_memory_is_larger_where_the_gpus_run_float32(default_settings, monkeypatch):
+    worker = default_settings.worker
+    worker.ensemble_memory_gib = 2.0
+
+    monkeypatch.setattr(device, "_fp32_gpus", False)
+    assert device.ensemble_memory_gib() == 2.0
+    monkeypatch.setattr(device, "_fp32_gpus", True)
+    assert device.ensemble_memory_gib() == pytest.approx(2.0 * device.FP32_ENSEMBLE_FACTOR) == pytest.approx(2.5)
+    worker.ensemble_memory_gib = 3.0
+    assert device.ensemble_memory_gib() == pytest.approx(3.75)
+
+
+def test_ensemble_fits_asks_for_the_float32_memory_on_those_gpus(default_settings, monkeypatch):
+    worker = default_settings.worker
+    worker.ensemble = True
+    budget = device.gpu_budget_gib(8 * GiB)
+    worker.ensemble_memory_gib = budget / 1.1       # fits as bfloat16, not as float32
+
+    monkeypatch.setattr(device, "_fp32_gpus", False)
+    assert device.ensemble_fits(8 * GiB)
+    monkeypatch.setattr(device, "_fp32_gpus", True)
+    assert not device.ensemble_fits(8 * GiB)
+
+
+def test_the_ensemble_memory_of_another_configuration(default_settings):
+    other = types.SimpleNamespace(worker=types.SimpleNamespace(ensemble_memory_gib=1.0, ensemble=True))
+
+    assert device.ensemble_memory_gib(other) == 1.0
+
+
+def test_fp32_gpus_is_false_without_torch_or_cuda(monkeypatch):
+    monkeypatch.setattr(device, "_fp32_gpus", None)
+    monkeypatch.setitem(sys.modules, "torch", None)       # an import of it fails
+
+    assert device.fp32_gpus() is False
+    # Answered once: the cache keeps it.
+    assert device._fp32_gpus is False
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "enforce_cpu", "expected"),
+    [([(7, 5)], False, True), ([(6, 1), (8, 6)], False, True), ([(8, 0)], False, False),
+     ([(8, 6), (9, 0)], False, False), ([(7, 5)], True, False), ([], False, False)],
+)
+def test_fp32_gpus_is_true_when_a_gpu_lacks_bfloat16(default_settings, monkeypatch, capabilities, enforce_cpu, expected):
+    default_settings.worker.enforce_cpu = enforce_cpu
+    cuda = types.SimpleNamespace(
+        is_available=lambda: bool(capabilities),
+        device_count=lambda: len(capabilities),
+        get_device_capability=lambda index: capabilities[index],
+    )
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=cuda))
+    monkeypatch.setattr(device, "_fp32_gpus", None)
+
+    assert device.fp32_gpus() is expected
+
+
 def test_job_capacity_counts_whole_jobs_in_the_budget(default_settings):
     worker = default_settings.worker
-    worker.arrangement = True
+    worker.ensemble = True
     worker.memory_per_job_gib = 1.0
     worker.tempo_map = False
 
