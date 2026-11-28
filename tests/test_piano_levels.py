@@ -664,18 +664,19 @@ def test_a_note_cap_refuses_before_any_level_is_made():
 
 
 def test_time_grows_linearly_with_the_length():
-    """Four times the music takes about four times as long, not sixteen: no step is quadratic in the notes."""
+    """Eight times the music takes about eight times as long, not sixty-four: no step is quadratic in the notes.
+    The bound sits far from both, so a busy machine (a shared CI runner measured 7.2 for four times) cannot fail it."""
     def seconds(bars: int) -> float:
         data = song(7, bars=bars)
         best = float("inf")
-        for _ in range(2):
+        for _ in range(3):
             started = time.perf_counter()
             m2p.all_levels(data)
             best = min(best, time.perf_counter() - started)
         return best
 
-    short, long = seconds(24), seconds(96)
-    assert long < 7 * short, (short, long)
+    short, long = seconds(24), seconds(192)
+    assert long < 20 * short, (short, long)
 
 
 # --- a source's own sustain pedal -------------------------------------------------------------------------------
