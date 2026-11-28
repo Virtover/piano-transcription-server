@@ -1,10 +1,10 @@
 """Piano versions of ensemble results (app/transcription/ensemble/piano_levels.py): small MIDI files built in memory
 with mido. The tests of the standalone script multitrack_to_piano.py the module came from, unchanged; then the golden
-check that the module's output stays byte-identical to the script's, its shared reading of all levels, and how its
-time grows with a recording's length.
+check of every level's bytes, its shared reading of all levels, and how its time grows with a recording's length.
 
-The golden digests are of the script's own output on the files built here. With PIANO_LEVELS_REFERENCE set to the
-script's path, the script itself is run on them too and compared byte for byte.
+The golden digests of advanced and full are the script's own output on the files built here, the lower levels' the
+module's since their melody changed. With PIANO_LEVELS_REFERENCE set to the script's path, the script itself is run on
+them too and compared byte for byte at advanced and full.
 """
 from __future__ import annotations
 
@@ -158,7 +158,8 @@ def test_hand_limits(band_outputs, name):
 
 @pytest.mark.parametrize("name", REDUCTIONS)
 def test_attack_density(band_outputs, name):
-    gap = round(m2p.LEVELS[name].chord_gap * TPB)
+    level = m2p.LEVELS[name]
+    gap = round(min(level.chord_gap, level.melody_gap, level.bass_gap) * TPB * (1 - m2p.GAP_TOLERANCE))
     for notes in hand_notes(band_outputs[name]).values():
         ticks = sorted({s for s, *_ in notes})
         assert all(b - a >= gap for a, b in zip(ticks, ticks[1:])), name
@@ -181,16 +182,16 @@ def test_beginner_lines(band_outputs):
     assert max_at_once(right) == 1 and max_at_once(left) == 1
     assert all(level.melody_range[0] <= p <= level.melody_range[1] for _, _, p, _ in right)
     assert all(level.bass_range[0] <= p <= level.bass_range[1] for _, _, p, _ in left)
-    # no leap wider than the level's where the range has a nearer octave; no key struck again within a beat
+    # no leap wider than the level's where the range has a nearer octave; the tune at most every half beat
     pitches = [p for _, _, p, _ in right]
     low, high = level.melody_range
     for a, b in zip(pitches, pitches[1:]):
         nearest = min((q for q in range(low, high + 1) if q % 12 == b % 12), key=lambda q: abs(q - a))
         assert abs(b - a) <= level.max_leap or abs(b - a) == abs(nearest - a)
-    for notes in (right, left):
-        assert all(b[0] - a[0] >= TPB for a, b in zip(notes, notes[1:]))
-    # the bass only every half bar at most, and long
-    assert all(b[0] - a[0] >= 2 * TPB for a, b in zip(left, left[1:]))
+    slack = 1 - m2p.GAP_TOLERANCE
+    assert all(b[0] - a[0] >= level.melody_gap * TPB * slack for a, b in zip(right, right[1:]))
+    # the bass only about every half bar at most, and long
+    assert all(b[0] - a[0] >= level.bass_gap * TPB * slack for a, b in zip(left, left[1:]))
     assert min(e - s for s, e, _, _ in left[:-1]) >= TPB
 
 
@@ -215,6 +216,58 @@ def test_melody_is_the_voice(band_data, band_outputs):
         tops[s] = max(tops.get(s, 0), p)
     on_voice = [s for s in tops if s in voice_starts]
     assert len(on_voice) >= 0.9 * len(voice_starts)
+
+
+def right_tops(data: bytes) -> dict[int, int]:
+    """The right hand's highest pitch per attack."""
+    tops: dict[int, int] = {}
+    for s, e, p, v in hand_notes(data)[0]:
+        tops[s] = max(tops.get(s, 0), p)
+    return tops
+
+
+def test_the_lower_levels_keep_an_eighth_note_tune():
+    """A sung tune in eighths, its timing drifted as a transcription's: beginner and easy play every note of it."""
+    rng = random.Random(5)
+    steps = [64, 66, 67, 69, 71, 69, 67, 66] * 4
+    voice = [(i * TPB // 2 + rng.randint(-15, 15) + 20, TPB // 2 - 40, p, 90) for i, p in enumerate(steps)]
+    bass = [(b * TPB, TPB, 40, 80) for b in range(len(steps) // 2)]
+    data = build([(52, 0, voice), (33, 1, bass)])
+    for level in ("beginner", "easy"):
+        tops = right_tops(convert(data, level))
+        assert [tops.get(s) for s, *_ in voice] == steps, level
+
+
+def test_beginner_ties_a_repeated_note():
+    voice = [(0, 200, 72, 90), (240, 200, 72, 90), (480, 400, 74, 90), (960, 400, 76, 90)]
+    right = hand_notes(convert(build([(52, 0, voice)]), "beginner"))[0]
+    assert [(s, p) for s, _, p, _ in right] == [(0, 72), (480, 74), (960, 76)]
+    assert right[0][1] >= 440
+
+
+def test_a_voice_carries_the_tune_over_a_higher_lead():
+    """A synth lead an octave above the voice, as loud: the voice is the tune."""
+    sung = [64, 65, 67, 69, 67, 65, 64, 62] * 4
+    voice = [(i * TPB, TPB - 30, p, 80) for i, p in enumerate(sung)]
+    lead = [(i * TPB, TPB - 30, p + 12 + (i % 3), 80) for i, p in enumerate(sung)]
+    bass = [(b * 4 * TPB, 4 * TPB, 36, 80) for b in range(len(sung) // 4)]
+    data = build([(80, 0, lead), (52, 1, voice), (33, 2, bass)])
+    for level in ("beginner", "intermediate"):
+        tops = right_tops(convert(data, level))
+        assert [tops.get(s) for s, *_ in voice] == sung, level
+
+
+def test_a_piano_tune_held_over_its_accompaniment():
+    """A piano part's half-note tune over quieter eighth-note chords under it: the chords struck while a tune note is
+    held are no tune notes, so beginner plays only the tune (moved by octaves into its range)."""
+    tune = [76, 74, 72, 74, 76, 76, 74, 79]
+    notes = [(i * 2 * TPB, 2 * TPB - 20, p, 90) for i, p in enumerate(tune)]
+    for t in range(0, len(tune) * 2 * TPB, TPB // 2):
+        notes += [(t, TPB // 2 - 20, 65, 50), (t, TPB // 2 - 20, 69, 50)]
+    notes += [(b * 4 * TPB, 4 * TPB - 20, 41, 70) for b in range(len(tune) // 2)]
+    right = hand_notes(convert(build([(0, 0, notes)]), "beginner"))[0]
+    assert {p % 12 for _, _, p, _ in right} <= {p % 12 for p in tune}
+    assert [s for s, *_ in right] == [i * 2 * TPB for i in range(len(tune))]
 
 
 @pytest.mark.parametrize("name", list(m2p.LEVELS))
@@ -515,7 +568,7 @@ def song(seed: int, bars: int = 24, bass_part: bool = True, midi_type: int = 1, 
                  extra=presses if pedal else ())
 
 
-# Sources without a sustain pedal of their own, as every ensemble result: every level is the script's.
+# Sources without a sustain pedal of their own, as every ensemble result.
 GOLDEN_SOURCES = {
     "band": band,
     "piano solo": piano_solo,
@@ -523,72 +576,73 @@ GOLDEN_SOURCES = {
     "song 2 without a bass part or pedal": lambda: song(2, bass_part=False, pedal=False),
     "song 3 of type 0 without pedal": lambda: song(3, midi_type=0, pedal=False),
 }
-# Sources with their own pedal (the keys part's), as a piano transcription has: full, advanced, and intermediate keep it
-# (the module's own output since then); beginner and easy are still the script's.
+# Sources with their own pedal (the keys part's), as a piano transcription has: full, advanced, and intermediate keep it.
 PEDALLED_SOURCES = {
     "song 1": lambda: song(1),
     "song 2 without a bass part": lambda: song(2, bass_part=False),
     "song 3 of type 0": lambda: song(3, midi_type=0),
 }
-SCRIPT_LEVELS_WITH_PEDAL = ("beginner", "easy")
-# sha256 of multitrack_to_piano.py's own output (the user's version of 2026-11-27), per source and level.
+# The levels still the script's on these sources: the lower levels' melody changed since (2026-11-28).
+SCRIPT_LEVELS = ("advanced", "full")
+# sha256 of the module's output per source and level: advanced's and full's are those of multitrack_to_piano.py (the
+# user's version of 2026-11-27), the others the module's own since the lower levels' melody changed (2026-11-28).
 GOLDEN: dict[str, dict[str, str]] = {
     'band': {
-        'beginner': '626ecb9f565abf9e38ee6a58593643cb621d30d5b954df8d3c892fe46a399061',
+        'beginner': 'b7f63690b872af7bdb167263589ba6ce26d6951d0336f1fa4efb1e4d223f5887',
         'easy': 'fb7cf261d0c2848a8a3b4e854bc8fcdd0c4fef7c96027a796999d6bb034c454a',
         'intermediate': '2891868ef085c832ca711918d17a3e19e219abcc978939ec3dfdb215a6413375',
         'advanced': 'ddc523ffbc6383f3aeb3f1448bc26dac2bc4c8249f860046e33595d5d959720e',
         'full': '04e365498e94997c8d528a89419fce51a8d7e7f643ff88045b857def361cc7c6',
     },
     'piano solo': {
-        'beginner': '4ca82ee3a896a4a7df2bfdbe4f488aab3dedfeaa8f735afe65a0b883036d2a35',
+        'beginner': 'd2822d8b03c5b586653766011186e82a4e8f50ba4265faa0ec8a10452105b5c1',
         'easy': '2e4f3f4091aa18e1bba92db4e9c50430f617611e1c8c0174fd3f31d1605dcdfd',
         'intermediate': 'f75a9cef16ed7f68679622ead14d93105486a76d373bb3ff520bdc71baec2ce3',
         'advanced': '9f76f7655983dd7fd5357d9a445f50a2385ae2f0da7e43e6813de40b49ad1357',
         'full': '246d85cef85f923366b4a143a2ac3a047d33bdd34cf36847708e0f3861c41ba2',
     },
     'song 1 without pedal': {
-        'beginner': 'cbda5a014d98936c7c1a0e1f5a037260e65e26dcb9de511bcf03f3218626e332',
-        'easy': 'aa15098a3ccc31c122ca772f5cddfe6a813bc42be015aecc378252d73d2f1ae2',
-        'intermediate': '801ce94ce0d0dde79f85d518007b823fc5ac304c750ccc50ccf0350bf87f7c56',
+        'beginner': '6dc72d3983d85f31612d83c0b23424205141635c0f628b0dde22e5ba87b164f2',
+        'easy': '0605c830c717181bd80e5a6bce97ef047a0eba46439833232d64ad5d2dc3c8dc',
+        'intermediate': 'f99d3ae29ba9dca7f329626d059820eb906c9293dfa971032b4e5028b5db9b0f',
         'advanced': 'a010416913fde62a863a847575340875b9d8fcebc530fb971bc535652eb26223',
         'full': 'e9653abaf2a8a1b4c674350dd8c6587e629aa1b693f7fea0660d38a919c413f8',
     },
     'song 2 without a bass part or pedal': {
-        'beginner': '62350631c2223bd1ace6e527ae15ed7af6d3d35aa48eeb4fd31e1ec94a57fd0c',
-        'easy': '72a217193cc4abd66e17f289f3e413b9e9fc5dfd87da3cecc89cd3a0b6abfed2',
-        'intermediate': 'bf8c93b9c750ff155354e02958f8a97a871b79995afc7b5b0bfec0757134ec59',
+        'beginner': '44a5bcfc6c37cb3cd1873c485f2edde08a35306c4c726336b2e4e02d06643233',
+        'easy': '9f1f69c648a6acd4db36078bf59e3e4f9e27cade20d02b955f7584493f40cb73',
+        'intermediate': '83e7764b2dff2e5bac4395098be8b071c9de34b5e0c26279455260fbadd157a3',
         'advanced': '808c39538063b7b526150e0377b3b4eb408e791c946e028ca29c2fe8a4234399',
         'full': '5665d90d4ca897f5a3ccc1c5297b084230b2b9af5c36c31608583881ff9b567c',
     },
     'song 3 of type 0 without pedal': {
-        'beginner': '0864238102411f03bff540cae796de9c494008620abf0416bd138a65a1d496cb',
-        'easy': '464bbf083bc17850dc5984ff46d1ec7c7f24b5fdc26ebe31dc850b2e85cec688',
-        'intermediate': 'f2e61b3f7e170b8c157de243ed2e3fabd6e6f7b32bb5f8c25d81a307040b68f7',
+        'beginner': '673f2eb3c3753ffa59344439188f47ddb19ba5507514a3da73bf6dbd722e8f14',
+        'easy': 'beb9567926e735b1d1714f34bd49502834e521a288fb7fdb9e1e3bc7bb589726',
+        'intermediate': '6ed96e15177fd4310d6e520730b21b94d0b6b760850dd05f56d52e8fa7ea9742',
         'advanced': 'cc4e0aef1b461dbc12441fea358615bf6b3d24b02967ff1f83ff9fd0c8a0635f',
         'full': '0092b7a262e47bfc32d80777438cc960a4753b9a666380d49cf84a1216c6f987',
     },
 }
-# sha256 of the module's output for the pedalled sources; beginner's and easy's are the script's.
+# sha256 of the module's output for the pedalled sources.
 PEDALLED: dict[str, dict[str, str]] = {
     'song 1': {
-        'beginner': 'cbda5a014d98936c7c1a0e1f5a037260e65e26dcb9de511bcf03f3218626e332',
-        'easy': 'b6332683ede09fc15e85b0a0ad0a4950208c7ab3be3a21d5f5d99ffa15b57eba',
-        'intermediate': 'b59de222d4b5769151d6569d4288fabf02acbe9d433930b5b6f8482622bbc9d5',
+        'beginner': '6dc72d3983d85f31612d83c0b23424205141635c0f628b0dde22e5ba87b164f2',
+        'easy': '0605c830c717181bd80e5a6bce97ef047a0eba46439833232d64ad5d2dc3c8dc',
+        'intermediate': 'b8fa09914c3d50198bffd2fcf25e133fd240b87d69d772ec72174f61fdf4f71e',
         'advanced': 'f79465554a9cd9115d8eeab887ffa4a1c87f04e618dff7fa291f2032375b5eb6',
         'full': '63a5ab340177f43cde5306cb7c4b641f4af6ea9d77f8f1d03498423433690654',
     },
     'song 2 without a bass part': {
-        'beginner': '62350631c2223bd1ace6e527ae15ed7af6d3d35aa48eeb4fd31e1ec94a57fd0c',
-        'easy': '8699a5ad4c75e2e075779f349940bf4c0847b02163f611f2d65e353dc7d6f373',
-        'intermediate': '9089c75ecbcb81b6ca1f302147e7f75bb37af3770505f5afd7fbff53b9a3d4d4',
+        'beginner': '44a5bcfc6c37cb3cd1873c485f2edde08a35306c4c726336b2e4e02d06643233',
+        'easy': '0460637ca6f3366014d0114521854a9e639a55332d3a38fcdddd84e7945c0c7b',
+        'intermediate': 'd40de6142ab158793b3f382360521e675f956261966eda1871e9ae18f3bfe1ff',
         'advanced': '77f6e1f0cace0d1e34eb8ccde1c5ac8963ee794373f3718c90d9112551c56f08',
         'full': 'e3fd23cb3b5e57a42efea0ccdb2f910f051d6095e6887534c7d6b77410549d34',
     },
     'song 3 of type 0': {
-        'beginner': '0864238102411f03bff540cae796de9c494008620abf0416bd138a65a1d496cb',
-        'easy': '28953057cfdc3e9839c3eddad3da402a7361944cdbcf917790260289629501d8',
-        'intermediate': 'ebd1bd398fe556fc156ea53c0f2dabf87d16a87a86faa143d821e2cdcd007542',
+        'beginner': '673f2eb3c3753ffa59344439188f47ddb19ba5507514a3da73bf6dbd722e8f14',
+        'easy': '451d5479f1285a15b1db2ee0127eb524457d76949cf15f0bbf21845ee0aa88bb',
+        'intermediate': 'becaaf7dec18f29b5921d3742d0862243ed85b5078eb21257265a1fcb6a50ceb',
         'advanced': '2698de14d1060b00ef2bee7985b9ba4b5fcb41e3638c37cc99fd2610fb5e5e09',
         'full': '6988cb2ca8739241728cfd87d9ca4b3bd3cf0977399f39a054e4bf3bfa6dfc16',
     },
@@ -600,7 +654,7 @@ def digest(data: bytes) -> str:
 
 
 @pytest.mark.parametrize("source", list(GOLDEN_SOURCES))
-def test_every_level_is_byte_identical_to_the_script(source):
+def test_every_level_keeps_its_digest(source):
     data = GOLDEN_SOURCES[source]()
     made = m2p.all_levels(data)
     assert list(made) == list(m2p.LEVELS)
@@ -617,15 +671,15 @@ def test_a_pedalled_source_keeps_its_digests(source):
 
 
 @pytest.mark.skipif(not os.environ.get("PIANO_LEVELS_REFERENCE"), reason="PIANO_LEVELS_REFERENCE is not set")
-@pytest.mark.parametrize("source", list(GOLDEN_SOURCES) + list(PEDALLED_SOURCES))
+@pytest.mark.parametrize("source", list(GOLDEN_SOURCES))
 def test_the_reference_script_gives_the_same_bytes(source):
     spec = importlib.util.spec_from_file_location("multitrack_to_piano_reference", os.environ["PIANO_LEVELS_REFERENCE"])
     reference = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = reference
     spec.loader.exec_module(reference)
-    data = {**GOLDEN_SOURCES, **PEDALLED_SOURCES}[source]()
+    data = GOLDEN_SOURCES[source]()
     made = m2p.all_levels(data)
-    for level in m2p.LEVELS if source in GOLDEN_SOURCES else SCRIPT_LEVELS_WITH_PEDAL:
+    for level in SCRIPT_LEVELS:
         assert reference.convert(data, reference.Options(level=level)) == made[level], level
 
 

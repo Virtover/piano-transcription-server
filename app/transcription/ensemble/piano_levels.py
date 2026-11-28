@@ -4,24 +4,27 @@
     python -m app.transcription.ensemble.piano_levels ensemble.mid --all-levels out/  # out/<source> - piano <level>.mid
 
 Levels, from a tune and its bass to every note:
-    beginner      the melody in the right hand, one note at a time, at most one attack a beat; single bass notes
-                  on strong beats and chord changes in the left; narrow ranges, no wide leaps
-    easy          melody, bass, and up to two chord notes; attacks at most every half beat
+    beginner      the melody in the right hand, one note at a time, at most one attack a half beat, a repeated note
+                  tied; single bass notes on strong beats and chord changes in the left; narrow ranges, no leap
+                  wider than an octave
+    easy          melody, bass, and up to two chord notes; melody attacks at most every third of a beat, chords
+                  every half beat
     intermediate  melody, bass, and three-note chords between the hands; sixteenth-note rhythm
     advanced      fuller chords (five notes), octave bass and open voicings in the left hand; thirty-second rhythm
     full          every pitched note of every part, arranged for the piano's sound rather than for two hands:
                   folded into the keyboard, unisons merged, voices balanced, low mud cleared, and pedalled
 
-Melody (the most lead-like part per 4 beats), bass, and chords from the other parts, reduced to two hands within the
-level's limits. Drums and effects are dropped; timing (every note starts on a source note's tick) and the tempo map
+Melody (the most lead-like part per 4 beats, a voice first), bass, and chords from the other parts, reduced to two
+hands within the level's limits. Drums and effects are dropped; timing (every note starts on a source note's tick) and the tempo map
 are kept exactly, and the piano version lasts exactly as long as the source.
 
-The standalone script multitrack_to_piano.py, brought into the server: for the same input without a sustain pedal of its
-own (every ensemble result), every level's file is byte-identical to the script's (tests/test_piano_levels.py keeps it
-so). A source with its own pedal, as a piano transcription, differs on purpose: full, advanced, and intermediate keep
-that pedal on both hands' channels, with the notes it held at their written lengths (full writes no pedal of its own
-then), where the script lengthens them to where the pedal lifts; beginner and easy are still the script's. What differs is speed, not output: the file is
-read once and its analysis (parts, roles, the melody's path) shared by the levels (all_levels); MIDI bytes are read and
+The standalone script multitrack_to_piano.py, brought into the server, then improved for the lower levels' melody
+(2026-11-28): where those thin the tune, a new pitch outweighs the beat, and a level's gap allows for transcribed
+timing drift; a voice is preferred while it sings; and a piano part's tune is its top line as heard, without the
+accompaniment struck under a held tune note. The levels' digests are the module's own since then
+(tests/test_piano_levels.py). A source with its own pedal, as a piano transcription: full, advanced, and intermediate
+keep that pedal on both hands' channels, with the notes it held at their written lengths (full writes no pedal of its
+own then). Beside the script, the module is also fast: the file is read once and its analysis (parts, roles, the melody's path) shared by the levels (all_levels); MIDI bytes are read and
 written directly rather than through mido's message objects; and no step is quadratic in the number of notes. Only
 mido and the standard library: no torch, no GPU, and nothing of the server's settings.
 """
@@ -67,6 +70,13 @@ FULL_SPLIT_RANGE = (52, 68)
 # A harmony shorter than this many beats is not pedalled; one with more melody attacks a beat than this neither.
 PEDAL_MIN_BEATS = 1
 PEDAL_MAX_MELODY_RATE = 4
+# A part sounding at least this many notes at once on average (a pianist's two hands) has its tune found as heard:
+# attacks under a held higher note are its accompaniment. A sung or blown line's overlaps are its own legato.
+SKYLINE_POLYPHONY = 3.0
+# A gap between attacks this much short of a level's still counts as the level's (transcribed timing drifts)
+GAP_TOLERANCE = 0.15
+# A lower attack under a melody note still held this long after it is accompaniment, not the tune
+HELD_SECONDS = 0.12
 
 
 class Note(NamedTuple):
@@ -108,6 +118,7 @@ class Level:
     hand_span: int                      # how far one hand reaches at once
     max_leap: int | None = None         # a wider melody leap is folded by octaves
     legato: float = 0.0                 # a shorter rest before a line's next note is filled
+    merge_repeats: float = 0.0          # a melody note repeating the one before within this many beats is tied to it
     left_extra: int = 0                 # chord notes the left hand may add above the bass (a fifth, a tenth)
     octave_bass: bool = False           # long bass notes on strong beats doubled an octave below
     doubling: bool = False              # chord tones doubled in another octave while the right hand has room
@@ -118,10 +129,10 @@ class Level:
 
 LEVELS: dict[str, Level] = {level.name: level for level in (
     Level("beginner", chord_notes=0, right_hand_notes=1, left_hand_notes=1,
-          melody_gap=1, bass_gap=2, chord_gap=1, melody_range=(60, 79), melody_center=(62, 74),
-          bass_range=(40, 57), hand_span=12, max_leap=9, legato=1),
+          melody_gap=0.5, bass_gap=2, chord_gap=1, melody_range=(57, 81), melody_center=(62, 74),
+          bass_range=(40, 57), hand_span=12, max_leap=12, legato=1, merge_repeats=0.5),
     Level("easy", chord_notes=2, right_hand_notes=2, left_hand_notes=2,
-          melody_gap=0.5, bass_gap=1, chord_gap=0.5, melody_range=(57, 84), melody_center=(60, 79),
+          melody_gap=1 / 3, bass_gap=1, chord_gap=0.5, melody_range=(55, 84), melody_center=(60, 79),
           bass_range=(36, 55), hand_span=12, max_leap=12, legato=0.5),
     Level("intermediate", chord_notes=3, right_hand_notes=4, left_hand_notes=3,
           melody_gap=0.25, bass_gap=0.25, chord_gap=0.25, melody_range=(55, 91), melody_center=(60, 84),
@@ -225,7 +236,7 @@ def is_bass_program(program: int) -> bool:
 def melody_prior(program: int) -> float:
     """How likely an instrument is to carry the tune, from its General MIDI program."""
     if 52 <= program <= 54:
-        return 1.0                                  # voices
+        return 1.5                                  # voices: when they sing, they sing the tune
     if 80 <= program <= 87:
         return 0.9                                  # synth leads
     if 56 <= program <= 79 or program in (104, 105, 106, 107, 109, 110, 111):
@@ -309,6 +320,28 @@ def top_line(notes: list[Note]) -> list[Note]:
     return _monophonic([max(group, key=lambda n: (n.pitch, n.velocity)) for group in _clusters(notes)])
 
 
+def _release(note: Note) -> float:
+    """When a note's key is let go, in seconds: its written end where a pedal held it on."""
+    if not note.written:
+        return note.offset
+    share = (note.written - note.start) / max(1, note.end - note.start)
+    return note.onset + share * (note.offset - note.onset)
+
+
+def skyline(notes: list[Note]) -> list[Note]:
+    """The top line as heard: each attack's highest note, unless the line's note before, higher, is still held (by
+    the finger, not the pedal) well past it; then the attack is accompaniment under a held tune note."""
+    out: list[Note] = []
+    for group in _clusters(notes):
+        top = max(group, key=lambda n: (n.pitch, n.velocity))
+        # struck clearly louder than the held note, it is the tune moving under it
+        if out and top.pitch < out[-1].pitch and _release(out[-1]) - top.onset > HELD_SECONDS \
+                and top.velocity <= out[-1].velocity + 8:
+            continue
+        out.append(top)
+    return _monophonic(out)
+
+
 def bottom_line(notes: list[Note]) -> list[Note]:
     return _monophonic([min(group, key=lambda n: (n.pitch, -n.velocity)) for group in _clusters(notes)])
 
@@ -336,7 +369,7 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def _thin(line: list[Note], gap: int, meter: Meter) -> list[Note]:
+def _thin(line: list[Note], gap: int, meter: Meter, melodic: bool = False) -> list[Note]:
     """A monophonic line with at most one attack per gap ticks: the notes, spaced at least gap apart, of the greatest
     total weight (a weighted interval schedule). A note weighs more on a strong beat, the longer and louder it is, and
     when it changes pitch (a new harmony under a bass, a new step of a tune); each kept note lasts over the notes
@@ -345,11 +378,23 @@ def _thin(line: list[Note], gap: int, meter: Meter) -> list[Note]:
         return line
     tpb = meter.ticks_per_beat
     starts = [n.start for n in line]
+    gap = max(1, round(gap * (1 - GAP_TOLERANCE)))
     weights = []
     for i, n in enumerate(line):
-        weight = 1.0 + 0.25 * meter.strength(n.start) + 0.2 * min((n.end - n.start) / tpb, 2.0) + 0.3 * n.velocity / 127
-        if i == 0 or line[i - 1].pitch != n.pitch:
-            weight += 0.5
+        if melodic:
+            # a tune is its steps: a new pitch weighs most, the beat less (sung lines are syncopated), length some
+            weight = 1.0 + 0.12 * meter.strength(n.start) + 0.3 * min((n.end - n.start) / tpb, 2.0) \
+                + 0.3 * n.velocity / 127
+            if i == 0 or line[i - 1].pitch != n.pitch:
+                weight += 1.0
+            if 0 < i < len(line) - 1 and line[i - 1].pitch == line[i + 1].pitch != n.pitch \
+                    and n.end - n.start < tpb / 4:
+                weight -= 0.6          # a quick neighbour note around one pitch: an ornament
+        else:
+            weight = 1.0 + 0.25 * meter.strength(n.start) + 0.2 * min((n.end - n.start) / tpb, 2.0) \
+                + 0.3 * n.velocity / 127
+            if i == 0 or line[i - 1].pitch != n.pitch:
+                weight += 0.5
         weights.append(weight)
     best = [0.0] * (len(line) + 1)
     take = [False] * len(line)
@@ -397,12 +442,28 @@ def _fold_line(line: list[Note], low: int, high: int, max_leap: int | None) -> l
     return out
 
 
+def _merge_repeats(line: list[Note], within: int) -> list[Note]:
+    """A monophonic line with each note that repeats the one before, starting within ticks of it (and the drift a gap
+    allows), tied into it."""
+    within = round(within * (1 + GAP_TOLERANCE))
+    out: list[Note] = []
+    for n in line:
+        if out and out[-1].pitch == n.pitch and n.start - out[-1].start <= within:
+            out[-1] = out[-1]._replace(end=max(out[-1].end, n.end), offset=max(out[-1].offset, n.offset))
+            continue
+        out.append(n)
+    return out
+
+
 def _shape_line(line: list[Note], gap_beats: float, pitch_range: tuple[int, int], max_leap: int | None,
-                legato_beats: float, meter: Meter, role: str) -> list[Note]:
+                legato_beats: float, meter: Meter, role: str, merge_beats: float = 0.0) -> list[Note]:
     """A melody or bass line within a level: thinned to its rhythm, folded into its range, rests shorter than
     legato filled."""
     tpb = meter.ticks_per_beat
-    line = _fold_line(_thin(_monophonic(line), round(gap_beats * tpb), meter), *pitch_range, max_leap)
+    line = _monophonic(line)
+    if merge_beats > 0:
+        line = _merge_repeats(line, round(merge_beats * tpb))
+    line = _fold_line(_thin(line, round(gap_beats * tpb), meter, melodic=role == "melody"), *pitch_range, max_leap)
     legato = round(legato_beats * tpb)
     out = []
     for i, n in enumerate(line):
@@ -435,7 +496,8 @@ def _normalized(parts: list[Part]) -> list[Part]:
 def _melody_line(part: Part) -> list[Note]:
     """A part's top line without its specks, and without the low notes that show through its rests (a pianist's
     left hand under a silent right): those more than an octave under the line's median, below middle C's fifth."""
-    line = top_line([n for n in part.notes if n.offset - n.onset >= MIN_MELODY_SECONDS])
+    notes = [n for n in part.notes if n.offset - n.onset >= MIN_MELODY_SECONDS]
+    line = skyline(notes) if _polyphony(part.notes) >= SKYLINE_POLYPHONY else top_line(notes)
     if not line:
         return []
     floor = min(55, statistics.median(n.pitch for n in line) - 12)
@@ -680,7 +742,8 @@ def _reduce(song: _Song, melody: list[Note], level: Level) -> Hands:
     bass_source = song.bass_source(level.melody_center)
     # every note of the source lines is spoken for, also those the level's rhythm leaves out: none returns as a chord
     used = {n.key for n in melody} | {n.key for n in bass_source}
-    melody = _shape_line(melody, level.melody_gap, level.melody_range, level.max_leap, level.legato, meter, "melody")
+    melody = _shape_line(melody, level.melody_gap, level.melody_range, level.max_leap, level.legato, meter, "melody",
+                         level.merge_repeats)
     bass_line = _shape_line(bass_source, level.bass_gap, level.bass_range, None, level.legato, meter, "bass")
 
     weights = song.weights()
